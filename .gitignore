@@ -11,6 +11,8 @@ node_modules/
 frontend/dist/
 frontend/test-results/
 frontend/playwright-report/
+frontend/*.tsbuildinfo
+frontend/**/*.tsbuildinfo
 
 # Project-root test artifacts (Playwright leaves traces here too)
 test-results/
@@ -18,8 +20,9 @@ test-results/
 # Live database (CI uses tests/fixtures/case-workbench.test.db instead)
 case-workbench.db
 
-# Backend test artifacts (none today, reserved)
+# Backend test artifacts
 backend/.pytest_cache/
+.pytest_cache/
 
 # Editor / OS
 .DS_Store
