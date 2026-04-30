@@ -10,6 +10,12 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Run JavaScript actions (checkout/setup-node/setup-python/upload-artifact) on
+# Node.js 24 ahead of GitHub's June 2026 default switch. Silences the
+# "Node.js 20 actions are deprecated" warning.
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   backend-tests:
     name: Backend pytest
