@@ -1,0 +1,103 @@
+{
+  "header": {
+    "backLink": "返回案例列表",
+    "categoryLabel": "类别",
+    "templateLabel": "模板",
+    "v3Tooltip": "该 case 已通过 case-layout-board 升级到 v3 判读"
+  },
+  "buttons": {
+    "rescan": "重新判读",
+    "rescanning": "重新判读中…",
+    "rescanTooltip": "重新读取该目录的文件名 + 重新判读分类（不依赖全库扫描）",
+    "upgradeTov3": "升级到 v3",
+    "upgrading": "升级中…",
+    "upgradeTooltip": "调用 case-layout-board 跑 MediaPipe 真值判读（5-30s，结果可撤销）",
+    "render": "正式出图",
+    "enqueuing": "入队中…",
+    "renderTooltip": "调用 case-layout-board 渲染正式品牌版（{{brand}}，2-30s，结果可撤销）",
+    "evaluate": "评估",
+    "evaluateTooltip": "对该案例做轻量审核（通过/需重审/打回 + 评语）",
+    "revisions": "近期变更",
+    "revisionsTooltip": "查看该 case 的最近 20 条变更，可在 30 秒撤销窗口外补撤销",
+    "copyPath": "复制路径",
+    "copied": "已复制",
+    "back": "返回"
+  },
+  "hold": {
+    "status": "已挂起",
+    "until": "· 直至",
+    "cancel": "取消挂起"
+  },
+  "images": {
+    "title": "源图",
+    "preOp": "术前",
+    "postOp": "术后",
+    "unlabeled": "未标注",
+    "groupPreOp": "术前 (auto-detected)",
+    "groupPostOp": "术后 (auto-detected)",
+    "groupUnlabeled": "未标注",
+    "empty": "该案例目录没有图片"
+  },
+  "edit": {
+    "cardTitle": "手动编辑层",
+    "hasOverride": "有覆盖",
+    "editButton": "编辑",
+    "markReviewed": "标记已审核",
+    "needsRecheck": "需复检",
+    "hold": "挂起",
+    "holdTooltip": "先放一放，从工作队列中暂时隐藏",
+    "cancel": "取消",
+    "clearOverride": "清除手动覆盖",
+    "save": "保存覆盖",
+    "saving": "保存中…",
+    "modeWarning": "当前处于编辑模式 · 修改将立即覆盖自动判读结果",
+    "categoryLabel": "覆盖类别",
+    "templateLabel": "覆盖模板",
+    "followAuto": "— 跟随自动判读 —",
+    "noOverride": "未覆盖",
+    "notesLabel": "备注",
+    "notesPlaceholder": "对这个案例的人工备注…",
+    "tagsLabel": "标签",
+    "tagsPlaceholder": "例如：精选, 待复拍侧面",
+    "blockingLabel": "追加阻塞"
+  },
+  "customer": {
+    "cardTitle": "客户绑定",
+    "bound": "已绑定",
+    "unbound": "未绑定",
+    "rawName": "原始名",
+    "rawNameUnbound": "原始客户名",
+    "noName": "(无客户名)",
+    "candidatesIntro": " · 候选合并：",
+    "caseCountSuffix": " · {{n}} 案例",
+    "similarity": "相似度 {{similarity}}%",
+    "knownAlias": "已知 alias",
+    "resolving": "解析候选中…",
+    "createAndBind": "新建客户并绑定"
+  },
+  "diagnostics": {
+    "cardTitle": "诊断",
+    "blockingCount": " · 阻塞 {{count}}",
+    "warningCount": " · 提示 {{count}}",
+    "suggestionPrefix": "建议：",
+    "affectedFiles": "影响文件：",
+    "highlightTooltip": "点击在源图区高亮",
+    "manual": "人工添加",
+    "auto": "auto",
+    "blockingSection": "阻塞 · {{count}}",
+    "warningSection": "提示 · {{count}}"
+  },
+  "rename": {
+    "cardTitle": "重命名建议",
+    "copyAll": "复制全部",
+    "copied": "已复制",
+    "affectsLabel": "将影响",
+    "disclaimerSuffix": "个文件 · ",
+    "wontModify": "不会真改",
+    "templateOnly": "，仅提供命令模板"
+  },
+  "dialogs": {
+    "holdPrompt": "挂起这个案例 · 写一句为什么先放一放（例如：等客户补图）",
+    "holdDefault": "暂不处理"
+  }
+}

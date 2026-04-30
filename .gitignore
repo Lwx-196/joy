@@ -1,0 +1,38 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Node
+node_modules/
+
+# Frontend build / test artifacts
+frontend/dist/
+frontend/test-results/
+frontend/playwright-report/
+
+# Project-root test artifacts (Playwright leaves traces here too)
+test-results/
+
+# Live database (CI uses tests/fixtures/case-workbench.test.db instead)
+case-workbench.db
+
+# Backend test artifacts (none today, reserved)
+backend/.pytest_cache/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Logs
+*.log
+
+# Local Claude Code project metadata
+.claude/
+
+# Allowlist fixture DB (override case-workbench.db ignore)
+!tests/fixtures/case-workbench.test.db

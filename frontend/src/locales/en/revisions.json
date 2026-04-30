@@ -1,0 +1,36 @@
+{
+  "title": "Recent Changes",
+  "subtitle": "Secondary undo entry beyond the 30s window · max 20 entries",
+  "close": "Close",
+  "closeTitle": "Close (Esc)",
+  "loading": "Loading…",
+  "loadError": "Load failed",
+  "empty": "No change records",
+  "op": {
+    "patch": "Edit",
+    "batch": "Batch edit",
+    "rescan": "Rescan",
+    "merge_customer": "Bind customer",
+    "rename": "Rename",
+    "upgrade": "Upgrade to v3",
+    "render": "Final render",
+    "undo": "Undo",
+    "undo_render": "Undo render",
+    "evaluate": "Evaluate",
+    "undo_evaluate": "Undo evaluation",
+    "restore_render": "Restore render snapshot"
+  },
+  "rel": {
+    "justNow": "just now",
+    "secAgo": "{{n}}s ago",
+    "minAgo": "{{n}}m ago",
+    "hrAgo": "{{n}}h ago",
+    "dayAgo": "{{n}}d ago"
+  },
+  "undoBtn": "Undo",
+  "undoBtnLoading": "…",
+  "undoBtnTitle": "Undo this change (POST /api/cases/{{caseId}}/{{path}})",
+  "undonePill": "Undone",
+  "undoMarker": "Undo record",
+  "moreFields": "+ {{n}} more fields…"
+}

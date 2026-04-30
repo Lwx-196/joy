@@ -1,0 +1,51 @@
+{
+  "title": "客户字典管理",
+  "subtitle": "把目录里的原始客户名规整为 canonical 客户 · 字典是案例 ↔ 客户绑定的唯一来源",
+  "banner": {
+    "title": "未绑定 {{cases}} 个案例 / {{groups}} 个原始客户名",
+    "subtitle": "这些案例不会出现在「客户列表」/「单客户详情」中，也无法用客户维度的工作流。建议尽快规整。",
+    "refreshing": "刷新中…",
+    "rematch": "重新匹配",
+    "newCustomer": "新建客户"
+  },
+  "create": {
+    "title": "新建客户",
+    "canonical": "Canonical Name",
+    "aliases": "别名（每行一个，可留空）",
+    "submit": "创建（不绑定案例）",
+    "cancel": "取消"
+  },
+  "filter": {
+    "placeholder": "原始名 / canonical 候选",
+    "decisionLabel": "决策：",
+    "all": "全部",
+    "matched": "已有命中",
+    "candidates": "多个候选",
+    "new": "建议新建",
+    "bulkLabel": "批量：",
+    "applying": "应用中…",
+    "applyBulk": "应用 {{n}} 条 86%+ 的命中"
+  },
+  "empty": {
+    "loading": "加载中…",
+    "allBound": "🎉 所有案例都已绑定客户"
+  },
+  "footer": "字典操作不会修改磁盘目录名 · 仅更新 SQLite 中的 canonical 映射 · 重命名建议见各案例详情页",
+  "card": {
+    "caseSuffix": "案例",
+    "candidateCountSuffix": "个候选",
+    "decisionMatched": "已有命中",
+    "decisionNewSuggest": "建议新建",
+    "regularized": "规整后",
+    "pickCandidate": "请在下方候选中选择",
+    "needCreate": "没有候选 — 需新建客户「{{name}}」",
+    "candidatesSection": "候选 · {{n}}",
+    "candidateCases": "· {{n}} 案例",
+    "actionMatchedConfirm": "确认绑定到「{{name}}」",
+    "actionMatchedBusy": "处理中…",
+    "actionPickAbove": "请在上方选择候选",
+    "actionCreateBind": "新建并绑定 {{n}} 案例",
+    "manualPickShow": "手动选择已有客户",
+    "manualPickHide": "收起"
+  }
+}

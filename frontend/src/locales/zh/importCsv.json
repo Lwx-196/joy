@@ -1,0 +1,30 @@
+{
+  "title": "从 CSV 导入批次",
+  "subtitle": "粘贴 case_id 列表，校验后批量入队 render 任务（单批最多 {{max}} 条）",
+  "close": "关闭",
+  "closeHint": "关闭 (Esc)",
+  "brand": "品牌",
+  "template": "模板",
+  "semanticJudge": "语义判读",
+  "semantic": {
+    "off": "关闭",
+    "auto": "自动"
+  },
+  "csvLabel": "CSV 内容",
+  "csvPlaceholder": "case_id\n126\n127\n128",
+  "csvHelp": "每行一个 case_id；首行如全为字母可识别为表头自动跳过；# 开头为注释。品牌/模板/语义判读使用上方设置，整批统一。",
+  "parseErrorsTitle": "{{n}} 行无法解析（已自动跳过）",
+  "parseErrorLine": "第 {{line}} 行: {{raw}}",
+  "more": "另有 {{n}} 条",
+  "overLimit": "已解析 {{n}} 条，超过单批上限 {{max}}，请拆分后重试",
+  "previewTitle": "校验完成 — 有效 {{valid}} 条 / 无效 {{invalid}} 条",
+  "reason": {
+    "case_not_found": "案例不存在",
+    "duplicate_in_batch": "本批次内重复"
+  },
+  "cancel": "取消",
+  "validate": "校验 ({{n}})",
+  "validating": "校验中…",
+  "confirm": "确认入队 ({{n}})",
+  "enqueuing": "入队中…"
+}

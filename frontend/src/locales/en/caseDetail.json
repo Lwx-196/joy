@@ -1,0 +1,103 @@
+{
+  "header": {
+    "backLink": "Back to cases",
+    "categoryLabel": "Category",
+    "templateLabel": "Template",
+    "v3Tooltip": "This case has been upgraded to v3 via case-layout-board"
+  },
+  "buttons": {
+    "rescan": "Rescan",
+    "rescanning": "Rescanning…",
+    "rescanTooltip": "Re-read filenames + re-classify (no full library scan)",
+    "upgradeTov3": "Upgrade to v3",
+    "upgrading": "Upgrading…",
+    "upgradeTooltip": "Run case-layout-board MediaPipe analysis (5-30s, reversible)",
+    "render": "Render",
+    "enqueuing": "Enqueuing…",
+    "renderTooltip": "Run case-layout-board render for {{brand}} (2-30s, reversible)",
+    "evaluate": "Evaluate",
+    "evaluateTooltip": "Lightweight review (pass / recheck / reject + comment)",
+    "revisions": "Recent changes",
+    "revisionsTooltip": "View 20 most recent changes; supports late undo beyond the 30s window",
+    "copyPath": "Copy path",
+    "copied": "Copied",
+    "back": "Back"
+  },
+  "hold": {
+    "status": "On hold",
+    "until": "· until",
+    "cancel": "Unhold"
+  },
+  "images": {
+    "title": "Source images",
+    "preOp": "Pre-op",
+    "postOp": "Post-op",
+    "unlabeled": "Unlabeled",
+    "groupPreOp": "Pre-op (auto-detected)",
+    "groupPostOp": "Post-op (auto-detected)",
+    "groupUnlabeled": "Unlabeled",
+    "empty": "No images in this case directory"
+  },
+  "edit": {
+    "cardTitle": "Manual edit layer",
+    "hasOverride": "Has override",
+    "editButton": "Edit",
+    "markReviewed": "Mark reviewed",
+    "needsRecheck": "Needs recheck",
+    "hold": "Hold",
+    "holdTooltip": "Set aside, hide from work queue",
+    "cancel": "Cancel",
+    "clearOverride": "Clear override",
+    "save": "Save override",
+    "saving": "Saving…",
+    "modeWarning": "Edit mode · changes will immediately override auto results",
+    "categoryLabel": "Override category",
+    "templateLabel": "Override template",
+    "followAuto": "— follow auto —",
+    "noOverride": "No override",
+    "notesLabel": "Notes",
+    "notesPlaceholder": "Manual notes for this case…",
+    "tagsLabel": "Tags",
+    "tagsPlaceholder": "e.g. featured, retake-side",
+    "blockingLabel": "Extra blocking"
+  },
+  "customer": {
+    "cardTitle": "Customer binding",
+    "bound": "Bound",
+    "unbound": "Unbound",
+    "rawName": "Raw name",
+    "rawNameUnbound": "Raw customer name",
+    "noName": "(no customer name)",
+    "candidatesIntro": " · Merge candidates:",
+    "caseCountSuffix": " · {{n}} cases",
+    "similarity": "Similarity {{similarity}}%",
+    "knownAlias": "Known alias",
+    "resolving": "Resolving candidates…",
+    "createAndBind": "Create new customer and bind"
+  },
+  "diagnostics": {
+    "cardTitle": "Diagnostics",
+    "blockingCount": " · Blocking {{count}}",
+    "warningCount": " · Warnings {{count}}",
+    "suggestionPrefix": "Suggestion: ",
+    "affectedFiles": "Affected files:",
+    "highlightTooltip": "Click to highlight in source images",
+    "manual": "Manual",
+    "auto": "auto",
+    "blockingSection": "Blocking · {{count}}",
+    "warningSection": "Warnings · {{count}}"
+  },
+  "rename": {
+    "cardTitle": "Rename suggestion",
+    "copyAll": "Copy all",
+    "copied": "Copied",
+    "affectsLabel": "Will affect",
+    "disclaimerSuffix": "files · ",
+    "wontModify": "won't actually rename",
+    "templateOnly": ", command template only"
+  },
+  "dialogs": {
+    "holdPrompt": "Hold this case · write why (e.g., waiting for customer photos)",
+    "holdDefault": "Set aside"
+  }
+}

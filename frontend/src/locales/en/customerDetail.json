@@ -1,0 +1,39 @@
+{
+  "breadcrumb": "Customer list",
+  "edit": "Edit",
+  "caseSuffix": "cases",
+  "aliasesPlaceholder": "Aliases (one per line)",
+  "notesPlaceholder": "Notes",
+  "save": "Save",
+  "saving": "Saving…",
+  "cancel": "Cancel",
+  "aliasesEmpty": "None",
+  "noNotes": "No notes",
+  "stats": {
+    "first": "First",
+    "last": "Latest",
+    "span": "Span",
+    "blocking": "Blocking",
+    "blockingCount": "{{n}}",
+    "blockingNone": "None",
+    "spanLessMonth": "<1 month",
+    "spanMonths": "{{n}} months"
+  },
+  "noCases": "This customer has no cases bound yet",
+  "group": {
+    "caseCount": "{{n}} cases",
+    "reviewed": "Reviewed {{r}} / {{total}}",
+    "filterLink": "Filter in case list"
+  },
+  "table": {
+    "caseDir": "Case directory",
+    "template": "Template",
+    "source": "Source",
+    "blocking": "Blocking",
+    "reviewStatus": "Review status",
+    "lastModified": "Last modified",
+    "manualOverride": "Manually overridden",
+    "openCase": "Open case #{{id}}",
+    "openColumn": "Actions"
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "title": "键盘快捷键",
+  "close": "关闭",
+  "closeHint": "关闭 (Esc)",
+  "scope": {
+    "global": "全局",
+    "navigation": "导航",
+    "cases": "案例列表",
+    "caseDetail": "案例详情"
+  },
+  "labels": {
+    "showHelp": "显示快捷键面板",
+    "closeOverlay": "关闭弹窗 / 抽屉",
+    "focusSearch": "聚焦顶部搜索",
+    "gotoDashboard": "跳到 总览",
+    "gotoCases": "跳到 案例",
+    "gotoCustomers": "跳到 客户",
+    "gotoEvaluations": "跳到 评估台",
+    "gotoDict": "跳到 客户字典",
+    "casesNext": "下一行",
+    "casesPrev": "上一行",
+    "casesFirst": "跳到首行",
+    "casesLast": "跳到末行",
+    "casesOpen": "打开当前行详情",
+    "casesToggle": "勾选 / 取消勾选当前行",
+    "caseDetailHistory": "打开渲染历史"
+  }
+}

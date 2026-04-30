@@ -1,0 +1,51 @@
+{
+  "title": "Customer Dictionary",
+  "subtitle": "Normalize raw customer names from directory paths into canonical customers · the dictionary is the single source of truth for case ↔ customer binding",
+  "banner": {
+    "title": "{{cases}} unbound cases / {{groups}} raw names",
+    "subtitle": "These cases won't appear in 'Customers' / 'Customer Detail' and can't use customer-level workflows. Normalize them soon.",
+    "refreshing": "Refreshing…",
+    "rematch": "Rematch",
+    "newCustomer": "New customer"
+  },
+  "create": {
+    "title": "New customer",
+    "canonical": "Canonical Name",
+    "aliases": "Aliases (one per line, optional)",
+    "submit": "Create (no binding)",
+    "cancel": "Cancel"
+  },
+  "filter": {
+    "placeholder": "raw name / canonical candidate",
+    "decisionLabel": "Decision:",
+    "all": "All",
+    "matched": "Matched",
+    "candidates": "Multiple candidates",
+    "new": "Suggest new",
+    "bulkLabel": "Bulk:",
+    "applying": "Applying…",
+    "applyBulk": "Apply {{n}} matches with 86%+ confidence"
+  },
+  "empty": {
+    "loading": "Loading…",
+    "allBound": "🎉 All cases bound to customers"
+  },
+  "footer": "Dictionary changes don't rename disk directories · only updates the canonical mapping in SQLite · rename suggestions live on each case detail page",
+  "card": {
+    "caseSuffix": "cases",
+    "candidateCountSuffix": "candidates",
+    "decisionMatched": "Matched",
+    "decisionNewSuggest": "Suggest new",
+    "regularized": "Normalized",
+    "pickCandidate": "Pick a candidate below",
+    "needCreate": "No candidates — create new customer '{{name}}'",
+    "candidatesSection": "Candidates · {{n}}",
+    "candidateCases": "· {{n}} cases",
+    "actionMatchedConfirm": "Confirm bind to '{{name}}'",
+    "actionMatchedBusy": "Processing…",
+    "actionPickAbove": "Pick a candidate above",
+    "actionCreateBind": "Create & bind {{n}} cases",
+    "manualPickShow": "Pick existing customer",
+    "manualPickHide": "Collapse"
+  }
+}

@@ -1,0 +1,35 @@
+{
+  "status": {
+    "queued": "Queued",
+    "running": "Rendering",
+    "done": "Done",
+    "failed": "Failed",
+    "cancelled": "Cancelled",
+    "undone": "Undone"
+  },
+  "title": "Final Render",
+  "empty": "No render yet. Click 'Final Render' to generate the {{brandName}} template.",
+  "brand": {
+    "shimei": "Shimei",
+    "fumei": "Fumei He Yan"
+  },
+  "elapsed": "Took {{duration}}",
+  "thumbnailTitle": "Click to view full size",
+  "skill": {
+    "label": "skill status:",
+    "block": "block",
+    "warn": "warn"
+  },
+  "actions": {
+    "cancel": "Cancel",
+    "retry": "Retry",
+    "rerender": "Re-render"
+  },
+  "messages": {
+    "unknownError": "Unknown error",
+    "cancelledHint": "Cancelled.",
+    "rerunButton": "Restart",
+    "undoneHint": "Previous render undone (output deleted).",
+    "undoLabel": "Brand-final version generated"
+  }
+}

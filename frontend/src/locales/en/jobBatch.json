@@ -1,0 +1,54 @@
+{
+  "loading": "Loading batch…",
+  "back": "Back",
+  "notFound": "Batch {{batchId}} not found",
+  "header": {
+    "render": "Batch Render",
+    "upgrade": "Batch Upgrade v3",
+    "undoNoneTitle": "No successful upgrades to undo",
+    "undoTitle": "Undo all successful v3 upgrades in this batch",
+    "undoing": "Undoing…",
+    "undoConfirm": "Confirm undo {{n}}?",
+    "undoBtn": "Undo Batch v3 Upgrade",
+    "undoFail": "Undo failed: {{message}}",
+    "undoUnknown": "Unknown error",
+    "undoneCount": "Undone {{n}}",
+    "undoneSkipped": " · Skipped {{n}} (user has new edits)",
+    "undoneErrors": " · {{n}} errors"
+  },
+  "counts": {
+    "total": "Total",
+    "queued": "Queued",
+    "running": "Running",
+    "done": "Done",
+    "failed": "Failed",
+    "cancelled": "Cancelled",
+    "undone": "Undone"
+  },
+  "table": {
+    "status": "Status",
+    "case": "Case",
+    "brandTpl": "Brand / Template",
+    "brand": "Brand",
+    "elapsed": "Elapsed",
+    "outputRender": "Output / Error",
+    "outputUpgrade": "Upgrade Summary / Error",
+    "actions": "Actions"
+  },
+  "status": {
+    "queued": "Queued",
+    "running": "Running",
+    "done": "Done",
+    "failed": "Failed",
+    "cancelled": "Cancelled",
+    "undone": "Undone"
+  },
+  "row": {
+    "retry": "Retry",
+    "cancel": "Cancel",
+    "evaluate": "Evaluate",
+    "evaluateTitle": "Lightweight review of this render output",
+    "blocking": "Blocking {{n}}",
+    "warning": "Warning {{n}}"
+  }
+}

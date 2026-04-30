@@ -1,0 +1,39 @@
+{
+  "breadcrumb": "客户列表",
+  "edit": "编辑",
+  "caseSuffix": "案例",
+  "aliasesPlaceholder": "别名（每行一个）",
+  "notesPlaceholder": "备注",
+  "save": "保存",
+  "saving": "保存中…",
+  "cancel": "取消",
+  "aliasesEmpty": "无",
+  "noNotes": "暂无备注",
+  "stats": {
+    "first": "首次",
+    "last": "最近",
+    "span": "跨度",
+    "blocking": "阻塞",
+    "blockingCount": "{{n}} 例",
+    "blockingNone": "无",
+    "spanLessMonth": "<1 个月",
+    "spanMonths": "{{n}} 个月"
+  },
+  "noCases": "该客户尚未绑定任何案例",
+  "group": {
+    "caseCount": "{{n}} 个案例",
+    "reviewed": "已审核 {{r}} / {{total}}",
+    "filterLink": "在案例列表筛选"
+  },
+  "table": {
+    "caseDir": "案例目录",
+    "template": "模板",
+    "source": "源图",
+    "blocking": "阻塞",
+    "reviewStatus": "审核状态",
+    "lastModified": "最后修改",
+    "manualOverride": "已手动覆盖",
+    "openCase": "打开案例 #{{id}}",
+    "openColumn": "操作"
+  }
+}

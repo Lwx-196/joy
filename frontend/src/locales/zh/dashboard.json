@@ -1,0 +1,80 @@
+{
+  "title": "总览",
+  "subtitle": {
+    "prefix": "本地库 · ",
+    "totalLabel": "全库 ",
+    "totalSuffix": " 个案例",
+    "lastScanPrefix": " · 上次扫描 ",
+    "manualOverridePrefix": " · 含手动覆盖 ",
+    "manualOverrideSuffix": " 个"
+  },
+  "scan": {
+    "scanning": "扫描中…",
+    "incremental": "增量扫描",
+    "full": "全量重扫"
+  },
+  "queue": {
+    "title": "工作队列",
+    "byROI": "按 ROI 排序",
+    "lastVisit": "继续上次审核 #{{id}}",
+    "counting": "统计中…",
+    "totalCases": "共 {{n}} 个案例",
+    "batchRender": "批量出图 ({{n}})",
+    "batchRenderLimit": "批量出图 (限 {{max}})",
+    "batchRenderTitle": "对该泳道全部 {{n}} 个 case 触发正式出图（品牌：{{brand}}）",
+    "batchUpgrade": "升级 v3 ({{n}})",
+    "batchUpgradeLimit": "升级 v3 (限 {{max}})",
+    "batchUpgradeTitle": "对该泳道全部 {{n}} 个 case 跑 v3 异步升级（品牌：{{brand}}）",
+    "confirmRenderOver": "共 {{count}} 条超过单批上限 {{max}}。仅入队前 {{max}} 条？",
+    "confirmRender": "将对 {{count}} 条 case 触发批量出图（品牌：{{brand}}）。确定吗？",
+    "confirmUpgradeOver": "共 {{count}} 条超过单批上限 {{max}}。仅入队前 {{max}} 条？",
+    "confirmUpgrade": "将对 {{count}} 条 case 触发 v3 异步升级（品牌：{{brand}}）。每个 5–30s，并发 2。确定吗？"
+  },
+  "worktray": {
+    "title": "人工审核工作箱",
+    "needAttention": "需要你的注意",
+    "totalLabel": "共 ",
+    "totalSuffix": " 个案例",
+    "progressLabel": "审核进度 ",
+    "openQueue": "打开工作队列",
+    "unreviewed": "未审核",
+    "unreviewedSub": "占总量 {{pct}}% · 自动判读已完成 · 等待人工二次确认",
+    "pending": "待审核",
+    "pendingSub": "已分配但未完成",
+    "recheck": "需复检",
+    "recheckSub": "手动标记问题",
+    "reviewed": "已审核",
+    "reviewedSub": "最近 7 天 +{{n}}"
+  },
+  "byCategory": {
+    "title": "按类别分布",
+    "meta": "{{total}} 案例 · 实际生效 (manual ?? auto)",
+    "autoLabel": "判读",
+    "manualLabel": "覆盖",
+    "footer": "可能不同 · 共 {{n}} 处覆盖"
+  },
+  "byTier": {
+    "title": "按模板等级分布",
+    "meta": "交付管线候选模板",
+    "unassigned": "未分配模板 {{n}} 个"
+  },
+  "recent": {
+    "title": "最近变更案例",
+    "meta": "最近 {{n}} 条",
+    "viewAll": "查看全部",
+    "th": {
+      "indicator": "状态",
+      "caseDir": "案例目录",
+      "customer": "客户",
+      "category": "类别",
+      "template": "模板",
+      "review": "审核状态",
+      "source": "来源",
+      "changedAt": "变更时间"
+    },
+    "noCustomer": "未绑定",
+    "sourceManual": "auto + 手动",
+    "sourceAuto": "自动判读"
+  },
+  "loading": "加载中…"
+}

@@ -1,0 +1,54 @@
+{
+  "loading": "载入批次…",
+  "back": "返回",
+  "notFound": "找不到批次 {{batchId}}",
+  "header": {
+    "render": "批量出图",
+    "upgrade": "批量升级 v3",
+    "undoNoneTitle": "尚无成功完成的升级可撤销",
+    "undoTitle": "撤销本批次内所有已成功的 v3 升级",
+    "undoing": "撤销中…",
+    "undoConfirm": "确认撤销 {{n}} 条？",
+    "undoBtn": "撤销整批 v3 升级",
+    "undoFail": "撤销失败：{{message}}",
+    "undoUnknown": "未知错误",
+    "undoneCount": "已撤销 {{n}} 条",
+    "undoneSkipped": " · 跳过 {{n}} 条（用户后续有新编辑）",
+    "undoneErrors": " · 错误 {{n}} 条"
+  },
+  "counts": {
+    "total": "总数",
+    "queued": "排队",
+    "running": "处理中",
+    "done": "成功",
+    "failed": "失败",
+    "cancelled": "取消",
+    "undone": "已撤销"
+  },
+  "table": {
+    "status": "状态",
+    "case": "案例",
+    "brandTpl": "品牌 / 模板",
+    "brand": "品牌",
+    "elapsed": "耗时",
+    "outputRender": "产物 / 错误",
+    "outputUpgrade": "升级摘要 / 错误",
+    "actions": "操作"
+  },
+  "status": {
+    "queued": "排队中",
+    "running": "处理中",
+    "done": "已完成",
+    "failed": "失败",
+    "cancelled": "已取消",
+    "undone": "已撤销"
+  },
+  "row": {
+    "retry": "重试",
+    "cancel": "取消",
+    "evaluate": "评估",
+    "evaluateTitle": "对该出图产物做轻量审核",
+    "blocking": "阻塞 {{n}}",
+    "warning": "警告 {{n}}"
+  }
+}

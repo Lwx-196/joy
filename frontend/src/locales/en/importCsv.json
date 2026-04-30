@@ -1,0 +1,30 @@
+{
+  "title": "Import batch from CSV",
+  "subtitle": "Paste case_ids and validate before enqueueing (max {{max}} per batch)",
+  "close": "Close",
+  "closeHint": "Close (Esc)",
+  "brand": "Brand",
+  "template": "Template",
+  "semanticJudge": "Semantic judge",
+  "semantic": {
+    "off": "Off",
+    "auto": "Auto"
+  },
+  "csvLabel": "CSV content",
+  "csvPlaceholder": "case_id\n126\n127\n128",
+  "csvHelp": "One case_id per line; an all-letters header row is auto-skipped; lines starting with # are comments. Brand/template/semantic settings above apply uniformly to the whole batch.",
+  "parseErrorsTitle": "{{n}} line(s) skipped (parse failed)",
+  "parseErrorLine": "Line {{line}}: {{raw}}",
+  "more": "+{{n}} more",
+  "overLimit": "Parsed {{n}} ids — exceeds batch limit {{max}}; split into smaller batches",
+  "previewTitle": "Validation done — valid {{valid}} / invalid {{invalid}}",
+  "reason": {
+    "case_not_found": "case not found",
+    "duplicate_in_batch": "duplicate in batch"
+  },
+  "cancel": "Cancel",
+  "validate": "Validate ({{n}})",
+  "validating": "Validating…",
+  "confirm": "Confirm enqueue ({{n}})",
+  "enqueuing": "Enqueueing…"
+}

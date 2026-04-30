@@ -1,0 +1,23 @@
+{
+  "nav": {
+    "overview": "Overview",
+    "cases": "Cases",
+    "customers": "Customers",
+    "evaluations": "Evaluations",
+    "dict": "Customer Dictionary"
+  },
+  "brand": {
+    "title": "Case Workbench",
+    "phase": "Phase 1 · Local Index",
+    "selectorTitle": "Switch render brand (affects upgrade-to-v3 / final render)",
+    "selectorLabel": "Brand"
+  },
+  "search": {
+    "aria": "Search",
+    "placeholder": "Search customers / directories / notes"
+  },
+  "skipLink": "Skip to main content",
+  "common": {
+    "loading": "Loading…"
+  }
+}

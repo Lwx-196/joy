@@ -1,0 +1,28 @@
+{
+  "title": "Keyboard shortcuts",
+  "close": "Close",
+  "closeHint": "Close (Esc)",
+  "scope": {
+    "global": "Global",
+    "navigation": "Navigation",
+    "cases": "Cases list",
+    "caseDetail": "Case detail"
+  },
+  "labels": {
+    "showHelp": "Show shortcut panel",
+    "closeOverlay": "Close modal / drawer",
+    "focusSearch": "Focus top search",
+    "gotoDashboard": "Go to Dashboard",
+    "gotoCases": "Go to Cases",
+    "gotoCustomers": "Go to Customers",
+    "gotoEvaluations": "Go to Evaluations",
+    "gotoDict": "Go to Customer dict",
+    "casesNext": "Next row",
+    "casesPrev": "Previous row",
+    "casesFirst": "Jump to first row",
+    "casesLast": "Jump to last row",
+    "casesOpen": "Open current row's detail",
+    "casesToggle": "Toggle current row's checkbox",
+    "caseDetailHistory": "Open render history"
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "title": "Customers",
+  "subtitle": {
+    "prefix": "Normalized customers",
+    "dictLink": "Manage dictionary"
+  },
+  "search": {
+    "placeholder": "canonical / alias / notes"
+  },
+  "sort": {
+    "label": "Sort:",
+    "byCases": "Cases ↓",
+    "byName": "Name A→Z",
+    "byRecent": "Recently added"
+  },
+  "empty": {
+    "title": "No customers yet. Go to <dictLink>customer dictionary</dictLink> to bind your first customer from cases."
+  },
+  "card": {
+    "caseSuffix": "cases",
+    "noNotes": "No notes",
+    "bound": "{{count}} cases bound",
+    "detail": "Detail"
+  }
+}

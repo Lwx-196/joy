@@ -1,0 +1,343 @@
+"""Case endpoints: list, detail, files, rename-suggestion, manual edit."""
+from __future__ import annotations
+
+import json
+import shlex
+import sqlite3
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import FileResponse
+
+from .. import _upgrade_executor, audit, db, issue_translator, scanner, skill_bridge
+from ..models import CaseBatchUpdate, CaseDetail, CaseSummary, CaseUpdate
+
+router = APIRouter(prefix="/api/cases", tags=["cases"])
+
+
+def _row_to_summary(row: sqlite3.Row, customer_canonical: str | None = None) -> CaseSummary:
+    # B2: blocking_issues_json may be v1 strings or v2 objects; merge_codes handles both.
+    auto_raw = json.loads(row["blocking_issues_json"] or "[]")
+    manual_raw = json.loads(row["manual_blocking_issues_json"] or "[]") if "manual_blocking_issues_json" in row.keys() else []
+    effective_blocking = issue_translator.merge_codes([*auto_raw, *manual_raw])
+    auto_cat = row["category"]
+    auto_tier = row["template_tier"]
+    manual_cat = row["manual_category"] if "manual_category" in row.keys() else None
+    manual_tier = row["manual_template_tier"] if "manual_template_tier" in row.keys() else None
+    tags = json.loads(row["tags_json"] or "[]") if "tags_json" in row.keys() and row["tags_json"] else []
+    return CaseSummary(
+        id=row["id"],
+        abs_path=row["abs_path"],
+        customer_raw=row["customer_raw"],
+        customer_id=row["customer_id"],
+        customer_canonical=customer_canonical,
+        auto_category=auto_cat,
+        auto_template_tier=auto_tier,
+        manual_category=manual_cat,
+        manual_template_tier=manual_tier,
+        category=manual_cat or auto_cat,
+        template_tier=manual_tier or auto_tier,
+        source_count=row["source_count"],
+        labeled_count=row["labeled_count"],
+        blocking_issue_count=len(effective_blocking),
+        notes=row["notes"] if "notes" in row.keys() else None,
+        tags=tags,
+        review_status=row["review_status"] if "review_status" in row.keys() else None,
+        reviewed_at=row["reviewed_at"] if "reviewed_at" in row.keys() else None,
+        held_until=row["held_until"] if "held_until" in row.keys() else None,
+        hold_reason=row["hold_reason"] if "hold_reason" in row.keys() else None,
+        last_modified=row["last_modified"],
+        indexed_at=row["indexed_at"],
+    )
+
+
+@router.get("", response_model=list[CaseSummary])
+def list_cases(
+    category: str | None = None,
+    tier: str | None = None,
+    customer_id: int | None = None,
+    review_status: str | None = None,
+    limit: int = Query(200, le=2000),
+    offset: int = 0,
+) -> list[CaseSummary]:
+    where: list[str] = []
+    params: list[Any] = []
+    if category:
+        where.append("COALESCE(c.manual_category, c.category) = ?")
+        params.append(category)
+    if tier:
+        where.append("COALESCE(c.manual_template_tier, c.template_tier) = ?")
+        params.append(tier)
+    if customer_id is not None:
+        where.append("c.customer_id = ?")
+        params.append(customer_id)
+    if review_status:
+        if review_status == "unreviewed":
+            where.append("(c.review_status IS NULL OR c.review_status = 'pending')")
+        else:
+            where.append("c.review_status = ?")
+            params.append(review_status)
+
+    sql = """
+        SELECT c.*, cu.canonical_name AS canonical_name
+        FROM cases c
+        LEFT JOIN customers cu ON cu.id = c.customer_id
+    """
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY c.id DESC LIMIT ? OFFSET ?"
+    params.extend([limit, offset])
+
+    with db.connect() as conn:
+        rows = conn.execute(sql, params).fetchall()
+    return [_row_to_summary(r, r["canonical_name"]) for r in rows]
+
+
+@router.get("/stats")
+def stats() -> dict:
+    with db.connect() as conn:
+        cat_rows = conn.execute(
+            "SELECT COALESCE(manual_category, category) AS cat, COUNT(*) AS n FROM cases GROUP BY cat"
+        ).fetchall()
+        tier_rows = conn.execute(
+            "SELECT COALESCE(manual_template_tier, template_tier) AS tier, COUNT(*) AS n "
+            "FROM cases WHERE COALESCE(manual_template_tier, template_tier) IS NOT NULL GROUP BY tier"
+        ).fetchall()
+        review_rows = conn.execute(
+            "SELECT COALESCE(review_status, 'unreviewed') AS status, COUNT(*) AS n FROM cases GROUP BY status"
+        ).fetchall()
+        manual_count = conn.execute(
+            "SELECT COUNT(*) FROM cases WHERE manual_category IS NOT NULL OR manual_template_tier IS NOT NULL"
+        ).fetchone()[0]
+        total = conn.execute("SELECT COUNT(*) FROM cases").fetchone()[0]
+    return {
+        "total": total,
+        "by_category": {r["cat"]: r["n"] for r in cat_rows},
+        "by_tier": {r["tier"]: r["n"] for r in tier_rows},
+        "by_review_status": {r["status"]: r["n"] for r in review_rows},
+        "manual_override_count": manual_count,
+    }
+
+
+@router.get("/{case_id}", response_model=CaseDetail)
+def case_detail(case_id: int) -> CaseDetail:
+    with db.connect() as conn:
+        row = conn.execute(
+            """SELECT c.*, cu.canonical_name AS canonical_name FROM cases c
+               LEFT JOIN customers cu ON cu.id = c.customer_id WHERE c.id = ?""",
+            (case_id,),
+        ).fetchone()
+    if not row:
+        raise HTTPException(404, "case not found")
+
+    auto_raw = json.loads(row["blocking_issues_json"] or "[]")
+    manual_raw = json.loads(row["manual_blocking_issues_json"] or "[]") if row["manual_blocking_issues_json"] else []
+    # manual_blocking_codes stays as bare strings (frontend chip-toggle UI uses code-only)
+    manual_codes = [
+        issue_translator.normalize_issue(it)["code"]
+        for it in manual_raw
+        if issue_translator.normalize_issue(it)["code"]
+    ]
+    effective = issue_translator.merge_codes([*auto_raw, *manual_raw])
+    meta = json.loads(row["meta_json"] or "{}")
+
+    summary = _row_to_summary(row, row["canonical_name"])
+    return CaseDetail(
+        **summary.model_dump(),
+        auto_blocking_issues=issue_translator.translate_list(auto_raw),
+        manual_blocking_codes=manual_codes,
+        blocking_issues=issue_translator.translate_list(effective),
+        pose_delta_max=row["pose_delta_max"],
+        sharp_ratio_min=row["sharp_ratio_min"],
+        meta=meta,
+        rename_suggestion=None,
+    )
+
+
+@router.patch("/{case_id}", response_model=CaseDetail)
+def update_case(case_id: int, payload: CaseUpdate) -> CaseDetail:
+    with db.connect() as conn:
+        row = conn.execute("SELECT id FROM cases WHERE id = ?", (case_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "case not found")
+        # Audit: snapshot before, apply, snapshot after.
+        befores = audit.snapshot_before(conn, [case_id])
+        _apply_update(conn, [case_id], payload)
+        audit.record_after(
+            conn, [case_id], befores, op="patch", source_route=f"/api/cases/{case_id}"
+        )
+    return case_detail(case_id)
+
+
+@router.post("/batch")
+def batch_update(payload: CaseBatchUpdate) -> dict:
+    if not payload.case_ids:
+        raise HTTPException(400, "case_ids cannot be empty")
+    with db.connect() as conn:
+        placeholders = ",".join("?" * len(payload.case_ids))
+        rows = conn.execute(
+            f"SELECT id FROM cases WHERE id IN ({placeholders})", payload.case_ids
+        ).fetchall()
+        valid_ids = [r["id"] for r in rows]
+        if not valid_ids:
+            raise HTTPException(404, "no matching cases")
+        # Audit: snapshot before, apply, snapshot after — one revision per case.
+        befores = audit.snapshot_before(conn, valid_ids)
+        _apply_update(conn, valid_ids, payload.update)
+        audit.record_after(
+            conn, valid_ids, befores, op="batch", source_route="/api/cases/batch"
+        )
+    return {"updated": len(valid_ids), "case_ids": valid_ids}
+
+
+def _apply_update(conn: sqlite3.Connection, case_ids: list[int], payload: CaseUpdate) -> None:
+    sets: list[str] = []
+    values: list[Any] = []
+    clear = set(payload.clear_fields or [])
+
+    def set_or_clear(field_db: str, value: Any | None, clear_key: str, json_encode: bool = False):
+        if clear_key in clear:
+            sets.append(f"{field_db} = NULL")
+            return
+        if value is None:
+            return
+        sets.append(f"{field_db} = ?")
+        values.append(json.dumps(value, ensure_ascii=False) if json_encode else value)
+
+    set_or_clear("manual_category", payload.manual_category, "manual_category")
+    set_or_clear("manual_template_tier", payload.manual_template_tier, "manual_template_tier")
+    set_or_clear(
+        "manual_blocking_issues_json",
+        payload.manual_blocking_codes,
+        "manual_blocking_codes",
+        json_encode=True,
+    )
+    set_or_clear("notes", payload.notes, "notes")
+    set_or_clear("tags_json", payload.tags, "tags", json_encode=True)
+    set_or_clear("review_status", payload.review_status, "review_status")
+    set_or_clear("customer_id", payload.customer_id, "customer_id")
+    # 三态之 "挂起"
+    set_or_clear("held_until", payload.held_until, "held_until")
+    set_or_clear("hold_reason", payload.hold_reason, "hold_reason")
+
+    if payload.review_status == "reviewed":
+        sets.append("reviewed_at = ?")
+        values.append(datetime.now(timezone.utc).isoformat())
+    elif "review_status" in clear or payload.review_status in {"pending", "needs_recheck"}:
+        sets.append("reviewed_at = NULL")
+
+    if not sets:
+        return
+
+    placeholders = ",".join("?" * len(case_ids))
+    sql = f"UPDATE cases SET {', '.join(sets)} WHERE id IN ({placeholders})"
+    conn.execute(sql, [*values, *case_ids])
+
+
+@router.get("/{case_id}/files")
+def case_file(case_id: int, name: str):
+    with db.connect() as conn:
+        row = conn.execute("SELECT abs_path FROM cases WHERE id = ?", (case_id,)).fetchone()
+    if not row:
+        raise HTTPException(404, "case not found")
+    base = Path(row["abs_path"]).resolve()
+    target = (base / name).resolve()
+    if not str(target).startswith(str(base)):
+        raise HTTPException(400, "invalid path")
+    if not target.exists() or not target.is_file():
+        raise HTTPException(404, "file not found")
+    return FileResponse(target)
+
+
+@router.get("/{case_id}/rename-suggestion")
+def rename_suggestion(case_id: int, dry_run: bool = True) -> dict:
+    """Return a rename hint for non_labeled cases.
+
+    `dry_run=true` (default and currently the only mode) means the response includes
+    the candidate filenames that *would* be touched but doesn't actually rename. We
+    keep `dry_run` in the surface so the UI can promise "not applied yet" loudly.
+    """
+    with db.connect() as conn:
+        row = conn.execute(
+            """SELECT abs_path, COALESCE(manual_category, category) AS cat,
+                      meta_json
+               FROM cases WHERE id = ?""",
+            (case_id,),
+        ).fetchone()
+    if not row:
+        raise HTTPException(404, "case not found")
+    if row["cat"] != "non_labeled":
+        return {
+            "command": None,
+            "note": "当前案例已有标准命名，无需重命名",
+            "dry_run": True,
+            "affected_count": 0,
+            "affected_files": [],
+        }
+    base = shlex.quote(row["abs_path"])
+    meta = json.loads(row["meta_json"] or "{}")
+    image_files: list[str] = meta.get("image_files") or []
+    affected = [
+        f for f in image_files
+        if not any(tok in f for tok in scanner.LABELED_TOKENS)
+    ]
+    return {
+        "command": f"# 在 {base} 下，把术前/术后图片改成：术前-正面.jpg / 术后-正面.jpg / 术前-右45侧.jpg / ...",
+        "note": "本阶段不直接执行，仅给出建议命令模板",
+        "dry_run": dry_run,
+        "affected_count": len(affected),
+        "affected_files": affected[:20],
+    }
+
+
+@router.post("/{case_id}/upgrade")
+def upgrade_case(case_id: int, brand: str = "fumei") -> CaseDetail:
+    """Run case-layout-board's `build_manifest()` and persist the v3 results.
+
+    Synchronous path (5-30s blocking). The shared core lives in
+    `_upgrade_executor.execute_upgrade` so the upgrade_queue worker uses the
+    exact same logic.
+    """
+    try:
+        _upgrade_executor.execute_upgrade(
+            case_id, brand, source_route=f"/api/cases/{case_id}/upgrade"
+        )
+    except ValueError:
+        raise HTTPException(404, "case not found")
+    except FileNotFoundError as e:
+        raise HTTPException(404, f"case directory missing: {e}")
+    except RuntimeError as e:
+        raise HTTPException(503, f"skill unavailable: {e}")
+    except Exception as e:  # noqa: BLE001 — skill can raise many flavors
+        raise HTTPException(500, f"skill upgrade failed: {e}")
+    return case_detail(case_id)
+
+
+@router.post("/{case_id}/rescan")
+def rescan_case(case_id: int) -> CaseDetail:
+    """Re-run lite scanner on a single case dir.
+
+    Useful after the user manually renamed files on disk and wants the auto-judged
+    category/tier/blocking refreshed without scanning the whole library.
+    """
+    with db.connect() as conn:
+        existing = conn.execute("SELECT id FROM cases WHERE id = ?", (case_id,)).fetchone()
+        if not existing:
+            raise HTTPException(404, "case not found")
+        # Audit before/after the scanner write.
+        befores = audit.snapshot_before(conn, [case_id])
+        try:
+            scanner.rescan_one(conn, case_id)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        audit.record_after(
+            conn,
+            [case_id],
+            befores,
+            op="rescan",
+            source_route=f"/api/cases/{case_id}/rescan",
+            actor="scan",
+        )
+    return case_detail(case_id)

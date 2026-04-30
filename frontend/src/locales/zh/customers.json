@@ -1,0 +1,25 @@
+{
+  "title": "客户",
+  "subtitle": {
+    "prefix": "已规整客户",
+    "dictLink": "到字典管理"
+  },
+  "search": {
+    "placeholder": "canonical / 别名 / 备注"
+  },
+  "sort": {
+    "label": "排序：",
+    "byCases": "案例数 ↓",
+    "byName": "名称 A→Z",
+    "byRecent": "最近添加"
+  },
+  "empty": {
+    "title": "尚无客户。前往「<dictLink>客户字典</dictLink>」从案例库中绑定第一个客户。"
+  },
+  "card": {
+    "caseSuffix": "案例",
+    "noNotes": "暂无备注",
+    "bound": "{{count}} 案例已绑定",
+    "detail": "详情"
+  }
+}

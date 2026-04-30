@@ -1,0 +1,35 @@
+{
+  "status": {
+    "queued": "排队中",
+    "running": "渲染中",
+    "done": "已完成",
+    "failed": "失败",
+    "cancelled": "已取消",
+    "undone": "已撤销"
+  },
+  "title": "正式出图",
+  "empty": "尚未出图。点击「正式出图」生成 {{brandName}} 模板。",
+  "brand": {
+    "shimei": "莳美",
+    "fumei": "芙美和颜"
+  },
+  "elapsed": "耗时 {{duration}}",
+  "thumbnailTitle": "点击查看大图",
+  "skill": {
+    "label": "skill 状态：",
+    "block": "block",
+    "warn": "warn"
+  },
+  "actions": {
+    "cancel": "取消",
+    "retry": "重试",
+    "rerender": "重新出图"
+  },
+  "messages": {
+    "unknownError": "未知错误",
+    "cancelledHint": "已取消。",
+    "rerunButton": "重新开始",
+    "undoneHint": "已撤销上一次出图（产物已删除）。",
+    "undoLabel": "已生成正式品牌版"
+  }
+}

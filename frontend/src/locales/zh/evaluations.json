@@ -1,0 +1,33 @@
+{
+  "title": "评估台",
+  "subtitle": "对案例本身和出图产物做轻量审核·与 review_status 解耦·30s 撤销窗口·评审人本地持久",
+  "case": {
+    "title": "案例评估",
+    "subtitle": "对案例的命名 / 标注 / 视觉规范做成品审核"
+  },
+  "render": {
+    "title": "出图评估",
+    "subtitle": "对成品 final-board.jpg 做通过/打回 · 当前品牌: {{brand}}"
+  },
+  "tab": {
+    "pending": "待评",
+    "recent": "已评",
+    "ariaSwitch": "{{title}} 模式切换"
+  },
+  "loading": "载入中…",
+  "loadError": "载入失败",
+  "empty": {
+    "casePending": "所有案例都已评估",
+    "renderPending": "当前品牌下所有出图都已评估",
+    "recent": "暂无评估记录"
+  },
+  "row": {
+    "blocking": "阻塞 {{n}}",
+    "evaluateBtn": "评估",
+    "reEvaluateBtn": "重新评估",
+    "reEvaluateTitle": "基于现有结论再评一次（旧的会被新的覆盖）",
+    "undoBtn": "撤销",
+    "undoTitle": "撤销这条评估",
+    "undoLoading": "…"
+  }
+}

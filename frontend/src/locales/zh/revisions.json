@@ -1,0 +1,36 @@
+{
+  "title": "近期变更",
+  "subtitle": "30 秒撤销窗口外的二次入口 · 最多 20 条",
+  "close": "关闭",
+  "closeTitle": "关闭 (Esc)",
+  "loading": "载入中…",
+  "loadError": "载入失败",
+  "empty": "暂无变更记录",
+  "op": {
+    "patch": "单次编辑",
+    "batch": "批量编辑",
+    "rescan": "重新判读",
+    "merge_customer": "绑定客户",
+    "rename": "重命名",
+    "upgrade": "升级到 v3",
+    "render": "正式出图",
+    "undo": "撤销",
+    "undo_render": "撤销出图",
+    "evaluate": "评估",
+    "undo_evaluate": "撤销评估",
+    "restore_render": "恢复渲染快照"
+  },
+  "rel": {
+    "justNow": "刚刚",
+    "secAgo": "{{n}} 秒前",
+    "minAgo": "{{n}} 分钟前",
+    "hrAgo": "{{n}} 小时前",
+    "dayAgo": "{{n}} 天前"
+  },
+  "undoBtn": "撤销",
+  "undoBtnLoading": "…",
+  "undoBtnTitle": "撤销这条变更（调 /api/cases/{{caseId}}/{{path}}）",
+  "undonePill": "已撤销",
+  "undoMarker": "撤销记录",
+  "moreFields": "+ {{n}} 个字段…"
+}

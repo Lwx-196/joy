@@ -1,0 +1,80 @@
+{
+  "title": "Overview",
+  "subtitle": {
+    "prefix": "Local library · ",
+    "totalLabel": "Total ",
+    "totalSuffix": " cases",
+    "lastScanPrefix": " · Last scan ",
+    "manualOverridePrefix": " · Manual override ",
+    "manualOverrideSuffix": ""
+  },
+  "scan": {
+    "scanning": "Scanning…",
+    "incremental": "Incremental scan",
+    "full": "Full rescan"
+  },
+  "queue": {
+    "title": "Work queue",
+    "byROI": "Sorted by ROI",
+    "lastVisit": "Resume review #{{id}}",
+    "counting": "Counting…",
+    "totalCases": "{{n}} cases total",
+    "batchRender": "Batch render ({{n}})",
+    "batchRenderLimit": "Batch render (max {{max}})",
+    "batchRenderTitle": "Trigger final render on all {{n}} cases in this lane (brand: {{brand}})",
+    "batchUpgrade": "Upgrade v3 ({{n}})",
+    "batchUpgradeLimit": "Upgrade v3 (max {{max}})",
+    "batchUpgradeTitle": "Run v3 async upgrade on all {{n}} cases in this lane (brand: {{brand}})",
+    "confirmRenderOver": "{{count}} exceeds batch limit {{max}}. Only enqueue first {{max}}?",
+    "confirmRender": "Trigger batch render on {{count}} cases (brand: {{brand}})?",
+    "confirmUpgradeOver": "{{count}} exceeds batch limit {{max}}. Only enqueue first {{max}}?",
+    "confirmUpgrade": "Trigger v3 async upgrade on {{count}} cases (brand: {{brand}})? 5–30s each, concurrency 2."
+  },
+  "worktray": {
+    "title": "Review work-tray",
+    "needAttention": "Needs your attention",
+    "totalLabel": "Total ",
+    "totalSuffix": " cases",
+    "progressLabel": "Review progress ",
+    "openQueue": "Open work queue",
+    "unreviewed": "Unreviewed",
+    "unreviewedSub": "{{pct}}% of total · auto judgement done · waiting for human confirmation",
+    "pending": "Pending",
+    "pendingSub": "Assigned but not done",
+    "recheck": "Needs recheck",
+    "recheckSub": "Manually flagged",
+    "reviewed": "Reviewed",
+    "reviewedSub": "+{{n}} in last 7 days"
+  },
+  "byCategory": {
+    "title": "By category",
+    "meta": "{{total}} cases · effective (manual ?? auto)",
+    "autoLabel": "judgement",
+    "manualLabel": "override",
+    "footer": "may differ · total {{n}} overrides"
+  },
+  "byTier": {
+    "title": "By template tier",
+    "meta": "Delivery pipeline candidate templates",
+    "unassigned": "{{n}} unassigned"
+  },
+  "recent": {
+    "title": "Recently changed cases",
+    "meta": "Last {{n}}",
+    "viewAll": "View all",
+    "th": {
+      "indicator": "Status",
+      "caseDir": "Case directory",
+      "customer": "Customer",
+      "category": "Category",
+      "template": "Template",
+      "review": "Review",
+      "source": "Source",
+      "changedAt": "Changed"
+    },
+    "noCustomer": "Unbound",
+    "sourceManual": "auto + manual",
+    "sourceAuto": "Auto"
+  },
+  "loading": "Loading…"
+}

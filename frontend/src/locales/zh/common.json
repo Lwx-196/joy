@@ -1,0 +1,23 @@
+{
+  "nav": {
+    "overview": "总览",
+    "cases": "案例",
+    "customers": "客户",
+    "evaluations": "评估台",
+    "dict": "客户字典"
+  },
+  "brand": {
+    "title": "案例工作台",
+    "phase": "Phase 1 · 本地索引",
+    "selectorTitle": "切换出图品牌（影响升级到 v3 / 正式出图）",
+    "selectorLabel": "品牌"
+  },
+  "search": {
+    "aria": "搜索",
+    "placeholder": "搜索 客户 / 目录 / 备注"
+  },
+  "skipLink": "跳到主内容",
+  "common": {
+    "loading": "加载中…"
+  }
+}

@@ -1,0 +1,33 @@
+{
+  "title": "Evaluations",
+  "subtitle": "Lightweight review of cases and renders · decoupled from review_status · 30s undo · reviewer persisted locally",
+  "case": {
+    "title": "Case evaluation",
+    "subtitle": "Review naming / labeling / visual conventions on cases"
+  },
+  "render": {
+    "title": "Render evaluation",
+    "subtitle": "Approve/reject final-board.jpg · current brand: {{brand}}"
+  },
+  "tab": {
+    "pending": "Pending",
+    "recent": "Done",
+    "ariaSwitch": "{{title}} mode switch"
+  },
+  "loading": "Loading…",
+  "loadError": "Load failed",
+  "empty": {
+    "casePending": "All cases evaluated",
+    "renderPending": "All renders for this brand evaluated",
+    "recent": "No evaluation records"
+  },
+  "row": {
+    "blocking": "Blocking {{n}}",
+    "evaluateBtn": "Evaluate",
+    "reEvaluateBtn": "Re-evaluate",
+    "reEvaluateTitle": "Re-evaluate (overrides old verdict)",
+    "undoBtn": "Undo",
+    "undoTitle": "Undo this evaluation",
+    "undoLoading": "…"
+  }
+}

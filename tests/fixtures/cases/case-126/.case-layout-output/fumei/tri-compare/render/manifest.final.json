@@ -1,0 +1,2121 @@
+{
+  "command": "inspect",
+  "created_at": "2026-04-29T17:02:25+08:00",
+  "case_mode": "face",
+  "case_dir": "/Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角",
+  "brand": {
+    "brand": "芙美和颜",
+    "brand_line": "芙美和颜·轻医美",
+    "logo_path": "/Users/a1234/Desktop/芙美&莳美/芙美logo.png",
+    "id": "fumei"
+  },
+  "template": "tri-compare",
+  "effective_templates": [],
+  "background_mode": "auto-preserve-original-tone",
+  "direction_check": "required-for-nonfront",
+  "enhancement_input": "aligned-after",
+  "enhancement_scope": "focus-scoped-light",
+  "non_target_policy": "light-unify-only",
+  "semantic_judge_mode": "off",
+  "semantic_summary": {
+    "screen_calls": 0,
+    "screen_applied": 0,
+    "pair_calls": 0,
+    "pair_reviews": 0,
+    "pair_rejects": 0,
+    "final_calls": 0,
+    "final_reviews": 0,
+    "final_rejects": 0
+  },
+  "semantic_errors": [],
+  "focus_status": "missing",
+  "focus_targets": [],
+  "angle_priority_profile": {
+    "source": "default",
+    "slot_scores": {
+      "front": 3,
+      "oblique": 2,
+      "side": 1
+    },
+    "preferred_slots": [
+      "front",
+      "oblique",
+      "side"
+    ]
+  },
+  "pose_delta_thresholds": {
+    "front": {
+      "yaw": 8.0,
+      "pitch": 7.0,
+      "roll": 6.0,
+      "weighted": 14.0
+    },
+    "oblique": {
+      "yaw": 12.0,
+      "pitch": 8.0,
+      "roll": 8.0,
+      "weighted": 18.0
+    },
+    "side": {
+      "yaw": 12.0,
+      "pitch": 8.0,
+      "roll": 8.0,
+      "weighted": 20.0
+    }
+  },
+  "status": "error",
+  "blocking_issue_count": 3,
+  "warning_count": 17,
+  "blocking_issues": [
+    "2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角：正面 术前术后姿态差过大(yaw=2.85, pitch=19.40, roll=0.98, weighted=22.74)，已拒绝增强与出图",
+    "2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角：侧面 术前术后姿态差过大(yaw=14.51, pitch=1.87, roll=26.35, weighted=29.55)，已拒绝增强与出图",
+    "2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角：缺少术前术后都可用的正面样本，无法自动降级模板"
+  ],
+  "warnings": [
+    "2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角：术中1.jpeg - 文件名缺少术前/术后关键词",
+    "2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角：术中2.jpeg - 文件名缺少术前/术后关键词",
+    "2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角：术中3.jpeg - 文件名缺少术前/术后关键词",
+    "2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角：术中4.jpeg - 文件名缺少术前/术后关键词",
+    "2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角：术中5.jpeg - 文件名缺少术前/术后关键词",
+    "2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角：术中6.jpeg - 文件名缺少术前/术后关键词",
+    "2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角：术前13.jpeg - 面部检测失败: 未检测到面部: /Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术前13.jpeg",
+    "2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角：术前14.jpeg - 面部检测失败: 未检测到面部: /Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术前14.jpeg",
+    "2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角：术前15.jpeg - 面部检测失败: 未检测到面部: /Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术前15.jpeg",
+    "2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角：术前7.jpeg - 面部检测失败: 未检测到面部: /Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术前7.jpeg",
+    "2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角：术前9.jpeg - 面部检测失败: 未检测到面部: /Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术前9.jpeg",
+    "2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角：术后即刻13.jpeg - 面部检测失败: 未检测到面部: /Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术后即刻13.jpeg",
+    "2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角：术后即刻15.jpeg - 面部检测失败: 未检测到面部: /Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术后即刻15.jpeg",
+    "2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角：术后即刻7.jpeg - 面部检测失败: 未检测到面部: /Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术后即刻7.jpeg",
+    "2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角：术后即刻9.jpeg - 面部检测失败: 未检测到面部: /Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术后即刻9.jpeg",
+    "2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角：术前 45°侧 存在多个姿态推断候选，已按最佳分数择优",
+    "2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角：术后 45°侧 存在多个姿态推断候选，已按最佳分数择优"
+  ],
+  "rejection_reasons": [
+    {
+      "group_name": "2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角",
+      "slot": "front",
+      "phase": null,
+      "reason": "phase_missing",
+      "detail": "文件名缺少术前/术后关键词",
+      "file_path": "/Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术中1.jpeg"
+    },
+    {
+      "group_name": "2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角",
+      "slot": "front",
+      "phase": null,
+      "reason": "phase_missing",
+      "detail": "文件名缺少术前/术后关键词",
+      "file_path": "/Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术中2.jpeg"
+    },
+    {
+      "group_name": "2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角",
+      "slot": "front",
+      "phase": null,
+      "reason": "phase_missing",
+      "detail": "文件名缺少术前/术后关键词",
+      "file_path": "/Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术中3.jpeg"
+    },
+    {
+      "group_name": "2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角",
+      "slot": "front",
+      "phase": null,
+      "reason": "phase_missing",
+      "detail": "文件名缺少术前/术后关键词",
+      "file_path": "/Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术中4.jpeg"
+    },
+    {
+      "group_name": "2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角",
+      "slot": "front",
+      "phase": null,
+      "reason": "phase_missing",
+      "detail": "文件名缺少术前/术后关键词",
+      "file_path": "/Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术中5.jpeg"
+    },
+    {
+      "group_name": "2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角",
+      "slot": "front",
+      "phase": null,
+      "reason": "phase_missing",
+      "detail": "文件名缺少术前/术后关键词",
+      "file_path": "/Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术中6.jpeg"
+    },
+    {
+      "group_name": "2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角",
+      "slot": null,
+      "phase": "before",
+      "reason": "face_detection_failure",
+      "detail": "面部检测失败: 未检测到面部: /Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术前13.jpeg",
+      "file_path": "/Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术前13.jpeg"
+    },
+    {
+      "group_name": "2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角",
+      "slot": null,
+      "phase": "before",
+      "reason": "face_detection_failure",
+      "detail": "面部检测失败: 未检测到面部: /Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术前14.jpeg",
+      "file_path": "/Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术前14.jpeg"
+    },
+    {
+      "group_name": "2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角",
+      "slot": null,
+      "phase": "before",
+      "reason": "face_detection_failure",
+      "detail": "面部检测失败: 未检测到面部: /Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术前15.jpeg",
+      "file_path": "/Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术前15.jpeg"
+    },
+    {
+      "group_name": "2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角",
+      "slot": null,
+      "phase": "before",
+      "reason": "face_detection_failure",
+      "detail": "面部检测失败: 未检测到面部: /Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术前7.jpeg",
+      "file_path": "/Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术前7.jpeg"
+    },
+    {
+      "group_name": "2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角",
+      "slot": null,
+      "phase": "before",
+      "reason": "face_detection_failure",
+      "detail": "面部检测失败: 未检测到面部: /Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术前9.jpeg",
+      "file_path": "/Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术前9.jpeg"
+    },
+    {
+      "group_name": "2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角",
+      "slot": null,
+      "phase": "after",
+      "reason": "face_detection_failure",
+      "detail": "面部检测失败: 未检测到面部: /Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术后即刻13.jpeg",
+      "file_path": "/Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术后即刻13.jpeg"
+    },
+    {
+      "group_name": "2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角",
+      "slot": null,
+      "phase": "after",
+      "reason": "face_detection_failure",
+      "detail": "面部检测失败: 未检测到面部: /Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术后即刻15.jpeg",
+      "file_path": "/Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术后即刻15.jpeg"
+    },
+    {
+      "group_name": "2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角",
+      "slot": null,
+      "phase": "after",
+      "reason": "face_detection_failure",
+      "detail": "面部检测失败: 未检测到面部: /Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术后即刻7.jpeg",
+      "file_path": "/Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术后即刻7.jpeg"
+    },
+    {
+      "group_name": "2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角",
+      "slot": null,
+      "phase": "after",
+      "reason": "face_detection_failure",
+      "detail": "面部检测失败: 未检测到面部: /Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术后即刻9.jpeg",
+      "file_path": "/Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术后即刻9.jpeg"
+    },
+    {
+      "group_name": "2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角",
+      "slot": "front",
+      "phase": null,
+      "reason": "pose_delta_exceeded",
+      "detail": "正面 术前术后姿态差过大(yaw=2.85, pitch=19.40, roll=0.98, weighted=22.74; threshold=yaw<=8.0, pitch<=7.0, roll<=6.0, weighted<=14.0)",
+      "file_path": null
+    },
+    {
+      "group_name": "2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角",
+      "slot": "side",
+      "phase": null,
+      "reason": "pose_delta_exceeded",
+      "detail": "侧面 术前术后姿态差过大(yaw=14.51, pitch=1.87, roll=26.35, weighted=29.55; threshold=yaw<=12.0, pitch<=8.0, roll<=8.0, weighted<=20.0)",
+      "file_path": null
+    }
+  ],
+  "groups": [
+    {
+      "name": "2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角",
+      "path": "/Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角",
+      "relative_path": ".",
+      "compare_hint_map": {},
+      "source_file_count": 41,
+      "ignored_files": [],
+      "entries": [
+        {
+          "name": "术中1.jpeg",
+          "path": "/Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术中1.jpeg",
+          "relative_path": "术中1.jpeg",
+          "group_relative_path": "术中1.jpeg",
+          "phase": null,
+          "phase_source": null,
+          "phase_source_path": null,
+          "index": 1,
+          "filename_angle": null,
+          "filename_direction": null,
+          "compare_hint_angle": null,
+          "compare_hint_direction": null,
+          "angle": "front",
+          "angle_source": "pose",
+          "angle_confidence": 0.8101,
+          "direction": "center",
+          "pose": {
+            "pitch": -14.44,
+            "yaw": 3.8,
+            "roll": 0.4
+          },
+          "view": {
+            "bucket": "front",
+            "direction": "center",
+            "confidence": 0.8101
+          },
+          "crop_box": {
+            "x1": 158,
+            "y1": 312,
+            "x2": 690,
+            "y2": 827
+          },
+          "sharpness_score": 42.64,
+          "sharpness_level": "clear",
+          "issues": [
+            "文件名缺少术前/术后关键词"
+          ],
+          "rejection_reason": "phase_missing",
+          "semantic_screen": null,
+          "semantic_applied_fields": [],
+          "profile_fallback": null
+        },
+        {
+          "name": "术中2.jpeg",
+          "path": "/Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术中2.jpeg",
+          "relative_path": "术中2.jpeg",
+          "group_relative_path": "术中2.jpeg",
+          "phase": null,
+          "phase_source": null,
+          "phase_source_path": null,
+          "index": 2,
+          "filename_angle": null,
+          "filename_direction": null,
+          "compare_hint_angle": null,
+          "compare_hint_direction": null,
+          "angle": "front",
+          "angle_source": "pose",
+          "angle_confidence": 0.8367,
+          "direction": "center",
+          "pose": {
+            "pitch": -13.49,
+            "yaw": 3.27,
+            "roll": 0.6
+          },
+          "view": {
+            "bucket": "front",
+            "direction": "center",
+            "confidence": 0.8367
+          },
+          "crop_box": {
+            "x1": 41,
+            "y1": 218,
+            "x2": 805,
+            "y2": 957
+          },
+          "sharpness_score": 84.39,
+          "sharpness_level": "clear",
+          "issues": [
+            "文件名缺少术前/术后关键词"
+          ],
+          "rejection_reason": "phase_missing",
+          "semantic_screen": null,
+          "semantic_applied_fields": [],
+          "profile_fallback": null
+        },
+        {
+          "name": "术中3.jpeg",
+          "path": "/Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术中3.jpeg",
+          "relative_path": "术中3.jpeg",
+          "group_relative_path": "术中3.jpeg",
+          "phase": null,
+          "phase_source": null,
+          "phase_source_path": null,
+          "index": 3,
+          "filename_angle": null,
+          "filename_direction": null,
+          "compare_hint_angle": null,
+          "compare_hint_direction": null,
+          "angle": "front",
+          "angle_source": "pose",
+          "angle_confidence": 0.9262,
+          "direction": "center",
+          "pose": {
+            "pitch": -12.88,
+            "yaw": 1.48,
+            "roll": 1.59
+          },
+          "view": {
+            "bucket": "front",
+            "direction": "center",
+            "confidence": 0.9262
+          },
+          "crop_box": {
+            "x1": 173,
+            "y1": 460,
+            "x2": 692,
+            "y2": 961
+          },
+          "sharpness_score": 74.11,
+          "sharpness_level": "clear",
+          "issues": [
+            "文件名缺少术前/术后关键词"
+          ],
+          "rejection_reason": "phase_missing",
+          "semantic_screen": null,
+          "semantic_applied_fields": [],
+          "profile_fallback": null
+        },
+        {
+          "name": "术中4.jpeg",
+          "path": "/Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术中4.jpeg",
+          "relative_path": "术中4.jpeg",
+          "group_relative_path": "术中4.jpeg",
+          "phase": null,
+          "phase_source": null,
+          "phase_source_path": null,
+          "index": 4,
+          "filename_angle": null,
+          "filename_direction": null,
+          "compare_hint_angle": null,
+          "compare_hint_direction": null,
+          "angle": "front",
+          "angle_source": "pose",
+          "angle_confidence": 0.971,
+          "direction": "center",
+          "pose": {
+            "pitch": -13.58,
+            "yaw": 0.58,
+            "roll": 0.15
+          },
+          "view": {
+            "bucket": "front",
+            "direction": "center",
+            "confidence": 0.971
+          },
+          "crop_box": {
+            "x1": 100,
+            "y1": 398,
+            "x2": 784,
+            "y2": 1060
+          },
+          "sharpness_score": 68.59,
+          "sharpness_level": "clear",
+          "issues": [
+            "文件名缺少术前/术后关键词"
+          ],
+          "rejection_reason": "phase_missing",
+          "semantic_screen": null,
+          "semantic_applied_fields": [],
+          "profile_fallback": null
+        },
+        {
+          "name": "术中5.jpeg",
+          "path": "/Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术中5.jpeg",
+          "relative_path": "术中5.jpeg",
+          "group_relative_path": "术中5.jpeg",
+          "phase": null,
+          "phase_source": null,
+          "phase_source_path": null,
+          "index": 5,
+          "filename_angle": null,
+          "filename_direction": null,
+          "compare_hint_angle": null,
+          "compare_hint_direction": null,
+          "angle": "front",
+          "angle_source": "pose",
+          "angle_confidence": 0.9203,
+          "direction": "center",
+          "pose": {
+            "pitch": 5.81,
+            "yaw": 1.59,
+            "roll": 1.24
+          },
+          "view": {
+            "bucket": "front",
+            "direction": "center",
+            "confidence": 0.9203
+          },
+          "crop_box": {
+            "x1": 113,
+            "y1": 402,
+            "x2": 768,
+            "y2": 1020
+          },
+          "sharpness_score": 75.59,
+          "sharpness_level": "clear",
+          "issues": [
+            "文件名缺少术前/术后关键词"
+          ],
+          "rejection_reason": "phase_missing",
+          "semantic_screen": null,
+          "semantic_applied_fields": [],
+          "profile_fallback": null
+        },
+        {
+          "name": "术中6.jpeg",
+          "path": "/Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术中6.jpeg",
+          "relative_path": "术中6.jpeg",
+          "group_relative_path": "术中6.jpeg",
+          "phase": null,
+          "phase_source": null,
+          "phase_source_path": null,
+          "index": 6,
+          "filename_angle": null,
+          "filename_direction": null,
+          "compare_hint_angle": null,
+          "compare_hint_direction": null,
+          "angle": "front",
+          "angle_source": "pose",
+          "angle_confidence": 0.9747,
+          "direction": "center",
+          "pose": {
+            "pitch": 5.73,
+            "yaw": 0.51,
+            "roll": 0.22
+          },
+          "view": {
+            "bucket": "front",
+            "direction": "center",
+            "confidence": 0.9747
+          },
+          "crop_box": {
+            "x1": 71,
+            "y1": 374,
+            "x2": 850,
+            "y2": 1109
+          },
+          "sharpness_score": 66.56,
+          "sharpness_level": "clear",
+          "issues": [
+            "文件名缺少术前/术后关键词"
+          ],
+          "rejection_reason": "phase_missing",
+          "semantic_screen": null,
+          "semantic_applied_fields": [],
+          "profile_fallback": null
+        },
+        {
+          "name": "术前1.jpeg",
+          "path": "/Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术前1.jpeg",
+          "relative_path": "术前1.jpeg",
+          "group_relative_path": "术前1.jpeg",
+          "phase": "before",
+          "phase_source": "filename",
+          "phase_source_path": null,
+          "index": 1,
+          "filename_angle": null,
+          "filename_direction": null,
+          "compare_hint_angle": null,
+          "compare_hint_direction": null,
+          "angle": "front",
+          "angle_source": "pose",
+          "angle_confidence": 0.9066,
+          "direction": "center",
+          "pose": {
+            "pitch": 8.7,
+            "yaw": -1.87,
+            "roll": -0.86
+          },
+          "view": {
+            "bucket": "front",
+            "direction": "center",
+            "confidence": 0.9066
+          },
+          "crop_box": {
+            "x1": 69,
+            "y1": 279,
+            "x2": 781,
+            "y2": 951
+          },
+          "sharpness_score": 49.29,
+          "sharpness_level": "clear",
+          "issues": [],
+          "rejection_reason": null,
+          "semantic_screen": null,
+          "semantic_applied_fields": [],
+          "profile_fallback": null
+        },
+        {
+          "name": "术前10.jpeg",
+          "path": "/Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术前10.jpeg",
+          "relative_path": "术前10.jpeg",
+          "group_relative_path": "术前10.jpeg",
+          "phase": "before",
+          "phase_source": "filename",
+          "phase_source_path": null,
+          "index": 10,
+          "filename_angle": null,
+          "filename_direction": null,
+          "compare_hint_angle": null,
+          "compare_hint_direction": null,
+          "angle": "side",
+          "angle_source": "pose",
+          "angle_confidence": 0.98,
+          "direction": "right",
+          "pose": {
+            "pitch": 11.22,
+            "yaw": 43.86,
+            "roll": 6.03
+          },
+          "view": {
+            "bucket": "side",
+            "direction": "right",
+            "confidence": 0.98
+          },
+          "crop_box": {
+            "x1": 318,
+            "y1": 267,
+            "x2": 853,
+            "y2": 816
+          },
+          "sharpness_score": 48.03,
+          "sharpness_level": "clear",
+          "issues": [],
+          "rejection_reason": null,
+          "semantic_screen": null,
+          "semantic_applied_fields": [],
+          "profile_fallback": null
+        },
+        {
+          "name": "术前11.jpeg",
+          "path": "/Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术前11.jpeg",
+          "relative_path": "术前11.jpeg",
+          "group_relative_path": "术前11.jpeg",
+          "phase": "before",
+          "phase_source": "filename",
+          "phase_source_path": null,
+          "index": 11,
+          "filename_angle": null,
+          "filename_direction": null,
+          "compare_hint_angle": null,
+          "compare_hint_direction": null,
+          "angle": "side",
+          "angle_source": "pose",
+          "angle_confidence": 0.98,
+          "direction": "right",
+          "pose": {
+            "pitch": -6.55,
+            "yaw": 44.43,
+            "roll": 16.22
+          },
+          "view": {
+            "bucket": "side",
+            "direction": "right",
+            "confidence": 0.98
+          },
+          "crop_box": {
+            "x1": 277,
+            "y1": 200,
+            "x2": 853,
+            "y2": 752
+          },
+          "sharpness_score": 33.02,
+          "sharpness_level": "clear",
+          "issues": [],
+          "rejection_reason": null,
+          "semantic_screen": null,
+          "semantic_applied_fields": [],
+          "profile_fallback": null
+        },
+        {
+          "name": "术前12.jpeg",
+          "path": "/Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术前12.jpeg",
+          "relative_path": "术前12.jpeg",
+          "group_relative_path": "术前12.jpeg",
+          "phase": "before",
+          "phase_source": "filename",
+          "phase_source_path": null,
+          "index": 12,
+          "filename_angle": null,
+          "filename_direction": null,
+          "compare_hint_angle": null,
+          "compare_hint_direction": null,
+          "angle": "side",
+          "angle_source": "pose",
+          "angle_confidence": 0.9795,
+          "direction": "right",
+          "pose": {
+            "pitch": 13.44,
+            "yaw": 43.38,
+            "roll": -0.87
+          },
+          "view": {
+            "bucket": "side",
+            "direction": "right",
+            "confidence": 0.9795
+          },
+          "crop_box": {
+            "x1": 331,
+            "y1": 321,
+            "x2": 853,
+            "y2": 856
+          },
+          "sharpness_score": 22.52,
+          "sharpness_level": "clear",
+          "issues": [],
+          "rejection_reason": null,
+          "semantic_screen": null,
+          "semantic_applied_fields": [],
+          "profile_fallback": null
+        },
+        {
+          "name": "术前13.jpeg",
+          "path": "/Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术前13.jpeg",
+          "relative_path": "术前13.jpeg",
+          "group_relative_path": "术前13.jpeg",
+          "phase": "before",
+          "phase_source": "filename",
+          "phase_source_path": null,
+          "index": 13,
+          "filename_angle": null,
+          "filename_direction": null,
+          "compare_hint_angle": null,
+          "compare_hint_direction": null,
+          "angle": null,
+          "angle_source": null,
+          "angle_confidence": 0.0,
+          "direction": null,
+          "pose": null,
+          "view": null,
+          "crop_box": null,
+          "sharpness_score": 0.0,
+          "sharpness_level": null,
+          "issues": [
+            "面部检测失败: 未检测到面部: /Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术前13.jpeg"
+          ],
+          "rejection_reason": "face_detection_failure",
+          "semantic_screen": null,
+          "semantic_applied_fields": [],
+          "profile_fallback": {
+            "status": "skipped",
+            "source": "profile-cascade",
+            "landmark_error": "未检测到面部: /Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术前13.jpeg",
+            "reason": "not_side_candidate"
+          }
+        },
+        {
+          "name": "术前14.jpeg",
+          "path": "/Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术前14.jpeg",
+          "relative_path": "术前14.jpeg",
+          "group_relative_path": "术前14.jpeg",
+          "phase": "before",
+          "phase_source": "filename",
+          "phase_source_path": null,
+          "index": 14,
+          "filename_angle": null,
+          "filename_direction": null,
+          "compare_hint_angle": null,
+          "compare_hint_direction": null,
+          "angle": null,
+          "angle_source": null,
+          "angle_confidence": 0.0,
+          "direction": null,
+          "pose": null,
+          "view": null,
+          "crop_box": null,
+          "sharpness_score": 0.0,
+          "sharpness_level": null,
+          "issues": [
+            "面部检测失败: 未检测到面部: /Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术前14.jpeg"
+          ],
+          "rejection_reason": "face_detection_failure",
+          "semantic_screen": null,
+          "semantic_applied_fields": [],
+          "profile_fallback": {
+            "status": "skipped",
+            "source": "profile-cascade",
+            "landmark_error": "未检测到面部: /Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术前14.jpeg",
+            "reason": "not_side_candidate"
+          }
+        },
+        {
+          "name": "术前15.jpeg",
+          "path": "/Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术前15.jpeg",
+          "relative_path": "术前15.jpeg",
+          "group_relative_path": "术前15.jpeg",
+          "phase": "before",
+          "phase_source": "filename",
+          "phase_source_path": null,
+          "index": 15,
+          "filename_angle": null,
+          "filename_direction": null,
+          "compare_hint_angle": null,
+          "compare_hint_direction": null,
+          "angle": null,
+          "angle_source": null,
+          "angle_confidence": 0.0,
+          "direction": null,
+          "pose": null,
+          "view": null,
+          "crop_box": null,
+          "sharpness_score": 0.0,
+          "sharpness_level": null,
+          "issues": [
+            "面部检测失败: 未检测到面部: /Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术前15.jpeg"
+          ],
+          "rejection_reason": "face_detection_failure",
+          "semantic_screen": null,
+          "semantic_applied_fields": [],
+          "profile_fallback": {
+            "status": "skipped",
+            "source": "profile-cascade",
+            "landmark_error": "未检测到面部: /Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术前15.jpeg",
+            "reason": "not_side_candidate"
+          }
+        },
+        {
+          "name": "术前16.jpeg",
+          "path": "/Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术前16.jpeg",
+          "relative_path": "术前16.jpeg",
+          "group_relative_path": "术前16.jpeg",
+          "phase": "before",
+          "phase_source": "filename",
+          "phase_source_path": null,
+          "index": 16,
+          "filename_angle": null,
+          "filename_direction": null,
+          "compare_hint_angle": null,
+          "compare_hint_direction": null,
+          "angle": "oblique",
+          "angle_source": "pose",
+          "angle_confidence": 0.6551,
+          "direction": "right",
+          "pose": {
+            "pitch": -11.5,
+            "yaw": 31.12,
+            "roll": 8.96
+          },
+          "view": {
+            "bucket": "oblique",
+            "direction": "right",
+            "confidence": 0.6551
+          },
+          "crop_box": {
+            "x1": 248,
+            "y1": 225,
+            "x2": 835,
+            "y2": 779
+          },
+          "sharpness_score": 36.93,
+          "sharpness_level": "clear",
+          "issues": [],
+          "rejection_reason": null,
+          "semantic_screen": null,
+          "semantic_applied_fields": [],
+          "profile_fallback": null
+        },
+        {
+          "name": "术前17.jpeg",
+          "path": "/Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术前17.jpeg",
+          "relative_path": "术前17.jpeg",
+          "group_relative_path": "术前17.jpeg",
+          "phase": "before",
+          "phase_source": "filename",
+          "phase_source_path": null,
+          "index": 17,
+          "filename_angle": null,
+          "filename_direction": null,
+          "compare_hint_angle": null,
+          "compare_hint_direction": null,
+          "angle": "oblique",
+          "angle_source": "pose",
+          "angle_confidence": 0.7281,
+          "direction": "right",
+          "pose": {
+            "pitch": 9.04,
+            "yaw": 29.3,
+            "roll": 3.93
+          },
+          "view": {
+            "bucket": "oblique",
+            "direction": "right",
+            "confidence": 0.7281
+          },
+          "crop_box": {
+            "x1": 273,
+            "y1": 289,
+            "x2": 853,
+            "y2": 865
+          },
+          "sharpness_score": 24.02,
+          "sharpness_level": "clear",
+          "issues": [],
+          "rejection_reason": null,
+          "semantic_screen": null,
+          "semantic_applied_fields": [],
+          "profile_fallback": null
+        },
+        {
+          "name": "术前18.jpeg",
+          "path": "/Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术前18.jpeg",
+          "relative_path": "术前18.jpeg",
+          "group_relative_path": "术前18.jpeg",
+          "phase": "before",
+          "phase_source": "filename",
+          "phase_source_path": null,
+          "index": 18,
+          "filename_angle": null,
+          "filename_direction": null,
+          "compare_hint_angle": null,
+          "compare_hint_direction": null,
+          "angle": "oblique",
+          "angle_source": "pose",
+          "angle_confidence": 0.614,
+          "direction": "left",
+          "pose": {
+            "pitch": 12.53,
+            "yaw": -32.15,
+            "roll": -7.53
+          },
+          "view": {
+            "bucket": "oblique",
+            "direction": "left",
+            "confidence": 0.614
+          },
+          "crop_box": {
+            "x1": 0,
+            "y1": 266,
+            "x2": 592,
+            "y2": 842
+          },
+          "sharpness_score": 58.09,
+          "sharpness_level": "clear",
+          "issues": [],
+          "rejection_reason": null,
+          "semantic_screen": null,
+          "semantic_applied_fields": [],
+          "profile_fallback": null
+        },
+        {
+          "name": "术前19.jpeg",
+          "path": "/Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术前19.jpeg",
+          "relative_path": "术前19.jpeg",
+          "group_relative_path": "术前19.jpeg",
+          "phase": "before",
+          "phase_source": "filename",
+          "phase_source_path": null,
+          "index": 19,
+          "filename_angle": null,
+          "filename_direction": null,
+          "compare_hint_angle": null,
+          "compare_hint_direction": null,
+          "angle": "oblique",
+          "angle_source": "pose",
+          "angle_confidence": 0.55,
+          "direction": "left",
+          "pose": {
+            "pitch": -6.95,
+            "yaw": -34.34,
+            "roll": -8.78
+          },
+          "view": {
+            "bucket": "oblique",
+            "direction": "left",
+            "confidence": 0.55
+          },
+          "crop_box": {
+            "x1": 16,
+            "y1": 209,
+            "x2": 599,
+            "y2": 759
+          },
+          "sharpness_score": 42.59,
+          "sharpness_level": "clear",
+          "issues": [],
+          "rejection_reason": null,
+          "semantic_screen": null,
+          "semantic_applied_fields": [],
+          "profile_fallback": null
+        },
+        {
+          "name": "术前2.jpeg",
+          "path": "/Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术前2.jpeg",
+          "relative_path": "术前2.jpeg",
+          "group_relative_path": "术前2.jpeg",
+          "phase": "before",
+          "phase_source": "filename",
+          "phase_source_path": null,
+          "index": 2,
+          "filename_angle": null,
+          "filename_direction": null,
+          "compare_hint_angle": null,
+          "compare_hint_direction": null,
+          "angle": "front",
+          "angle_source": "pose",
+          "angle_confidence": 0.9126,
+          "direction": "center",
+          "pose": {
+            "pitch": -27.1,
+            "yaw": -1.75,
+            "roll": -0.91
+          },
+          "view": {
+            "bucket": "front",
+            "direction": "center",
+            "confidence": 0.9126
+          },
+          "crop_box": {
+            "x1": 147,
+            "y1": 234,
+            "x2": 710,
+            "y2": 779
+          },
+          "sharpness_score": 10.68,
+          "sharpness_level": "soft",
+          "issues": [],
+          "rejection_reason": null,
+          "semantic_screen": null,
+          "semantic_applied_fields": [],
+          "profile_fallback": null
+        },
+        {
+          "name": "术前20.jpeg",
+          "path": "/Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术前20.jpeg",
+          "relative_path": "术前20.jpeg",
+          "group_relative_path": "术前20.jpeg",
+          "phase": "before",
+          "phase_source": "filename",
+          "phase_source_path": null,
+          "index": 20,
+          "filename_angle": null,
+          "filename_direction": null,
+          "compare_hint_angle": null,
+          "compare_hint_direction": null,
+          "angle": "oblique",
+          "angle_source": "pose",
+          "angle_confidence": 0.5502,
+          "direction": "left",
+          "pose": {
+            "pitch": 18.14,
+            "yaw": -33.74,
+            "roll": -5.4
+          },
+          "view": {
+            "bucket": "oblique",
+            "direction": "left",
+            "confidence": 0.5502
+          },
+          "crop_box": {
+            "x1": 7,
+            "y1": 316,
+            "x2": 616,
+            "y2": 891
+          },
+          "sharpness_score": 50.87,
+          "sharpness_level": "clear",
+          "issues": [],
+          "rejection_reason": null,
+          "semantic_screen": null,
+          "semantic_applied_fields": [],
+          "profile_fallback": null
+        },
+        {
+          "name": "术前3.jpeg",
+          "path": "/Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术前3.jpeg",
+          "relative_path": "术前3.jpeg",
+          "group_relative_path": "术前3.jpeg",
+          "phase": "before",
+          "phase_source": "filename",
+          "phase_source_path": null,
+          "index": 3,
+          "filename_angle": null,
+          "filename_direction": null,
+          "compare_hint_angle": null,
+          "compare_hint_direction": null,
+          "angle": "front",
+          "angle_source": "pose",
+          "angle_confidence": 0.9557,
+          "direction": "center",
+          "pose": {
+            "pitch": 30.14,
+            "yaw": -0.89,
+            "roll": -2.91
+          },
+          "view": {
+            "bucket": "front",
+            "direction": "center",
+            "confidence": 0.9557
+          },
+          "crop_box": {
+            "x1": 103,
+            "y1": 550,
+            "x2": 724,
+            "y2": 1151
+          },
+          "sharpness_score": 79.82,
+          "sharpness_level": "clear",
+          "issues": [],
+          "rejection_reason": null,
+          "semantic_screen": null,
+          "semantic_applied_fields": [],
+          "profile_fallback": null
+        },
+        {
+          "name": "术前4.jpeg",
+          "path": "/Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术前4.jpeg",
+          "relative_path": "术前4.jpeg",
+          "group_relative_path": "术前4.jpeg",
+          "phase": "before",
+          "phase_source": "filename",
+          "phase_source_path": null,
+          "index": 4,
+          "filename_angle": null,
+          "filename_direction": null,
+          "compare_hint_angle": null,
+          "compare_hint_direction": null,
+          "angle": "side",
+          "angle_source": "pose",
+          "angle_confidence": 0.9379,
+          "direction": "left",
+          "pose": {
+            "pitch": 12.0,
+            "yaw": -42.14,
+            "roll": -8.58
+          },
+          "view": {
+            "bucket": "side",
+            "direction": "left",
+            "confidence": 0.9379
+          },
+          "crop_box": {
+            "x1": 0,
+            "y1": 316,
+            "x2": 550,
+            "y2": 877
+          },
+          "sharpness_score": 61.6,
+          "sharpness_level": "clear",
+          "issues": [],
+          "rejection_reason": null,
+          "semantic_screen": null,
+          "semantic_applied_fields": [],
+          "profile_fallback": null
+        },
+        {
+          "name": "术前5.jpeg",
+          "path": "/Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术前5.jpeg",
+          "relative_path": "术前5.jpeg",
+          "group_relative_path": "术前5.jpeg",
+          "phase": "before",
+          "phase_source": "filename",
+          "phase_source_path": null,
+          "index": 5,
+          "filename_angle": null,
+          "filename_direction": null,
+          "compare_hint_angle": null,
+          "compare_hint_direction": null,
+          "angle": "side",
+          "angle_source": "pose",
+          "angle_confidence": 0.98,
+          "direction": "left",
+          "pose": {
+            "pitch": -17.72,
+            "yaw": -49.72,
+            "roll": -32.7
+          },
+          "view": {
+            "bucket": "side",
+            "direction": "left",
+            "confidence": 0.98
+          },
+          "crop_box": {
+            "x1": 177,
+            "y1": 113,
+            "x2": 712,
+            "y2": 618
+          },
+          "sharpness_score": 50.08,
+          "sharpness_level": "clear",
+          "issues": [],
+          "rejection_reason": null,
+          "semantic_screen": null,
+          "semantic_applied_fields": [],
+          "profile_fallback": null
+        },
+        {
+          "name": "术前6.jpeg",
+          "path": "/Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术前6.jpeg",
+          "relative_path": "术前6.jpeg",
+          "group_relative_path": "术前6.jpeg",
+          "phase": "before",
+          "phase_source": "filename",
+          "phase_source_path": null,
+          "index": 6,
+          "filename_angle": null,
+          "filename_direction": null,
+          "compare_hint_angle": null,
+          "compare_hint_direction": null,
+          "angle": "side",
+          "angle_source": "pose",
+          "angle_confidence": 0.8793,
+          "direction": "left",
+          "pose": {
+            "pitch": 32.07,
+            "yaw": -40.38,
+            "roll": 1.4
+          },
+          "view": {
+            "bucket": "side",
+            "direction": "left",
+            "confidence": 0.8793
+          },
+          "crop_box": {
+            "x1": 14,
+            "y1": 533,
+            "x2": 547,
+            "y2": 1036
+          },
+          "sharpness_score": 72.87,
+          "sharpness_level": "clear",
+          "issues": [],
+          "rejection_reason": null,
+          "semantic_screen": null,
+          "semantic_applied_fields": [],
+          "profile_fallback": null
+        },
+        {
+          "name": "术前7.jpeg",
+          "path": "/Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术前7.jpeg",
+          "relative_path": "术前7.jpeg",
+          "group_relative_path": "术前7.jpeg",
+          "phase": "before",
+          "phase_source": "filename",
+          "phase_source_path": null,
+          "index": 7,
+          "filename_angle": null,
+          "filename_direction": null,
+          "compare_hint_angle": null,
+          "compare_hint_direction": null,
+          "angle": null,
+          "angle_source": null,
+          "angle_confidence": 0.0,
+          "direction": null,
+          "pose": null,
+          "view": null,
+          "crop_box": null,
+          "sharpness_score": 0.0,
+          "sharpness_level": null,
+          "issues": [
+            "面部检测失败: 未检测到面部: /Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术前7.jpeg"
+          ],
+          "rejection_reason": "face_detection_failure",
+          "semantic_screen": null,
+          "semantic_applied_fields": [],
+          "profile_fallback": {
+            "status": "skipped",
+            "source": "profile-cascade",
+            "landmark_error": "未检测到面部: /Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术前7.jpeg",
+            "reason": "not_side_candidate"
+          }
+        },
+        {
+          "name": "术前8.jpeg",
+          "path": "/Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术前8.jpeg",
+          "relative_path": "术前8.jpeg",
+          "group_relative_path": "术前8.jpeg",
+          "phase": "before",
+          "phase_source": "filename",
+          "phase_source_path": null,
+          "index": 8,
+          "filename_angle": null,
+          "filename_direction": null,
+          "compare_hint_angle": null,
+          "compare_hint_direction": null,
+          "angle": "side",
+          "angle_source": "pose",
+          "angle_confidence": 0.98,
+          "direction": "left",
+          "pose": {
+            "pitch": 20.79,
+            "yaw": -55.5,
+            "roll": -62.85
+          },
+          "view": {
+            "bucket": "side",
+            "direction": "left",
+            "confidence": 0.98
+          },
+          "crop_box": {
+            "x1": 53,
+            "y1": 181,
+            "x2": 612,
+            "y2": 709
+          },
+          "sharpness_score": 57.68,
+          "sharpness_level": "clear",
+          "issues": [],
+          "rejection_reason": null,
+          "semantic_screen": null,
+          "semantic_applied_fields": [],
+          "profile_fallback": null
+        },
+        {
+          "name": "术前9.jpeg",
+          "path": "/Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术前9.jpeg",
+          "relative_path": "术前9.jpeg",
+          "group_relative_path": "术前9.jpeg",
+          "phase": "before",
+          "phase_source": "filename",
+          "phase_source_path": null,
+          "index": 9,
+          "filename_angle": null,
+          "filename_direction": null,
+          "compare_hint_angle": null,
+          "compare_hint_direction": null,
+          "angle": null,
+          "angle_source": null,
+          "angle_confidence": 0.0,
+          "direction": null,
+          "pose": null,
+          "view": null,
+          "crop_box": null,
+          "sharpness_score": 0.0,
+          "sharpness_level": null,
+          "issues": [
+            "面部检测失败: 未检测到面部: /Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术前9.jpeg"
+          ],
+          "rejection_reason": "face_detection_failure",
+          "semantic_screen": null,
+          "semantic_applied_fields": [],
+          "profile_fallback": {
+            "status": "skipped",
+            "source": "profile-cascade",
+            "landmark_error": "未检测到面部: /Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术前9.jpeg",
+            "reason": "not_side_candidate"
+          }
+        },
+        {
+          "name": "术后即刻1.jpeg",
+          "path": "/Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术后即刻1.jpeg",
+          "relative_path": "术后即刻1.jpeg",
+          "group_relative_path": "术后即刻1.jpeg",
+          "phase": "after",
+          "phase_source": "filename",
+          "phase_source_path": null,
+          "index": 1,
+          "filename_angle": null,
+          "filename_direction": null,
+          "compare_hint_angle": null,
+          "compare_hint_direction": null,
+          "angle": "front",
+          "angle_source": "pose",
+          "angle_confidence": 0.9377,
+          "direction": "center",
+          "pose": {
+            "pitch": 0.53,
+            "yaw": 1.25,
+            "roll": -2.16
+          },
+          "view": {
+            "bucket": "front",
+            "direction": "center",
+            "confidence": 0.9377
+          },
+          "crop_box": {
+            "x1": 100,
+            "y1": 426,
+            "x2": 759,
+            "y2": 1048
+          },
+          "sharpness_score": 23.44,
+          "sharpness_level": "clear",
+          "issues": [],
+          "rejection_reason": null,
+          "semantic_screen": null,
+          "semantic_applied_fields": [],
+          "profile_fallback": null
+        },
+        {
+          "name": "术后即刻10.jpeg",
+          "path": "/Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术后即刻10.jpeg",
+          "relative_path": "术后即刻10.jpeg",
+          "group_relative_path": "术后即刻10.jpeg",
+          "phase": "after",
+          "phase_source": "filename",
+          "phase_source_path": null,
+          "index": 10,
+          "filename_angle": null,
+          "filename_direction": null,
+          "compare_hint_angle": null,
+          "compare_hint_direction": null,
+          "angle": "oblique",
+          "angle_source": "pose",
+          "angle_confidence": 0.8147,
+          "direction": "left",
+          "pose": {
+            "pitch": 8.77,
+            "yaw": -27.13,
+            "roll": -1.87
+          },
+          "view": {
+            "bucket": "oblique",
+            "direction": "left",
+            "confidence": 0.8147
+          },
+          "crop_box": {
+            "x1": 0,
+            "y1": 406,
+            "x2": 614,
+            "y2": 1022
+          },
+          "sharpness_score": 76.53,
+          "sharpness_level": "clear",
+          "issues": [],
+          "rejection_reason": null,
+          "semantic_screen": null,
+          "semantic_applied_fields": [],
+          "profile_fallback": null
+        },
+        {
+          "name": "术后即刻11.jpeg",
+          "path": "/Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术后即刻11.jpeg",
+          "relative_path": "术后即刻11.jpeg",
+          "group_relative_path": "术后即刻11.jpeg",
+          "phase": "after",
+          "phase_source": "filename",
+          "phase_source_path": null,
+          "index": 11,
+          "filename_angle": null,
+          "filename_direction": null,
+          "compare_hint_angle": null,
+          "compare_hint_direction": null,
+          "angle": "oblique",
+          "angle_source": "pose",
+          "angle_confidence": 0.759,
+          "direction": "left",
+          "pose": {
+            "pitch": -8.62,
+            "yaw": -28.52,
+            "roll": -3.68
+          },
+          "view": {
+            "bucket": "oblique",
+            "direction": "left",
+            "confidence": 0.759
+          },
+          "crop_box": {
+            "x1": 0,
+            "y1": 364,
+            "x2": 629,
+            "y2": 966
+          },
+          "sharpness_score": 44.84,
+          "sharpness_level": "clear",
+          "issues": [],
+          "rejection_reason": null,
+          "semantic_screen": null,
+          "semantic_applied_fields": [],
+          "profile_fallback": null
+        },
+        {
+          "name": "术后即刻12.jpeg",
+          "path": "/Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术后即刻12.jpeg",
+          "relative_path": "术后即刻12.jpeg",
+          "group_relative_path": "术后即刻12.jpeg",
+          "phase": "after",
+          "phase_source": "filename",
+          "phase_source_path": null,
+          "index": 12,
+          "filename_angle": null,
+          "filename_direction": null,
+          "compare_hint_angle": null,
+          "compare_hint_direction": null,
+          "angle": "oblique",
+          "angle_source": "pose",
+          "angle_confidence": 0.8535,
+          "direction": "left",
+          "pose": {
+            "pitch": 13.03,
+            "yaw": -26.16,
+            "roll": -0.79
+          },
+          "view": {
+            "bucket": "oblique",
+            "direction": "left",
+            "confidence": 0.8535
+          },
+          "crop_box": {
+            "x1": 0,
+            "y1": 427,
+            "x2": 603,
+            "y2": 1023
+          },
+          "sharpness_score": 39.56,
+          "sharpness_level": "clear",
+          "issues": [],
+          "rejection_reason": null,
+          "semantic_screen": null,
+          "semantic_applied_fields": [],
+          "profile_fallback": null
+        },
+        {
+          "name": "术后即刻13.jpeg",
+          "path": "/Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术后即刻13.jpeg",
+          "relative_path": "术后即刻13.jpeg",
+          "group_relative_path": "术后即刻13.jpeg",
+          "phase": "after",
+          "phase_source": "filename",
+          "phase_source_path": null,
+          "index": 13,
+          "filename_angle": null,
+          "filename_direction": null,
+          "compare_hint_angle": null,
+          "compare_hint_direction": null,
+          "angle": null,
+          "angle_source": null,
+          "angle_confidence": 0.0,
+          "direction": null,
+          "pose": null,
+          "view": null,
+          "crop_box": null,
+          "sharpness_score": 0.0,
+          "sharpness_level": null,
+          "issues": [
+            "面部检测失败: 未检测到面部: /Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术后即刻13.jpeg"
+          ],
+          "rejection_reason": "face_detection_failure",
+          "semantic_screen": null,
+          "semantic_applied_fields": [],
+          "profile_fallback": {
+            "status": "skipped",
+            "source": "profile-cascade",
+            "landmark_error": "未检测到面部: /Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术后即刻13.jpeg",
+            "reason": "not_side_candidate"
+          }
+        },
+        {
+          "name": "术后即刻14.jpeg",
+          "path": "/Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术后即刻14.jpeg",
+          "relative_path": "术后即刻14.jpeg",
+          "group_relative_path": "术后即刻14.jpeg",
+          "phase": "after",
+          "phase_source": "filename",
+          "phase_source_path": null,
+          "index": 14,
+          "filename_angle": null,
+          "filename_direction": null,
+          "compare_hint_angle": null,
+          "compare_hint_direction": null,
+          "angle": "side",
+          "angle_source": "pose",
+          "angle_confidence": 0.98,
+          "direction": "left",
+          "pose": {
+            "pitch": 8.79,
+            "yaw": -64.71,
+            "roll": -29.4
+          },
+          "view": {
+            "bucket": "side",
+            "direction": "left",
+            "confidence": 0.98
+          },
+          "crop_box": {
+            "x1": 16,
+            "y1": 366,
+            "x2": 552,
+            "y2": 872
+          },
+          "sharpness_score": 56.52,
+          "sharpness_level": "clear",
+          "issues": [],
+          "rejection_reason": null,
+          "semantic_screen": null,
+          "semantic_applied_fields": [],
+          "profile_fallback": null
+        },
+        {
+          "name": "术后即刻15.jpeg",
+          "path": "/Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术后即刻15.jpeg",
+          "relative_path": "术后即刻15.jpeg",
+          "group_relative_path": "术后即刻15.jpeg",
+          "phase": "after",
+          "phase_source": "filename",
+          "phase_source_path": null,
+          "index": 15,
+          "filename_angle": null,
+          "filename_direction": null,
+          "compare_hint_angle": null,
+          "compare_hint_direction": null,
+          "angle": null,
+          "angle_source": null,
+          "angle_confidence": 0.0,
+          "direction": null,
+          "pose": null,
+          "view": null,
+          "crop_box": null,
+          "sharpness_score": 0.0,
+          "sharpness_level": null,
+          "issues": [
+            "面部检测失败: 未检测到面部: /Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术后即刻15.jpeg"
+          ],
+          "rejection_reason": "face_detection_failure",
+          "semantic_screen": null,
+          "semantic_applied_fields": [],
+          "profile_fallback": {
+            "status": "skipped",
+            "source": "profile-cascade",
+            "landmark_error": "未检测到面部: /Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术后即刻15.jpeg",
+            "reason": "not_side_candidate"
+          }
+        },
+        {
+          "name": "术后即刻2.jpeg",
+          "path": "/Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术后即刻2.jpeg",
+          "relative_path": "术后即刻2.jpeg",
+          "group_relative_path": "术后即刻2.jpeg",
+          "phase": "after",
+          "phase_source": "filename",
+          "phase_source_path": null,
+          "index": 2,
+          "filename_angle": null,
+          "filename_direction": null,
+          "compare_hint_angle": null,
+          "compare_hint_direction": null,
+          "angle": "front",
+          "angle_source": "pose",
+          "angle_confidence": 0.8888,
+          "direction": "center",
+          "pose": {
+            "pitch": -13.87,
+            "yaw": 2.22,
+            "roll": 0.03
+          },
+          "view": {
+            "bucket": "front",
+            "direction": "center",
+            "confidence": 0.8888
+          },
+          "crop_box": {
+            "x1": 100,
+            "y1": 397,
+            "x2": 712,
+            "y2": 980
+          },
+          "sharpness_score": 26.0,
+          "sharpness_level": "clear",
+          "issues": [],
+          "rejection_reason": null,
+          "semantic_screen": null,
+          "semantic_applied_fields": [],
+          "profile_fallback": null
+        },
+        {
+          "name": "术后即刻3.jpeg",
+          "path": "/Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术后即刻3.jpeg",
+          "relative_path": "术后即刻3.jpeg",
+          "group_relative_path": "术后即刻3.jpeg",
+          "phase": "after",
+          "phase_source": "filename",
+          "phase_source_path": null,
+          "index": 3,
+          "filename_angle": null,
+          "filename_direction": null,
+          "compare_hint_angle": null,
+          "compare_hint_direction": null,
+          "angle": "front",
+          "angle_source": "pose",
+          "angle_confidence": 0.9022,
+          "direction": "center",
+          "pose": {
+            "pitch": 10.74,
+            "yaw": 1.96,
+            "roll": -1.93
+          },
+          "view": {
+            "bucket": "front",
+            "direction": "center",
+            "confidence": 0.9022
+          },
+          "crop_box": {
+            "x1": 106,
+            "y1": 424,
+            "x2": 750,
+            "y2": 1037
+          },
+          "sharpness_score": 32.2,
+          "sharpness_level": "clear",
+          "issues": [],
+          "rejection_reason": null,
+          "semantic_screen": null,
+          "semantic_applied_fields": [],
+          "profile_fallback": null
+        },
+        {
+          "name": "术后即刻4.jpeg",
+          "path": "/Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术后即刻4.jpeg",
+          "relative_path": "术后即刻4.jpeg",
+          "group_relative_path": "术后即刻4.jpeg",
+          "phase": "after",
+          "phase_source": "filename",
+          "phase_source_path": null,
+          "index": 4,
+          "filename_angle": null,
+          "filename_direction": null,
+          "compare_hint_angle": null,
+          "compare_hint_direction": null,
+          "angle": "oblique",
+          "angle_source": "pose",
+          "angle_confidence": 0.6281,
+          "direction": "right",
+          "pose": {
+            "pitch": 2.73,
+            "yaw": 31.8,
+            "roll": 1.99
+          },
+          "view": {
+            "bucket": "oblique",
+            "direction": "right",
+            "confidence": 0.6281
+          },
+          "crop_box": {
+            "x1": 298,
+            "y1": 423,
+            "x2": 853,
+            "y2": 1026
+          },
+          "sharpness_score": 49.15,
+          "sharpness_level": "clear",
+          "issues": [],
+          "rejection_reason": null,
+          "semantic_screen": null,
+          "semantic_applied_fields": [],
+          "profile_fallback": null
+        },
+        {
+          "name": "术后即刻5.jpeg",
+          "path": "/Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术后即刻5.jpeg",
+          "relative_path": "术后即刻5.jpeg",
+          "group_relative_path": "术后即刻5.jpeg",
+          "phase": "after",
+          "phase_source": "filename",
+          "phase_source_path": null,
+          "index": 5,
+          "filename_angle": null,
+          "filename_direction": null,
+          "compare_hint_angle": null,
+          "compare_hint_direction": null,
+          "angle": "oblique",
+          "angle_source": "pose",
+          "angle_confidence": 0.55,
+          "direction": "right",
+          "pose": {
+            "pitch": -11.1,
+            "yaw": 34.85,
+            "roll": 6.97
+          },
+          "view": {
+            "bucket": "oblique",
+            "direction": "right",
+            "confidence": 0.55
+          },
+          "crop_box": {
+            "x1": 242,
+            "y1": 389,
+            "x2": 853,
+            "y2": 972
+          },
+          "sharpness_score": 60.5,
+          "sharpness_level": "clear",
+          "issues": [],
+          "rejection_reason": null,
+          "semantic_screen": null,
+          "semantic_applied_fields": [],
+          "profile_fallback": null
+        },
+        {
+          "name": "术后即刻6.jpeg",
+          "path": "/Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术后即刻6.jpeg",
+          "relative_path": "术后即刻6.jpeg",
+          "group_relative_path": "术后即刻6.jpeg",
+          "phase": "after",
+          "phase_source": "filename",
+          "phase_source_path": null,
+          "index": 6,
+          "filename_angle": null,
+          "filename_direction": null,
+          "compare_hint_angle": null,
+          "compare_hint_direction": null,
+          "angle": "oblique",
+          "angle_source": "pose",
+          "angle_confidence": 0.6929,
+          "direction": "right",
+          "pose": {
+            "pitch": 11.46,
+            "yaw": 30.18,
+            "roll": 0.67
+          },
+          "view": {
+            "bucket": "oblique",
+            "direction": "right",
+            "confidence": 0.6929
+          },
+          "crop_box": {
+            "x1": 301,
+            "y1": 449,
+            "x2": 853,
+            "y2": 1028
+          },
+          "sharpness_score": 60.06,
+          "sharpness_level": "clear",
+          "issues": [],
+          "rejection_reason": null,
+          "semantic_screen": null,
+          "semantic_applied_fields": [],
+          "profile_fallback": null
+        },
+        {
+          "name": "术后即刻7.jpeg",
+          "path": "/Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术后即刻7.jpeg",
+          "relative_path": "术后即刻7.jpeg",
+          "group_relative_path": "术后即刻7.jpeg",
+          "phase": "after",
+          "phase_source": "filename",
+          "phase_source_path": null,
+          "index": 7,
+          "filename_angle": null,
+          "filename_direction": null,
+          "compare_hint_angle": null,
+          "compare_hint_direction": null,
+          "angle": null,
+          "angle_source": null,
+          "angle_confidence": 0.0,
+          "direction": null,
+          "pose": null,
+          "view": null,
+          "crop_box": null,
+          "sharpness_score": 0.0,
+          "sharpness_level": null,
+          "issues": [
+            "面部检测失败: 未检测到面部: /Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术后即刻7.jpeg"
+          ],
+          "rejection_reason": "face_detection_failure",
+          "semantic_screen": null,
+          "semantic_applied_fields": [],
+          "profile_fallback": {
+            "status": "skipped",
+            "source": "profile-cascade",
+            "landmark_error": "未检测到面部: /Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术后即刻7.jpeg",
+            "reason": "not_side_candidate"
+          }
+        },
+        {
+          "name": "术后即刻8.jpeg",
+          "path": "/Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术后即刻8.jpeg",
+          "relative_path": "术后即刻8.jpeg",
+          "group_relative_path": "术后即刻8.jpeg",
+          "phase": "after",
+          "phase_source": "filename",
+          "phase_source_path": null,
+          "index": 8,
+          "filename_angle": null,
+          "filename_direction": null,
+          "compare_hint_angle": null,
+          "compare_hint_direction": null,
+          "angle": "side",
+          "angle_source": "pose",
+          "angle_confidence": 0.98,
+          "direction": "right",
+          "pose": {
+            "pitch": 13.09,
+            "yaw": 58.37,
+            "roll": 32.38
+          },
+          "view": {
+            "bucket": "side",
+            "direction": "right",
+            "confidence": 0.98
+          },
+          "crop_box": {
+            "x1": 285,
+            "y1": 427,
+            "x2": 847,
+            "y2": 958
+          },
+          "sharpness_score": 107.87,
+          "sharpness_level": "clear",
+          "issues": [],
+          "rejection_reason": null,
+          "semantic_screen": null,
+          "semantic_applied_fields": [],
+          "profile_fallback": null
+        },
+        {
+          "name": "术后即刻9.jpeg",
+          "path": "/Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术后即刻9.jpeg",
+          "relative_path": "术后即刻9.jpeg",
+          "group_relative_path": "术后即刻9.jpeg",
+          "phase": "after",
+          "phase_source": "filename",
+          "phase_source_path": null,
+          "index": 9,
+          "filename_angle": null,
+          "filename_direction": null,
+          "compare_hint_angle": null,
+          "compare_hint_direction": null,
+          "angle": null,
+          "angle_source": null,
+          "angle_confidence": 0.0,
+          "direction": null,
+          "pose": null,
+          "view": null,
+          "crop_box": null,
+          "sharpness_score": 0.0,
+          "sharpness_level": null,
+          "issues": [
+            "面部检测失败: 未检测到面部: /Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术后即刻9.jpeg"
+          ],
+          "rejection_reason": "face_detection_failure",
+          "semantic_screen": null,
+          "semantic_applied_fields": [],
+          "profile_fallback": {
+            "status": "skipped",
+            "source": "profile-cascade",
+            "landmark_error": "未检测到面部: /Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术后即刻9.jpeg",
+            "reason": "not_side_candidate"
+          }
+        }
+      ],
+      "selected_slots": {
+        "oblique": {
+          "label": "45°侧",
+          "direction": "left",
+          "pose_delta": {
+            "yaw": 5.02,
+            "pitch": 3.76,
+            "roll": 5.66,
+            "weighted": 11.61
+          },
+          "semantic_pair_review": null,
+          "before": {
+            "name": "术前18.jpeg",
+            "path": "/Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术前18.jpeg",
+            "relative_path": "术前18.jpeg",
+            "group_relative_path": "术前18.jpeg",
+            "index": 18,
+            "angle": "oblique",
+            "angle_source": "pose",
+            "angle_confidence": 0.614,
+            "direction": "left",
+            "pose": {
+              "pitch": 12.53,
+              "yaw": -32.15,
+              "roll": -7.53
+            },
+            "crop_box": {
+              "x1": 0,
+              "y1": 266,
+              "x2": 592,
+              "y2": 842
+            },
+            "sharpness_score": 58.09,
+            "sharpness_level": "clear",
+            "phase_source": "filename",
+            "phase_source_path": null,
+            "profile_fallback": null,
+            "semantic_screen": null,
+            "semantic_applied_fields": []
+          },
+          "after": {
+            "name": "术后即刻10.jpeg",
+            "path": "/Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术后即刻10.jpeg",
+            "relative_path": "术后即刻10.jpeg",
+            "group_relative_path": "术后即刻10.jpeg",
+            "index": 10,
+            "angle": "oblique",
+            "angle_source": "pose",
+            "angle_confidence": 0.8147,
+            "direction": "left",
+            "pose": {
+              "pitch": 8.77,
+              "yaw": -27.13,
+              "roll": -1.87
+            },
+            "crop_box": {
+              "x1": 0,
+              "y1": 406,
+              "x2": 614,
+              "y2": 1022
+            },
+            "sharpness_score": 76.53,
+            "sharpness_level": "clear",
+            "phase_source": "filename",
+            "phase_source_path": null,
+            "profile_fallback": null,
+            "semantic_screen": null,
+            "semantic_applied_fields": []
+          }
+        }
+      },
+      "render_slots": [],
+      "effective_template": null,
+      "template_label": null,
+      "downgraded_from": null,
+      "blocking_issues": [
+        "2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角：正面 术前术后姿态差过大(yaw=2.85, pitch=19.40, roll=0.98, weighted=22.74)，已拒绝增强与出图",
+        "2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角：侧面 术前术后姿态差过大(yaw=14.51, pitch=1.87, roll=26.35, weighted=29.55)，已拒绝增强与出图",
+        "2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角：缺少术前术后都可用的正面样本，无法自动降级模板"
+      ],
+      "warnings": [
+        "2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角：术中1.jpeg - 文件名缺少术前/术后关键词",
+        "2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角：术中2.jpeg - 文件名缺少术前/术后关键词",
+        "2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角：术中3.jpeg - 文件名缺少术前/术后关键词",
+        "2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角：术中4.jpeg - 文件名缺少术前/术后关键词",
+        "2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角：术中5.jpeg - 文件名缺少术前/术后关键词",
+        "2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角：术中6.jpeg - 文件名缺少术前/术后关键词",
+        "2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角：术前13.jpeg - 面部检测失败: 未检测到面部: /Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术前13.jpeg",
+        "2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角：术前14.jpeg - 面部检测失败: 未检测到面部: /Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术前14.jpeg",
+        "2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角：术前15.jpeg - 面部检测失败: 未检测到面部: /Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术前15.jpeg",
+        "2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角：术前7.jpeg - 面部检测失败: 未检测到面部: /Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术前7.jpeg",
+        "2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角：术前9.jpeg - 面部检测失败: 未检测到面部: /Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术前9.jpeg",
+        "2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角：术后即刻13.jpeg - 面部检测失败: 未检测到面部: /Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术后即刻13.jpeg",
+        "2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角：术后即刻15.jpeg - 面部检测失败: 未检测到面部: /Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术后即刻15.jpeg",
+        "2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角：术后即刻7.jpeg - 面部检测失败: 未检测到面部: /Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术后即刻7.jpeg",
+        "2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角：术后即刻9.jpeg - 面部检测失败: 未检测到面部: /Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术后即刻9.jpeg",
+        "2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角：术前 45°侧 存在多个姿态推断候选，已按最佳分数择优",
+        "2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角：术后 45°侧 存在多个姿态推断候选，已按最佳分数择优"
+      ],
+      "rejection_reasons": [
+        {
+          "group_name": "2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角",
+          "slot": "front",
+          "phase": null,
+          "reason": "phase_missing",
+          "detail": "文件名缺少术前/术后关键词",
+          "file_path": "/Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术中1.jpeg"
+        },
+        {
+          "group_name": "2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角",
+          "slot": "front",
+          "phase": null,
+          "reason": "phase_missing",
+          "detail": "文件名缺少术前/术后关键词",
+          "file_path": "/Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术中2.jpeg"
+        },
+        {
+          "group_name": "2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角",
+          "slot": "front",
+          "phase": null,
+          "reason": "phase_missing",
+          "detail": "文件名缺少术前/术后关键词",
+          "file_path": "/Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术中3.jpeg"
+        },
+        {
+          "group_name": "2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角",
+          "slot": "front",
+          "phase": null,
+          "reason": "phase_missing",
+          "detail": "文件名缺少术前/术后关键词",
+          "file_path": "/Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术中4.jpeg"
+        },
+        {
+          "group_name": "2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角",
+          "slot": "front",
+          "phase": null,
+          "reason": "phase_missing",
+          "detail": "文件名缺少术前/术后关键词",
+          "file_path": "/Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术中5.jpeg"
+        },
+        {
+          "group_name": "2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角",
+          "slot": "front",
+          "phase": null,
+          "reason": "phase_missing",
+          "detail": "文件名缺少术前/术后关键词",
+          "file_path": "/Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术中6.jpeg"
+        },
+        {
+          "group_name": "2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角",
+          "slot": null,
+          "phase": "before",
+          "reason": "face_detection_failure",
+          "detail": "面部检测失败: 未检测到面部: /Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术前13.jpeg",
+          "file_path": "/Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术前13.jpeg"
+        },
+        {
+          "group_name": "2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角",
+          "slot": null,
+          "phase": "before",
+          "reason": "face_detection_failure",
+          "detail": "面部检测失败: 未检测到面部: /Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术前14.jpeg",
+          "file_path": "/Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术前14.jpeg"
+        },
+        {
+          "group_name": "2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角",
+          "slot": null,
+          "phase": "before",
+          "reason": "face_detection_failure",
+          "detail": "面部检测失败: 未检测到面部: /Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术前15.jpeg",
+          "file_path": "/Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术前15.jpeg"
+        },
+        {
+          "group_name": "2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角",
+          "slot": null,
+          "phase": "before",
+          "reason": "face_detection_failure",
+          "detail": "面部检测失败: 未检测到面部: /Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术前7.jpeg",
+          "file_path": "/Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术前7.jpeg"
+        },
+        {
+          "group_name": "2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角",
+          "slot": null,
+          "phase": "before",
+          "reason": "face_detection_failure",
+          "detail": "面部检测失败: 未检测到面部: /Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术前9.jpeg",
+          "file_path": "/Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术前9.jpeg"
+        },
+        {
+          "group_name": "2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角",
+          "slot": null,
+          "phase": "after",
+          "reason": "face_detection_failure",
+          "detail": "面部检测失败: 未检测到面部: /Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术后即刻13.jpeg",
+          "file_path": "/Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术后即刻13.jpeg"
+        },
+        {
+          "group_name": "2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角",
+          "slot": null,
+          "phase": "after",
+          "reason": "face_detection_failure",
+          "detail": "面部检测失败: 未检测到面部: /Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术后即刻15.jpeg",
+          "file_path": "/Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术后即刻15.jpeg"
+        },
+        {
+          "group_name": "2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角",
+          "slot": null,
+          "phase": "after",
+          "reason": "face_detection_failure",
+          "detail": "面部检测失败: 未检测到面部: /Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术后即刻7.jpeg",
+          "file_path": "/Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术后即刻7.jpeg"
+        },
+        {
+          "group_name": "2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角",
+          "slot": null,
+          "phase": "after",
+          "reason": "face_detection_failure",
+          "detail": "面部检测失败: 未检测到面部: /Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术后即刻9.jpeg",
+          "file_path": "/Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/稀饭/2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角/术后即刻9.jpeg"
+        },
+        {
+          "group_name": "2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角",
+          "slot": "front",
+          "phase": null,
+          "reason": "pose_delta_exceeded",
+          "detail": "正面 术前术后姿态差过大(yaw=2.85, pitch=19.40, roll=0.98, weighted=22.74; threshold=yaw<=8.0, pitch<=7.0, roll<=6.0, weighted<=14.0)",
+          "file_path": null
+        },
+        {
+          "group_name": "2025.8.28普丽妍T童颜针术前术中术后即刻 下颌线 口角",
+          "slot": "side",
+          "phase": null,
+          "reason": "pose_delta_exceeded",
+          "detail": "侧面 术前术后姿态差过大(yaw=14.51, pitch=1.87, roll=26.35, weighted=29.55; threshold=yaw<=12.0, pitch<=8.0, roll<=8.0, weighted<=20.0)",
+          "file_path": null
+        }
+      ],
+      "status": "error"
+    }
+  ],
+  "outputs": {}
+}
