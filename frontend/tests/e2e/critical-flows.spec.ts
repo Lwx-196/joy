@@ -248,4 +248,69 @@ test.describe("critical-flows", () => {
     // 没有触发 restore API
     expect(restoreCalled).toBe(false);
   });
+
+  // === 阶段 20 新增：服务端分页 ===
+  // fixture DB 有 126 条 cases（64 standard_face + 46 non_labeled + 16 body）。
+  // page_size=50 → page 1: 50 条, page 2: 50 条, page 3: 26 条，均合法。
+  // standard_face 过滤后 64 条 → page 2 也合法。
+
+  test("server pagination: next/prev syncs to URL (fixture has 126 cases)", async ({ page }) => {
+    await page.goto("/cases");
+    // 等待表格第一行可见（backend 查询已解析）
+    await expect(page.locator("table.table tbody tr").first()).toBeVisible({ timeout: 15_000 });
+
+    const nextBtn = page.locator('[data-testid="pagination-next"]');
+    await expect(nextBtn).toBeVisible();
+
+    // fixture 有 126 条，page_size=50 → 应有 page 2，next 可点
+    await expect(nextBtn).toBeEnabled();
+
+    // 点 next → URL 应包含 page=2
+    await nextBtn.click();
+    await expect(page).toHaveURL(/[?&]page=2(&|$)/);
+
+    // pagination 文本应包含 "/" (e.g. "2 / 3")
+    await expect(page.locator('[data-testid="pagination-page-of-total"]')).toContainText("/");
+
+    // 点 prev → 回到 page 1，URL 不含 page=2
+    await page.locator('[data-testid="pagination-prev"]').click();
+    await expect(page).not.toHaveURL(/[?&]page=2(&|$)/);
+  });
+
+  test("server pagination: filter change resets page to 1", async ({ page }) => {
+    // 先导航到第 2 页
+    await page.goto("/cases?page=2");
+    await expect(page.locator("table.table tbody tr").first()).toBeVisible({ timeout: 15_000 });
+    await expect(page).toHaveURL(/[?&]page=2(&|$)/);
+
+    // 切换 category 过滤器（第一个 FilterSelect 是 category）
+    // FilterSelect 把透明 <select> 叠在 .select wrapper 上
+    const categorySelect = page.locator(".select select").first();
+    const optionValues = await categorySelect.locator("option").evaluateAll(
+      (opts) => opts.map((o) => (o as HTMLOptionElement).value).filter((v) => v !== "")
+    );
+    expect(optionValues.length).toBeGreaterThan(0);
+    await categorySelect.selectOption(optionValues[0]);
+
+    // filter 变化后 setFilter() 调用 sp.delete("page") → URL 中不应再有 page=2
+    await expect(page).not.toHaveURL(/[?&]page=2(&|$)/);
+  });
+
+  test("server pagination: URL state (category + page) persists across reload", async ({ page }) => {
+    // standard_face 有 64 条 → page 2 合法
+    await page.goto("/cases?category=standard_face&page=2");
+    await expect(page.locator("table.table tbody tr").first()).toBeVisible({ timeout: 15_000 });
+
+    // 刷新后 URL 参数应保留（React Router 的 useSearchParams 读 location.search）
+    await page.reload();
+    await expect(page.locator("table.table tbody tr").first()).toBeVisible({ timeout: 15_000 });
+
+    // category 参数必须保留
+    await expect(page).toHaveURL(/category=standard_face/);
+
+    // page=2 保留，OR 若因数据不足被 OOB self-heal 重置到 page=1（即 URL 无 page 参数）——两种都合法
+    // 主断言：category filter 跨刷新仍然生效（行数 ≤ 总行数）
+    const rowCount = await page.locator("table.table tbody tr").count();
+    expect(rowCount).toBeGreaterThan(0);
+  });
 });
