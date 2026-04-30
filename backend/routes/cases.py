@@ -60,6 +60,10 @@ def list_cases(
     customer_id: int | None = None,
     review_status: str | None = None,
     q: str | None = None,
+    tag: str | None = None,
+    since: str | None = None,
+    blocking: str | None = None,
+    include_held: int = 0,
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=2000),
 ) -> CaseListResponse:
@@ -91,6 +95,26 @@ def list_cases(
             ")"
         )
         params.extend([like, like, like, like])
+
+    if tag and tag.strip():
+        # tags_json 是 JSON 数组,LIKE '%"<tag>"%' 精确匹配 token(避免子串误匹配)
+        where.append("c.tags_json LIKE ?")
+        params.append(f'%"{tag.strip()}"%')
+
+    if since == "today":
+        today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+        where.append("c.indexed_at >= ?")
+        params.append(today_start.isoformat())
+
+    if blocking == "open":
+        # blocking_issues_json 非空数组 → 长度 > 2 (空数组是 "[]")
+        where.append("(c.blocking_issues_json IS NOT NULL AND LENGTH(c.blocking_issues_json) > 2)")
+
+    if not include_held:
+        # held_until 未来 = 挂起;NULL or 过去 = 不挂起
+        now_iso = datetime.now(timezone.utc).isoformat()
+        where.append("(c.held_until IS NULL OR c.held_until < ?)")
+        params.append(now_iso)
 
     where_sql = " WHERE " + " AND ".join(where) if where else ""
 

@@ -96,3 +96,80 @@ def test_q_empty_string_returns_all(client, seed_case):
     seed_case(abs_path="/tmp/b")
     resp = client.get("/api/cases", params={"q": ""})
     assert resp.json()["total"] == 2
+
+
+def test_tag_filter_exact_match(client, seed_case):
+    """tag 精确匹配 tags_json 数组成员(JSON1 LIKE token)。"""
+    from backend import db
+    a = seed_case(abs_path="/tmp/tag-a")
+    b = seed_case(abs_path="/tmp/tag-b")
+    with db.connect() as conn:
+        conn.execute("UPDATE cases SET tags_json = ? WHERE id = ?", ('["urgent","术后"]', a))
+        conn.execute("UPDATE cases SET tags_json = ? WHERE id = ?", ('["术前"]', b))
+    resp = client.get("/api/cases", params={"tag": "术后"})
+    body = resp.json()
+    assert body["total"] == 1
+    assert body["items"][0]["abs_path"] == "/tmp/tag-a"
+
+
+def test_since_today(client, seed_case):
+    """since=today 取 indexed_at >= 当日 00:00 UTC。"""
+    from backend import db
+    from datetime import datetime, timezone, timedelta
+    seed_case(abs_path="/tmp/today")
+    yesterday = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
+    with db.connect() as conn:
+        conn.execute(
+            "UPDATE cases SET indexed_at = ? WHERE abs_path = '/tmp/today'",
+            (datetime.now(timezone.utc).isoformat(),),
+        )
+        old_id = conn.execute(
+            "INSERT INTO scans (started_at, root_paths, mode, case_count) VALUES (?, '[]', 'test', 1)",
+            (yesterday,),
+        ).lastrowid
+        conn.execute(
+            "INSERT INTO cases (scan_id, abs_path, category, last_modified, indexed_at, blocking_issues_json) VALUES (?, '/tmp/old', 'A', ?, ?, '[]')",
+            (old_id, yesterday, yesterday),
+        )
+
+    resp = client.get("/api/cases", params={"since": "today"})
+    body = resp.json()
+    paths = {it["abs_path"] for it in body["items"]}
+    assert "/tmp/today" in paths
+    assert "/tmp/old" not in paths
+
+
+def test_blocking_open_filter(client, seed_case):
+    """blocking=open 取 blocking_issues_json 长度 > 0。"""
+    from backend import db
+    a = seed_case(abs_path="/tmp/has-block")
+    seed_case(abs_path="/tmp/clean")
+    with db.connect() as conn:
+        conn.execute(
+            "UPDATE cases SET blocking_issues_json=? WHERE id=?",
+            ('[{"code":"err1"}]', a),
+        )
+    resp = client.get("/api/cases", params={"blocking": "open"})
+    body = resp.json()
+    assert body["total"] == 1
+    assert body["items"][0]["abs_path"] == "/tmp/has-block"
+
+
+def test_include_held_default_hides(client, seed_case):
+    """default: 隐藏 held_until > now 的 case。include_held=1 显示。"""
+    from backend import db
+    from datetime import datetime, timezone, timedelta
+    seed_case(abs_path="/tmp/active")
+    b = seed_case(abs_path="/tmp/held")
+    future = (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()
+    with db.connect() as conn:
+        conn.execute("UPDATE cases SET held_until=? WHERE id=?", (future, b))
+    resp = client.get("/api/cases")
+    body = resp.json()
+    paths = {it["abs_path"] for it in body["items"]}
+    assert paths == {"/tmp/active"}
+
+    resp = client.get("/api/cases", params={"include_held": 1})
+    body = resp.json()
+    paths = {it["abs_path"] for it in body["items"]}
+    assert paths == {"/tmp/active", "/tmp/held"}
