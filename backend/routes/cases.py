@@ -63,7 +63,7 @@ def list_cases(
     tag: str | None = None,
     since: str | None = None,
     blocking: str | None = None,
-    include_held: int = 0,
+    include_held: bool = False,
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=2000),
 ) -> CaseListResponse:
@@ -107,8 +107,8 @@ def list_cases(
         params.append(today_start.isoformat())
 
     if blocking == "open":
-        # blocking_issues_json 非空数组 → 长度 > 2 (空数组是 "[]")
-        where.append("(c.blocking_issues_json IS NOT NULL AND LENGTH(c.blocking_issues_json) > 2)")
+        # 用 json_array_length 判定数组非空,避免依赖 "无空白序列化" 的隐式不变量
+        where.append("(c.blocking_issues_json IS NOT NULL AND json_array_length(c.blocking_issues_json) > 0)")
 
     if not include_held:
         # held_until 未来 = 挂起;NULL or 过去 = 不挂起

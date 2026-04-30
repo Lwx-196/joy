@@ -173,3 +173,20 @@ def test_include_held_default_hides(client, seed_case):
     body = resp.json()
     paths = {it["abs_path"] for it in body["items"]}
     assert paths == {"/tmp/active", "/tmp/held"}
+
+
+def test_include_held_accepts_true_string(client, seed_case):
+    """include_held should accept FastAPI's standard bool query strings (true/1)."""
+    from datetime import datetime, timezone, timedelta
+    from backend import db
+    seed_case(abs_path="/tmp/active2")
+    b = seed_case(abs_path="/tmp/held2")
+    future = (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()
+    with db.connect() as conn:
+        conn.execute("UPDATE cases SET held_until=? WHERE id=?", (future, b))
+
+    # bool query: "true" (string) should also include held cases
+    resp = client.get("/api/cases", params={"include_held": "true"})
+    body = resp.json()
+    paths = {it["abs_path"] for it in body["items"]}
+    assert paths == {"/tmp/active2", "/tmp/held2"}
