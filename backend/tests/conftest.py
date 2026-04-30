@@ -91,6 +91,22 @@ def seed_case(temp_db: Path):
 
 
 @pytest.fixture
+def no_job_pool(monkeypatch: pytest.MonkeyPatch):
+    """No-op `_job_pool.submit` so enqueued jobs stay 'queued' instead of running.
+
+    Render and upgrade queues hand work to a shared ThreadPoolExecutor that
+    invokes mediapipe / cv2 against a real case directory. Tests of the
+    enqueue/cancel/list/undo endpoints don't want that — they want to verify
+    DB-row state and HTTP shape only. This fixture replaces submit() with a
+    no-op so jobs remain in 'queued' status until the test inspects them.
+    """
+    from backend import _job_pool
+
+    monkeypatch.setattr(_job_pool, "submit", lambda fn, *args, **kwargs: None)
+    return None
+
+
+@pytest.fixture
 def insert_revision(temp_db: Path):
     """Factory: inserts a case_revisions row directly (for audit tests).
 
