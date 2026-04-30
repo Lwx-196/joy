@@ -5,7 +5,11 @@ from __future__ import annotations
 def test_list_cases_empty(client):
     resp = client.get("/api/cases")
     assert resp.status_code == 200
-    assert resp.json() == []
+    body = resp.json()
+    assert body["items"] == []
+    assert body["total"] == 0
+    assert body["page"] == 1
+    assert body["page_size"] == 50
 
 
 def test_list_cases_returns_seeded_rows(client, seed_case):
@@ -14,8 +18,9 @@ def test_list_cases_returns_seeded_rows(client, seed_case):
     resp = client.get("/api/cases")
     assert resp.status_code == 200
     body = resp.json()
-    assert len(body) == 2
-    paths = {row["abs_path"] for row in body}
+    assert body["total"] == 2
+    assert len(body["items"]) == 2
+    paths = {row["abs_path"] for row in body["items"]}
     assert paths == {"/tmp/case-a", "/tmp/case-b"}
 
 
@@ -23,15 +28,15 @@ def test_list_cases_filters_by_category(client, seed_case):
     seed_case(abs_path="/tmp/case-a", category="A")
     seed_case(abs_path="/tmp/case-b", category="B")
     resp = client.get("/api/cases", params={"category": "A"})
-    assert resp.status_code == 200
     body = resp.json()
-    assert len(body) == 1
-    assert body[0]["abs_path"] == "/tmp/case-a"
+    assert body["total"] == 1
+    assert len(body["items"]) == 1
+    assert body["items"][0]["abs_path"] == "/tmp/case-a"
 
 
-def test_list_cases_limit_capped_at_2000(client):
-    """`limit` Query has le=2000 — values above must 422."""
-    resp = client.get("/api/cases", params={"limit": 5000})
+def test_list_cases_page_size_capped_at_2000(client):
+    """`page_size` Query has le=2000 — values above must 422."""
+    resp = client.get("/api/cases", params={"page_size": 5000})
     assert resp.status_code == 422
 
 

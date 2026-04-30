@@ -66,6 +66,6 @@ def test_scan_full_picks_up_synthetic_case_dir(
     assert resp.status_code == 200
     assert resp.json()["new_count"] == 1
 
-    cases = client.get("/api/cases").json()
-    assert len(cases) == 1
-    assert cases[0]["abs_path"] == str(case_dir)
+    body = client.get("/api/cases").json()
+    assert body["total"] == 1
+    assert body["items"][0]["abs_path"] == str(case_dir)
