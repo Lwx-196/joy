@@ -32,6 +32,13 @@ class CaseSummary(BaseModel):
     indexed_at: str
 
 
+class CaseListResponse(BaseModel):
+    items: list[CaseSummary]
+    total: int
+    page: int
+    page_size: int
+
+
 class CaseDetail(CaseSummary):
     auto_blocking_issues: list[dict[str, Any]] = []
     manual_blocking_codes: list[str] = []

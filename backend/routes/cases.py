@@ -12,7 +12,7 @@ from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import FileResponse
 
 from .. import _upgrade_executor, audit, db, issue_translator, scanner, skill_bridge
-from ..models import CaseBatchUpdate, CaseDetail, CaseSummary, CaseUpdate
+from ..models import CaseBatchUpdate, CaseDetail, CaseListResponse, CaseSummary, CaseUpdate
 
 router = APIRouter(prefix="/api/cases", tags=["cases"])
 
@@ -53,15 +53,15 @@ def _row_to_summary(row: sqlite3.Row, customer_canonical: str | None = None) -> 
     )
 
 
-@router.get("", response_model=list[CaseSummary])
+@router.get("", response_model=CaseListResponse)
 def list_cases(
     category: str | None = None,
     tier: str | None = None,
     customer_id: int | None = None,
     review_status: str | None = None,
-    limit: int = Query(200, le=2000),
-    offset: int = 0,
-) -> list[CaseSummary]:
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=2000),
+) -> CaseListResponse:
     where: list[str] = []
     params: list[Any] = []
     if category:
@@ -80,19 +80,27 @@ def list_cases(
             where.append("c.review_status = ?")
             params.append(review_status)
 
-    sql = """
-        SELECT c.*, cu.canonical_name AS canonical_name
-        FROM cases c
-        LEFT JOIN customers cu ON cu.id = c.customer_id
-    """
-    if where:
-        sql += " WHERE " + " AND ".join(where)
-    sql += " ORDER BY c.id DESC LIMIT ? OFFSET ?"
-    params.extend([limit, offset])
+    where_sql = " WHERE " + " AND ".join(where) if where else ""
 
     with db.connect() as conn:
-        rows = conn.execute(sql, params).fetchall()
-    return [_row_to_summary(r, r["canonical_name"]) for r in rows]
+        total = conn.execute(
+            f"SELECT COUNT(*) FROM cases c LEFT JOIN customers cu ON cu.id = c.customer_id{where_sql}",
+            params,
+        ).fetchone()[0]
+        rows = conn.execute(
+            f"""
+            SELECT c.*, cu.canonical_name AS canonical_name
+            FROM cases c
+            LEFT JOIN customers cu ON cu.id = c.customer_id
+            {where_sql}
+            ORDER BY c.id DESC
+            LIMIT ? OFFSET ?
+            """,
+            params + [page_size, (page - 1) * page_size],
+        ).fetchall()
+
+    items = [_row_to_summary(r, r["canonical_name"]) for r in rows]
+    return CaseListResponse(items=items, total=total, page=page, page_size=page_size)
 
 
 @router.get("/stats")
