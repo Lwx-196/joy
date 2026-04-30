@@ -1,16 +1,17 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { CATEGORY_LABEL, TIER_LABEL, type Category, type CaseSummary } from "../api";
+import { CATEGORY_LABEL, TIER_LABEL, type Category, type CaseSummary, type CaseListParams } from "../api";
 import {
   useBatchRenderCases,
   useBatchUpdateCases,
   useBatchUpgradeCases,
-  useCases,
+  useCasesPage,
   useCustomers,
 } from "../hooks/queries";
+import Pagination from "../components/Pagination";
 import { useBrand } from "../lib/brand-context";
 import { useBatchJobToastStore } from "../lib/batch-job-toast";
 import { isHeld } from "../lib/work-queue";
@@ -75,21 +76,27 @@ function rowStateClass(c: CaseSummary, now: Date): string {
 export default function Cases() {
   const { t } = useTranslation("cases");
   const navigate = useNavigate();
-  const [searchParams] = useSearchParams();
-  const [category, setCategory] = useState<string>(searchParams.get("category") ?? "");
-  const [tier, setTier] = useState<string>("");
-  const [customerId, setCustomerId] = useState<string>("");
-  const [reviewStatus, setReviewStatus] = useState<string>(searchParams.get("review") ?? "");
-  const [keyword, setKeyword] = useState<string>("");
-  // Dashboard work-queue lanes pass these as URL params; we filter client-side.
-  const sinceFilter = searchParams.get("since"); // "today" | null
-  const blockingFilter = searchParams.get("blocking"); // "open" | null
-  // 挂起的 case 默认隐藏（"挂起" 的语义就是"我现在不想看到它"）。
-  const [showHeld, setShowHeld] = useState(false);
+  const [searchParams, setSearchParams] = useSearchParams();
+
+  // ========== URL-driven state ==========
+  const category = searchParams.get("category") ?? "";
+  const tier = searchParams.get("tier") ?? "";
+  const customerId = searchParams.get("customer_id") ?? "";
+  const reviewStatus = searchParams.get("review_status") ?? "";
+  const q = searchParams.get("q") ?? "";
+  const tag = searchParams.get("tag") ?? "";
+  const sinceFilter = searchParams.get("since");
+  const blockingFilter = searchParams.get("blocking");
+  const includeHeld = searchParams.get("include_held") === "1";
+  const page = Math.max(1, parseInt(searchParams.get("page") ?? "1", 10) || 1);
+  const PAGE_SIZE = 50;
+
+  // ========== UI-only state ==========
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [importOpen, setImportOpen] = useState(false);
   // j/k row navigation. -1 = no row highlighted; first j makes it 0.
   const [currentIndex, setCurrentIndex] = useState(-1);
+  const [keywordInput, setKeywordInput] = useState(q);
   const [batchDraft, setBatchDraft] = useState({
     manual_category: "" as "" | Category,
     manual_template_tier: "",
@@ -98,17 +105,53 @@ export default function Cases() {
     notes: "",
   });
 
-  // Build query params object — useCases keys on this so changes auto-refetch.
-  const params = useMemo(() => {
-    const p: Parameters<typeof useCases>[0] = { limit: 1000 };
-    if (category) p.category = category;
-    if (tier) p.tier = tier;
-    if (customerId) p.customer_id = Number(customerId);
-    if (reviewStatus) p.review_status = reviewStatus;
-    return p;
-  }, [category, tier, customerId, reviewStatus]);
+  // ========== URL setter helpers ==========
+  const setFilter = (name: string, value: string) => {
+    setSearchParams((sp) => {
+      if (!value) sp.delete(name);
+      else sp.set(name, value);
+      sp.delete("page"); // any filter change → page reset
+      return sp;
+    }, { replace: false });
+  };
 
-  const casesQ = useCases(params);
+  const setPage = (newPage: number) => {
+    setSearchParams((sp) => {
+      if (newPage <= 1) sp.delete("page");
+      else sp.set("page", String(newPage));
+      return sp;
+    });
+  };
+
+  // ========== q debounce ==========
+  useEffect(() => {
+    if (keywordInput === q) return;
+    const timer = setTimeout(() => setFilter("q", keywordInput.trim()), 300);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [keywordInput]);
+
+  // ========== Server-paginated data ==========
+  const params: CaseListParams = {
+    page,
+    page_size: PAGE_SIZE,
+  };
+  if (category) params.category = category;
+  if (tier) params.tier = tier;
+  if (customerId) params.customer_id = Number(customerId);
+  if (reviewStatus) params.review_status = reviewStatus;
+  if (q) params.q = q;
+  if (tag) params.tag = tag;
+  if (sinceFilter) params.since = sinceFilter;
+  if (blockingFilter) params.blocking = blockingFilter;
+  if (includeHeld) params.include_held = 1;
+
+  const casesPageQ = useCasesPage(params);
+  const casesData = casesPageQ.data;
+  const cases = casesData?.items ?? [];
+  const total = casesData?.total ?? 0;
+  const loading = casesPageQ.isLoading;
+
   const customersQ = useCustomers();
   const batchMut = useBatchUpdateCases();
   // Phase 3: batch render hook + global toast.
@@ -118,10 +161,20 @@ export default function Cases() {
   const showBatchToast = useBatchJobToastStore((s) => s.show);
   const brand = useBrand();
 
-  const cases = casesQ.data ?? [];
   const customers = customersQ.data ?? [];
-  const loading = casesQ.isLoading;
   const busy = batchMut.isPending;
+
+  // OOB page self-heal: if current page exceeds total pages, jump to last valid page.
+  useEffect(() => {
+    if (!casesData) return;
+    const totalPages = Math.max(1, Math.ceil(casesData.total / casesData.page_size));
+    if (page > totalPages) {
+      setSearchParams((sp) => {
+        sp.set("page", String(totalPages));
+        return sp;
+      }, { replace: true });
+    }
+  }, [casesData, page, setSearchParams]);
 
   // Prune selection when underlying list shifts (mutation refetched).
   useEffect(() => {
@@ -132,64 +185,18 @@ export default function Cases() {
     });
   }, [cases]);
 
-  // Reset selection when filter context changes (dropdowns / lane filters / showHeld).
-  // Keyword search is intentionally excluded — typing into the search box would
-  // otherwise wipe selection mid-keystroke. The dropdown-style filters are
-  // discrete context switches, so any change there means the user is looking
-  // at a different scope and stale selections become misleading.
+  // Reset selection when filter context changes (dropdowns / lane filters / includeHeld).
   useEffect(() => {
     setSelected((prev) => (prev.size === 0 ? prev : new Set()));
     setCurrentIndex(-1);
-  }, [category, tier, customerId, reviewStatus, showHeld, sinceFilter, blockingFilter]);
-
-  const heldCount = useMemo(() => {
-    const now = new Date();
-    return cases.filter((c) => isHeld(c, now)).length;
-  }, [cases]);
-
-  const filtered = useMemo(() => {
-    let list = cases;
-    const now = new Date();
-    // 默认隐藏挂起；用户点 "查看挂起" 切换。
-    if (!showHeld) {
-      list = list.filter((c) => !isHeld(c, now));
-    }
-    // Dashboard work-queue lane filters (client-side).
-    if (sinceFilter === "today") {
-      list = list.filter((c) => {
-        const t = new Date(c.last_modified);
-        return (
-          t.getFullYear() === now.getFullYear() &&
-          t.getMonth() === now.getMonth() &&
-          t.getDate() === now.getDate()
-        );
-      });
-    }
-    if (blockingFilter === "open") {
-      list = list.filter(
-        (c) => c.blocking_issue_count > 0 && c.review_status !== "reviewed"
-      );
-    }
-    if (keyword.trim()) {
-      const k = keyword.trim();
-      list = list.filter(
-        (c) =>
-          c.abs_path.includes(k) ||
-          (c.customer_raw ?? "").includes(k) ||
-          (c.customer_canonical ?? "").includes(k) ||
-          (c.notes ?? "").includes(k) ||
-          c.tags.some((t) => t.includes(k)),
-      );
-    }
-    return list;
-  }, [cases, keyword, sinceFilter, blockingFilter, showHeld]);
+  }, [category, tier, customerId, reviewStatus, includeHeld, sinceFilter, blockingFilter]);
 
   // Row virtualization for large lists (>80). Track 2 / Stage 6 — verified via
   // /_playground/virtualization 4-phase repro before landing here.
   const scrollerRef = useRef<HTMLDivElement>(null);
-  const useVirtual = filtered.length > VIRTUALIZE_THRESHOLD;
+  const useVirtual = cases.length > VIRTUALIZE_THRESHOLD;
   const virtualizer = useVirtualizer({
-    count: filtered.length,
+    count: cases.length,
     getScrollElement: () => scrollerRef.current,
     estimateSize: () => VIRTUAL_ROW_HEIGHT,
     overscan: 8,
@@ -197,22 +204,22 @@ export default function Cases() {
 
   // Clamp currentIndex when filter narrows the list out from under us.
   useEffect(() => {
-    if (currentIndex >= filtered.length) {
-      setCurrentIndex(filtered.length === 0 ? -1 : filtered.length - 1);
+    if (currentIndex >= cases.length) {
+      setCurrentIndex(cases.length === 0 ? -1 : cases.length - 1);
     }
-  }, [filtered.length, currentIndex]);
+  }, [cases.length, currentIndex]);
 
-  const allSelected = filtered.length > 0 && filtered.every((c) => selected.has(c.id));
+  const allSelected = cases.length > 0 && cases.every((c) => selected.has(c.id));
   const someSelected = selected.size > 0 && !allSelected;
   const toggleAll = () => {
     setSelected((prev) => {
       if (allSelected) {
         const next = new Set(prev);
-        filtered.forEach((c) => next.delete(c.id));
+        cases.forEach((c) => next.delete(c.id));
         return next;
       }
       const next = new Set(prev);
-      filtered.forEach((c) => next.add(c.id));
+      cases.forEach((c) => next.add(c.id));
       return next;
     });
   };
@@ -229,35 +236,35 @@ export default function Cases() {
   // typing in the keyword search box won't trigger a move.
   const moveRow = useCallback(
     (delta: number) => {
-      if (filtered.length === 0) return;
+      if (cases.length === 0) return;
       setCurrentIndex((prev) => {
-        if (prev < 0) return delta > 0 ? 0 : filtered.length - 1;
-        return Math.max(0, Math.min(filtered.length - 1, prev + delta));
+        if (prev < 0) return delta > 0 ? 0 : cases.length - 1;
+        return Math.max(0, Math.min(cases.length - 1, prev + delta));
       });
     },
-    [filtered.length]
+    [cases.length]
   );
   useHotkey("j", () => moveRow(1), { preventDefault: true });
   useHotkey("k", () => moveRow(-1), { preventDefault: true });
   // Home/End jump to first/last row. Replaces vim-style `gg` because the
   // global Layout owns the `g`-chord prefix for route navigation; reusing `g`
   // here would race with that.
-  useHotkey("home", () => filtered.length > 0 && setCurrentIndex(0), {
+  useHotkey("home", () => cases.length > 0 && setCurrentIndex(0), {
     preventDefault: true,
   });
-  useHotkey("end", () => filtered.length > 0 && setCurrentIndex(filtered.length - 1), {
+  useHotkey("end", () => cases.length > 0 && setCurrentIndex(cases.length - 1), {
     preventDefault: true,
   });
   // Shift+G also jumps to last (vim convention; no chord conflict because
   // Layout's g-chord requires !shiftKey).
-  useHotkey("shift+g", () => filtered.length > 0 && setCurrentIndex(filtered.length - 1), {
+  useHotkey("shift+g", () => cases.length > 0 && setCurrentIndex(cases.length - 1), {
     preventDefault: true,
   });
   // Enter opens CaseDetail for the highlighted row.
   useHotkey(
     "enter",
     () => {
-      const c = filtered[currentIndex];
+      const c = cases[currentIndex];
       if (c) navigate(`/cases/${c.id}`);
     },
     { preventDefault: true }
@@ -266,7 +273,7 @@ export default function Cases() {
   useHotkey(
     "x",
     () => {
-      const c = filtered[currentIndex];
+      const c = cases[currentIndex];
       if (c) toggleOne(c.id);
     },
     { preventDefault: true }
@@ -328,7 +335,7 @@ export default function Cases() {
           <h1 className="page-title">
             {t("title")}{" "}
             <span style={{ fontFamily: "var(--mono)", color: "var(--ink-3)", fontSize: 14, fontWeight: 500, marginLeft: 6 }}>
-              {filtered.length}
+              {total}
             </span>
           </h1>
           <div className="page-sub">{t("subtitle")}</div>
@@ -366,12 +373,12 @@ export default function Cases() {
           flexWrap: "wrap",
         }}
       >
-        <FilterSelect label={t("filter.category")} value={category} onChange={setCategory} options={[["", t("filter.all")], ...Object.entries(CATEGORY_LABEL)]} />
-        <FilterSelect label={t("filter.tier")} value={tier} onChange={setTier} options={[["", t("filter.all")], ...Object.entries(TIER_LABEL)]} />
+        <FilterSelect label={t("filter.category")} value={category} onChange={(v) => setFilter("category", v)} options={[["", t("filter.all")], ...Object.entries(CATEGORY_LABEL)]} />
+        <FilterSelect label={t("filter.tier")} value={tier} onChange={(v) => setFilter("tier", v)} options={[["", t("filter.all")], ...Object.entries(TIER_LABEL)]} />
         <FilterSelect
           label={t("filter.customer")}
           value={customerId}
-          onChange={setCustomerId}
+          onChange={(v) => setFilter("customer_id", v)}
           options={[
             ["", t("filter.all")],
             ...customers.map((c) => [String(c.id), `${c.canonical_name} (${c.case_count})`] as [string, string]),
@@ -380,7 +387,7 @@ export default function Cases() {
         <FilterSelect
           label={t("filter.review")}
           value={reviewStatus}
-          onChange={setReviewStatus}
+          onChange={(v) => setFilter("review_status", v)}
           options={[
             ["", t("filter.all")],
             ["unreviewed", t("filter.unreviewed")],
@@ -393,39 +400,43 @@ export default function Cases() {
           <Ico name="search" />
           <input
             placeholder={t("filter.searchPlaceholder")}
-            value={keyword}
-            onChange={(e) => setKeyword(e.target.value)}
+            value={keywordInput}
+            onChange={(e) => setKeywordInput(e.target.value)}
             style={{ width: 220 }}
           />
         </div>
-        {(category || tier || customerId || reviewStatus || keyword) && (
+        {(category || tier || customerId || reviewStatus || q || keywordInput) && (
           <button
             className="btn sm ghost"
             onClick={() => {
-              setCategory("");
-              setTier("");
-              setCustomerId("");
-              setReviewStatus("");
-              setKeyword("");
+              setKeywordInput("");
+              setSearchParams((sp) => {
+                sp.delete("category");
+                sp.delete("tier");
+                sp.delete("customer_id");
+                sp.delete("review_status");
+                sp.delete("q");
+                sp.delete("page");
+                return sp;
+              }, { replace: false });
             }}
           >
             {t("filter.clear")}
           </button>
         )}
         <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 6, fontSize: 11.5 }}>
-          {heldCount > 0 && (
-            <button
-              className="btn sm ghost"
-              onClick={() => setShowHeld((v) => !v)}
-              title={showHeld ? t("filter.showHeldHint") : t("filter.hideHeldHint")}
-              style={{ borderStyle: "dashed", color: "var(--ink-3)" }}
-            >
-              <Ico name="eye" size={11} />
-              {showHeld ? t("filter.hideHeld", { n: heldCount }) : t("filter.showHeld", { n: heldCount })}
-            </button>
-          )}
+          <button
+            type="button"
+            className={`btn sm ghost`}
+            onClick={() => setFilter("include_held", includeHeld ? "" : "1")}
+            title={includeHeld ? t("filter.showHeldHint") : t("filter.hideHeldHint")}
+            style={{ borderStyle: "dashed", color: "var(--ink-3)" }}
+          >
+            <Ico name="eye" size={11} />
+            {includeHeld ? t("filter.hideHeld", { n: "" }).trim() : t("filter.showHeld", { n: "" }).trim()}
+          </button>
           <span className="badge" style={{ background: "var(--bg-2)" }}>
-            {t("filter.displayLabel")} <span style={{ fontFamily: "var(--mono)", color: "var(--ink-1)", marginLeft: 4 }}>{filtered.length}</span> / {cases.length}
+            {t("filter.displayLabel")} <span style={{ fontFamily: "var(--mono)", color: "var(--ink-1)", marginLeft: 4 }}>{total}</span>
           </span>
         </div>
       </div>
@@ -624,7 +635,7 @@ export default function Cases() {
               }}
             >
               {virtualizer.getVirtualItems().map((vi) => {
-                const c = filtered[vi.index];
+                const c = cases[vi.index];
                 if (!c) return null;
                 return (
                   <CaseRow
@@ -652,7 +663,7 @@ export default function Cases() {
             </tbody>
           ) : (
             <tbody>
-              {filtered.map((c, idx) => (
+              {cases.map((c, idx) => (
                 <CaseRow
                   key={c.id}
                   c={c}
@@ -663,7 +674,7 @@ export default function Cases() {
                   dataIndex={idx}
                 />
               ))}
-              {filtered.length === 0 && !loading && (
+              {cases.length === 0 && !loading && (
                 <tr>
                   <td colSpan={9} className="empty">
                     {t("table.empty")}
@@ -673,6 +684,14 @@ export default function Cases() {
             </tbody>
           )}
         </table>
+        {!loading && (
+          <Pagination
+            total={total}
+            page={page}
+            pageSize={PAGE_SIZE}
+            onPageChange={setPage}
+          />
+        )}
       </div>
       <ImportCsvModal open={importOpen} onClose={() => setImportOpen(false)} />
     </div>
