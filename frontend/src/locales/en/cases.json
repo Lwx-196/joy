@@ -34,6 +34,8 @@
     "selectRow": "Select case #{{id}}",
     "selected": "Selected ",
     "selectedSuffix": "",
+    "clearAll": "Clear all",
+    "clearAllTitle": "Clear selection across all pages",
     "overrideCategory": "Override category",
     "overrideTier": "Override template",
     "review": "Review",

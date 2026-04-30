@@ -181,14 +181,10 @@ export default function Cases() {
     }
   }, [casesData, page, setSearchParams]);
 
-  // Prune selection when underlying list shifts (mutation refetched).
-  useEffect(() => {
-    setSelected((prev) => {
-      const ids = new Set(cases.map((c) => c.id));
-      const next = new Set([...prev].filter((id) => ids.has(id)));
-      return next.size === prev.size ? prev : next;
-    });
-  }, [cases]);
+  // Selection survives page navigation. Stale IDs (deleted cases) are
+  // tolerated — bulk endpoints already skip missing IDs and report
+  // skipped_count, and the on-screen "select all" checkbox derives its state
+  // from current-page rows so toggling it stays predictable across pages.
 
   // Reset selection when filter context changes (dropdowns / lane filters / includeHeld).
   useEffect(() => {
@@ -463,6 +459,16 @@ export default function Cases() {
               <span style={{ fontSize: 12.5, color: "#FAFAF9" }}>
                 {t("bulk.selected")}<b style={{ fontFamily: "var(--mono)" }}>{selected.size}</b>{t("bulk.selectedSuffix")}
               </span>
+              <button
+                type="button"
+                className="btn"
+                data-testid="bulk-clear-selection"
+                onClick={() => setSelected(new Set())}
+                style={{ background: "transparent", color: "#FAFAF9", padding: "2px 8px", fontSize: 12 }}
+                title={t("bulk.clearAllTitle")}
+              >
+                {t("bulk.clearAll")}
+              </button>
               <span className="sep"></span>
               <span className="lbl">{t("bulk.overrideCategory")}</span>
               <select

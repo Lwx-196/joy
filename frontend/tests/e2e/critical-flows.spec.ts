@@ -313,4 +313,46 @@ test.describe("critical-flows", () => {
     const rowCount = await page.locator("table.table tbody tr").count();
     expect(rowCount).toBeGreaterThan(0);
   });
+
+  test("cross-page selection: survives page navigation", async ({ page }) => {
+    await page.goto("/cases?page=1");
+    await expect(page.locator("table.table tbody tr").first()).toBeVisible({ timeout: 15_000 });
+
+    // 选第 1 行(避免 virtualization 用 dispatchEvent 直接触发 React onClick)
+    await page.evaluate(() => {
+      const cb = document.querySelector(
+        'table.table tbody tr[data-index="0"] td:first-child .checkbox, table.table tbody tr:first-child td:first-child .checkbox'
+      );
+      cb?.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window }));
+    });
+    await expect(page.locator(".bulkbar")).toBeVisible();
+    await expect(page.locator(".bulkbar")).toContainText("1");
+
+    // 翻到 page 2 → bulkbar 仍可见且仍显示 1
+    await page.locator('[data-testid="pagination-next"]').click();
+    await expect(page).toHaveURL(/[?&]page=2(&|$)/);
+    await expect(page.locator("table.table tbody tr").first()).toBeVisible({ timeout: 15_000 });
+    await expect(page.locator(".bulkbar")).toBeVisible();
+    await expect(page.locator(".bulkbar")).toContainText("1");
+  });
+
+  test("cross-page selection: clearAll button drops everything", async ({ page }) => {
+    await page.goto("/cases?page=1");
+    await expect(page.locator("table.table tbody tr").first()).toBeVisible({ timeout: 15_000 });
+
+    await page.evaluate(() => {
+      const cb = document.querySelector(
+        'table.table tbody tr[data-index="0"] td:first-child .checkbox, table.table tbody tr:first-child td:first-child .checkbox'
+      );
+      cb?.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window }));
+    });
+    await expect(page.locator(".bulkbar")).toBeVisible();
+
+    // dispatchEvent 同步触发 React onClick(原生 click 在虚拟化容器里偶尔被截到 ancestor)
+    await page.evaluate(() => {
+      const btn = document.querySelector('[data-testid="bulk-clear-selection"]');
+      btn?.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window }));
+    });
+    await expect(page.locator(".bulkbar")).toHaveCount(0);
+  });
 });
