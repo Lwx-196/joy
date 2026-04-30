@@ -150,6 +150,44 @@ test.describe("critical-flows", () => {
     await expect(lightbox).toHaveAttribute("data-current-index", "0");
   });
 
+  test("Lightbox: +/0 keyboard zoom and reset (case 126)", async ({ page }) => {
+    await page.goto("/cases/126");
+    await page.locator('[data-testid="render-history-trigger"]').click();
+    await expect(page.locator('[data-testid="render-history-drawer"]')).toBeVisible();
+
+    const items = page.locator('[data-testid="render-history-item"]');
+    await expect(items.first()).toBeVisible({ timeout: 10_000 });
+    await items.first().locator("button").first().click();
+
+    const area = page.locator('[data-testid="lightbox-image-area"]');
+    await expect(area).toBeVisible();
+    await expect(area).toHaveAttribute("data-zoom", "100");
+
+    // `+` × 2 → 100% × 1.25 × 1.25 = 156%
+    await page.keyboard.press("+");
+    await expect(area).toHaveAttribute("data-zoom", "125");
+    await page.keyboard.press("+");
+    await expect(area).toHaveAttribute("data-zoom", "156");
+
+    // `-` once → 156 / 1.25 = 125
+    await page.keyboard.press("-");
+    await expect(area).toHaveAttribute("data-zoom", "125");
+
+    // `0` → reset to 100
+    await page.keyboard.press("0");
+    await expect(area).toHaveAttribute("data-zoom", "100");
+
+    // `-` at 100 → clamp, stays 100
+    await page.keyboard.press("-");
+    await expect(area).toHaveAttribute("data-zoom", "100");
+
+    // ArrowRight should reset zoom (each snapshot starts at 100)
+    await page.keyboard.press("+");
+    await expect(area).toHaveAttribute("data-zoom", "125");
+    await page.keyboard.press("ArrowRight");
+    await expect(area).toHaveAttribute("data-zoom", "100");
+  });
+
   test("RenderHistoryDrawer: brand selector switches local query (case 126)", async ({ page }) => {
     await page.goto("/cases/126");
     await page.locator('[data-testid="render-history-trigger"]').click();
