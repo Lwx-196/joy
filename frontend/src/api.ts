@@ -143,14 +143,34 @@ export const fetchScanLatest = () =>
 export const triggerScan = (mode: "full" | "incremental" = "incremental") =>
   api.post(`/api/scan?mode=${mode}`).then((r) => r.data);
 
-export const fetchCases = (params: {
+export type CaseListParams = {
+  page?: number;
+  page_size?: number;
+  /**
+   * Legacy alias — Dashboard/Dict still pass `limit`. The useCases hook
+   * translates this to `page_size` before calling the API.
+   */
+  limit?: number;
   category?: string;
   tier?: string;
   customer_id?: number;
   review_status?: string;
-  limit?: number;
-  offset?: number;
-}) => api.get<CaseSummary[]>("/api/cases", { params }).then((r) => r.data);
+  q?: string;
+  tag?: string;
+  since?: string;
+  blocking?: string;
+  include_held?: number;
+};
+
+export type CasesPage = {
+  items: CaseSummary[];
+  total: number;
+  page: number;
+  page_size: number;
+};
+
+export const fetchCases = (params: CaseListParams = {}) =>
+  api.get<CasesPage>("/api/cases", { params }).then((r) => r.data);
 
 export const fetchCaseDetail = (id: number) =>
   api.get<CaseDetail>(`/api/cases/${id}`).then((r) => r.data);
