@@ -66,6 +66,8 @@ import {
   VERDICT_LABEL,
   type CaseDetail,
   type CaseRevision,
+  type CaseListParams,
+  type CasesPage,
   type CaseSummary,
   type CaseUpdatePayload,
   type CreateEvaluationPayload,
@@ -148,18 +150,47 @@ export function useScanLatest() {
   });
 }
 
+/**
+ * Legacy hook returning a flat array of cases. Internally uses the paginated
+ * endpoint but unwraps `data.items` so existing callers (Dashboard, Dict,
+ * etc.) keep working with array semantics. For UI pagination, use
+ * `useCasesPage` instead.
+ */
 export function useCases(
-  params: Parameters<typeof fetchCases>[0] = {},
+  params: CaseListParams = {},
   options?: Pick<
-    UseQueryOptions<CaseSummary[]>,
+    UseQueryOptions<CasesPage>,
     "enabled" | "refetchInterval"
   >
 ) {
-  return useQuery({
-    queryKey: QK.cases(params),
-    queryFn: () => fetchCases(params),
+  // Translate old `limit` calls to `page_size` on the fly
+  const translated: CaseListParams = { ...params };
+  if (translated.limit !== undefined) {
+    translated.page_size = translated.limit;
+    delete translated.limit;
+  }
+  const q = useQuery({
+    queryKey: QK.cases(translated),
+    queryFn: () => fetchCases(translated),
     staleTime: 30_000,
     ...options,
+  });
+  // Override .data to be the items array for backward compat.
+  return { ...q, data: q.data?.items } as Omit<typeof q, "data"> & {
+    data: CaseSummary[] | undefined;
+  };
+}
+
+/**
+ * Paginated cases hook: keeps the full {items, total, page, page_size}
+ * envelope so the consumer can drive a Pagination UI.
+ */
+export function useCasesPage(params: CaseListParams) {
+  return useQuery({
+    queryKey: ["cases", "page", params],
+    queryFn: () => fetchCases(params),
+    placeholderData: (prev) => prev,
+    staleTime: 5_000,
   });
 }
 
