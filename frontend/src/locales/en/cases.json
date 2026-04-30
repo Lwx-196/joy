@@ -61,5 +61,15 @@
     "lastModified": "Last modified",
     "noCustomer": "Unbound",
     "empty": "No matching cases"
+  },
+  "pagination": {
+    "prev": "Prev",
+    "next": "Next",
+    "pageOfTotal": "Page {{page}} / {{total_pages}}",
+    "totalCount": "{{total}} total",
+    "jumpTo": "Go",
+    "ariaPrev": "Previous page",
+    "ariaNext": "Next page",
+    "ariaJumpInput": "Jump to page"
   }
 }

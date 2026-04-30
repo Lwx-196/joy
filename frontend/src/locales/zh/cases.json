@@ -61,5 +61,15 @@
     "lastModified": "最后修改",
     "noCustomer": "未绑定",
     "empty": "没有匹配的案例"
+  },
+  "pagination": {
+    "prev": "上一页",
+    "next": "下一页",
+    "pageOfTotal": "第 {{page}} / {{total_pages}} 页",
+    "totalCount": "共 {{total}} 条",
+    "jumpTo": "跳转",
+    "ariaPrev": "上一页",
+    "ariaNext": "下一页",
+    "ariaJumpInput": "跳转到指定页"
   }
 }
