@@ -59,6 +59,7 @@ def list_cases(
     tier: str | None = None,
     customer_id: int | None = None,
     review_status: str | None = None,
+    q: str | None = None,
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=2000),
 ) -> CaseListResponse:
@@ -79,6 +80,17 @@ def list_cases(
         else:
             where.append("c.review_status = ?")
             params.append(review_status)
+    if q and q.strip():
+        like = f"%{q.strip()}%"
+        where.append(
+            "("
+            "c.abs_path LIKE ? OR "
+            "COALESCE(cu.canonical_name, '') LIKE ? OR "
+            "COALESCE(c.customer_raw, '') LIKE ? OR "
+            "COALESCE(c.notes, '') LIKE ?"
+            ")"
+        )
+        params.extend([like, like, like, like])
 
     where_sql = " WHERE " + " AND ".join(where) if where else ""
 

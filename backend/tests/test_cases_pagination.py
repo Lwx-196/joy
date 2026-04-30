@@ -47,3 +47,52 @@ def test_oob_page_returns_empty_items(client, seed_case):
 def test_page_size_max_2000(client):
     resp = client.get("/api/cases", params={"page_size": 5000})
     assert resp.status_code == 422
+
+
+def test_q_matches_abs_path(client, seed_case):
+    seed_case(abs_path="/tmp/alice-2026", customer_raw="bob")
+    seed_case(abs_path="/tmp/charlie", customer_raw="dave")
+    resp = client.get("/api/cases", params={"q": "alice"})
+    body = resp.json()
+    assert body["total"] == 1
+    assert body["items"][0]["abs_path"] == "/tmp/alice-2026"
+
+
+def test_q_matches_customer_canonical(client, seed_case):
+    """q 跨 abs_path / customer.canonical_name / customer_raw / notes / tags 匹配。"""
+    from backend import db
+    # seed customer "Alice" then bind a case
+    case_id = seed_case(abs_path="/tmp/case-a", customer_raw="raw-name")
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc).isoformat()
+    with db.connect() as conn:
+        conn.execute(
+            "INSERT INTO customers (canonical_name, aliases_json, created_at, updated_at) VALUES ('Alice Wonderland', '[]', ?, ?)",
+            (now, now),
+        )
+        cust_id = conn.execute("SELECT id FROM customers WHERE canonical_name='Alice Wonderland'").fetchone()[0]
+        conn.execute("UPDATE cases SET customer_id=? WHERE id=?", (cust_id, case_id))
+    seed_case(abs_path="/tmp/case-b", customer_raw="other")
+
+    resp = client.get("/api/cases", params={"q": "wonderland"})
+    body = resp.json()
+    assert body["total"] == 1
+    assert body["items"][0]["abs_path"] == "/tmp/case-a"
+
+
+def test_q_matches_customer_raw_and_notes(client, seed_case):
+    seed_case(abs_path="/tmp/x", customer_raw="needle-raw")
+    seed_case(abs_path="/tmp/y", notes="something needle in notes")
+    seed_case(abs_path="/tmp/z", customer_raw="other")
+    resp = client.get("/api/cases", params={"q": "needle"})
+    body = resp.json()
+    assert body["total"] == 2
+    paths = {it["abs_path"] for it in body["items"]}
+    assert paths == {"/tmp/x", "/tmp/y"}
+
+
+def test_q_empty_string_returns_all(client, seed_case):
+    seed_case(abs_path="/tmp/a")
+    seed_case(abs_path="/tmp/b")
+    resp = client.get("/api/cases", params={"q": ""})
+    assert resp.json()["total"] == 2
