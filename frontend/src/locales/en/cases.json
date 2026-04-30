@@ -25,6 +25,10 @@
     "hideHeld": "Hide held ({{n}})",
     "displayLabel": "Showing"
   },
+  "buttons": {
+    "showHeld": "Show held",
+    "hideHeld": "Hide held"
+  },
   "bulk": {
     "selectAll": "Select all cases",
     "selectRow": "Select case #{{id}}",

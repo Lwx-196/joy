@@ -131,6 +131,11 @@ export default function Cases() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [keywordInput]);
 
+  // One-way sync URL → input (for back/forward navigation)
+  useEffect(() => {
+    setKeywordInput((prev) => (prev === q ? prev : q));
+  }, [q]);
+
   // ========== Server-paginated data ==========
   const params: CaseListParams = {
     page,
@@ -189,7 +194,7 @@ export default function Cases() {
   useEffect(() => {
     setSelected((prev) => (prev.size === 0 ? prev : new Set()));
     setCurrentIndex(-1);
-  }, [category, tier, customerId, reviewStatus, includeHeld, sinceFilter, blockingFilter]);
+  }, [category, tier, customerId, reviewStatus, tag, includeHeld, sinceFilter, blockingFilter]);
 
   // Row virtualization for large lists (>80). Track 2 / Stage 6 — verified via
   // /_playground/virtualization 4-phase repro before landing here.
@@ -405,7 +410,7 @@ export default function Cases() {
             style={{ width: 220 }}
           />
         </div>
-        {(category || tier || customerId || reviewStatus || q || keywordInput) && (
+        {(category || tier || customerId || reviewStatus || q || keywordInput || tag || sinceFilter || blockingFilter || includeHeld) && (
           <button
             className="btn sm ghost"
             onClick={() => {
@@ -416,6 +421,10 @@ export default function Cases() {
                 sp.delete("customer_id");
                 sp.delete("review_status");
                 sp.delete("q");
+                sp.delete("tag");
+                sp.delete("since");
+                sp.delete("blocking");
+                sp.delete("include_held");
                 sp.delete("page");
                 return sp;
               }, { replace: false });
@@ -433,7 +442,7 @@ export default function Cases() {
             style={{ borderStyle: "dashed", color: "var(--ink-3)" }}
           >
             <Ico name="eye" size={11} />
-            {includeHeld ? t("filter.hideHeld", { n: "" }).trim() : t("filter.showHeld", { n: "" }).trim()}
+            {t(includeHeld ? "buttons.hideHeld" : "buttons.showHeld")}
           </button>
           <span className="badge" style={{ background: "var(--bg-2)" }}>
             {t("filter.displayLabel")} <span style={{ fontFamily: "var(--mono)", color: "var(--ink-1)", marginLeft: 4 }}>{total}</span>

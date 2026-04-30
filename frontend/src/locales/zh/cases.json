@@ -25,6 +25,10 @@
     "hideHeld": "隐藏挂起 {{n}} 例",
     "displayLabel": "显示"
   },
+  "buttons": {
+    "showHeld": "查看挂起",
+    "hideHeld": "隐藏挂起"
+  },
   "bulk": {
     "selectAll": "全选案例",
     "selectRow": "选择案例 #{{id}}",
