@@ -32,6 +32,7 @@ import {
   TierPill,
 } from "../components/atoms";
 import { EvaluateDialog } from "../components/EvaluateDialog";
+import { ImageOverridePopover } from "../components/ImageOverridePopover";
 import { RenderHistoryDrawer } from "../components/RenderHistoryDrawer";
 import { RenderStatusCard } from "../components/RenderStatusCard";
 import { RevisionsDrawer } from "../components/RevisionsDrawer";
@@ -68,6 +69,10 @@ export default function CaseDetail() {
   const [revisionsOpen, setRevisionsOpen] = useState(false);
   const [evaluateOpen, setEvaluateOpen] = useState(false);
   const [renderHistoryOpen, setRenderHistoryOpen] = useState(false);
+  // Stage B: 当前打开的 image override popover (filename + anchor element)
+  const [overrideTarget, setOverrideTarget] = useState<
+    { filename: string; anchor: HTMLElement } | null
+  >(null);
 
   useHotkey("h", () => setRenderHistoryOpen((v) => !v), { ignoreInEditable: true });
   const [draft, setDraft] = useState({
@@ -513,36 +518,79 @@ export default function CaseDetail() {
                     const phaseTxt =
                       g.role === "pre" ? t("images.preOp") : g.role === "post" ? t("images.postOp") : t("images.unlabeled");
                     const rejection = meta?.rejection_reason ? `\n${t("images.rejectionTitle")}: ${meta.rejection_reason}` : "";
+                    const isManualPhase = meta?.phase_override_source === "manual";
+                    const isManualView = meta?.view_override_source === "manual";
+                    const isManual = isManualPhase || isManualView;
                     return (
-                      <a
+                      <div
                         key={name}
-                        href={caseFileUrl(caseId, name)}
-                        target="_blank"
-                        rel="noreferrer"
                         className="thumb"
                         data-source-file={name}
                         data-view={view ?? ""}
+                        data-manual={isManual ? "1" : "0"}
                         title={t("images.thumbnailTitle", {
                           name,
                           phase: phaseTxt,
                           view: viewText || t("images.viewUnknown"),
                           rejection,
                         })}
+                        style={{ position: "relative" }}
                       >
-                        <img src={caseFileUrl(caseId, name)} alt={name} loading="lazy" />
+                        <a
+                          href={caseFileUrl(caseId, name)}
+                          target="_blank"
+                          rel="noreferrer"
+                          style={{ display: "block", color: "inherit" }}
+                        >
+                          <img src={caseFileUrl(caseId, name)} alt={name} loading="lazy" />
+                        </a>
                         <span className={`role ${g.role}`}>
                           {g.role === "pre" ? "PRE" : g.role === "post" ? "POST" : "UNL"}
+                          {isManualPhase && (
+                            <span
+                              data-testid="phase-manual-marker"
+                              style={{ marginLeft: 3, fontSize: 8, opacity: 0.85 }}
+                              title={t("images.manualBadge")}
+                            >
+                              ✎
+                            </span>
+                          )}
                         </span>
                         {view && (
-                          <span className={`view ${view}`}>{viewText}</span>
+                          <span className={`view ${view}`}>
+                            {viewText}
+                            {isManualView && (
+                              <span
+                                data-testid="view-manual-marker"
+                                style={{ marginLeft: 2, fontSize: 8 }}
+                                title={t("images.manualBadge")}
+                              >
+                                ✎
+                              </span>
+                            )}
+                          </span>
                         )}
                         {meta?.rejection_reason && (
                           <span className="reject" title={meta.rejection_reason}>
                             {meta.rejection_reason}
                           </span>
                         )}
+                        <button
+                          type="button"
+                          className="thumb-edit-btn"
+                          data-testid="thumb-edit-btn"
+                          aria-label={t("images.editOverride")}
+                          title={t("images.editOverride")}
+                          onClick={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            setOverrideTarget({ filename: name, anchor: e.currentTarget });
+                          }}
+                        >
+                          <Ico name="edit" size={11} />
+                        </button>
                         <div className="name">{name}</div>
-                      </a>
+                      </div>
                     );
                   })}
                 </div>
@@ -1182,6 +1230,15 @@ export default function CaseDetail() {
         open={renderHistoryOpen}
         onClose={() => setRenderHistoryOpen(false)}
       />
+      {overrideTarget && (
+        <ImageOverridePopover
+          caseId={caseId}
+          filename={overrideTarget.filename}
+          meta={skillMetaByFile.get(overrideTarget.filename)}
+          anchorEl={overrideTarget.anchor}
+          onClose={() => setOverrideTarget(null)}
+        />
+      )}
     </div>
   );
 }

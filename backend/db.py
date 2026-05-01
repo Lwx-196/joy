@@ -133,6 +133,20 @@ CREATE TABLE IF NOT EXISTS evaluations (
 );
 CREATE INDEX IF NOT EXISTS idx_evaluations_subject        ON evaluations(subject_kind, subject_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_evaluations_pending_lookup ON evaluations(subject_kind, undone_at);
+
+-- Stage B: 单张图 phase / view 手动覆盖
+-- 主键 (case_id, basename(filename))。值 NULL = 该维度不覆盖,沿用 skill 自动判读。
+-- phase 取值受 backend.routes.cases 的 _ALLOWED_OVERRIDE_PHASES 校验,
+-- view 取值受 _ALLOWED_OVERRIDE_VIEWS 校验。
+CREATE TABLE IF NOT EXISTS case_image_overrides (
+  case_id       INTEGER NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
+  filename      TEXT NOT NULL,
+  manual_phase  TEXT,
+  manual_view   TEXT,
+  updated_at    TIMESTAMP NOT NULL,
+  PRIMARY KEY (case_id, filename)
+);
+CREATE INDEX IF NOT EXISTS idx_image_overrides_case ON case_image_overrides(case_id);
 """
 
 

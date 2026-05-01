@@ -46,7 +46,23 @@
     "phaseSourceDirectory": "目录名",
     "phaseSourceCompareHint": "对比线索",
     "rejectionTitle": "拒绝原因",
-    "thumbnailTitle": "{{name}}\n相位:{{phase}} · 视角:{{view}}{{rejection}}"
+    "thumbnailTitle": "{{name}}\n相位:{{phase}} · 视角:{{view}}{{rejection}}",
+    "editOverride": "编辑相位/视角",
+    "manualBadge": "手动"
+  },
+  "imageOverride": {
+    "title": "手动覆盖",
+    "phaseLabel": "相位",
+    "phaseBefore": "术前",
+    "phaseAfter": "术后",
+    "viewLabel": "视角",
+    "viewFront": "正面",
+    "viewOblique": "45°",
+    "viewSide": "侧面",
+    "clearAll": "清除覆盖",
+    "clearTitle": "同时清除相位与视角覆盖",
+    "close": "关闭",
+    "error": "保存失败"
   },
   "edit": {
     "cardTitle": "手动编辑层",

@@ -12,7 +12,21 @@ from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import FileResponse
 
 from .. import _upgrade_executor, audit, db, issue_translator, scanner, skill_bridge
-from ..models import CaseBatchUpdate, CaseDetail, CaseListResponse, CaseSummary, CaseUpdate
+from ..models import (
+    CaseBatchUpdate,
+    CaseDetail,
+    CaseListResponse,
+    CaseSummary,
+    CaseUpdate,
+    ImageOverride,
+    ImageOverridePayload,
+)
+
+# Stage B: 单张图 phase / view 手动覆盖允许的取值。
+# phase 与 skill manifest 输出对齐('before' / 'after');None 表示未覆盖。
+# view 与 _extract_per_image_metadata 输出的 view_bucket / angle 对齐。
+_ALLOWED_OVERRIDE_PHASES = {"before", "after"}
+_ALLOWED_OVERRIDE_VIEWS = {"front", "oblique", "side"}
 
 # Stage A: brand 与 template 的默认值,用于 manifest fallback 路径推导。
 # 这里硬编码 fumei + tri-compare 是因为 case_detail 不知道用户当前选了哪个 brand;
@@ -54,6 +68,56 @@ def _fallback_skill_from_manifest(case_dir: str) -> dict[str, list[Any]]:
         }
     except (OSError, ValueError, TypeError):
         return empty
+
+def _fetch_image_overrides(conn: sqlite3.Connection, case_id: int) -> dict[str, dict[str, str | None]]:
+    """Stage B: 读 case_image_overrides 表,返回 {filename: {phase, view}}。
+
+    任一字段是 None 表示该维度未覆盖。返回空 dict 表示该 case 完全没有手动覆盖。
+    """
+    out: dict[str, dict[str, str | None]] = {}
+    rows = conn.execute(
+        "SELECT filename, manual_phase, manual_view FROM case_image_overrides WHERE case_id = ?",
+        (case_id,),
+    ).fetchall()
+    for r in rows:
+        out[r["filename"]] = {
+            "phase": r["manual_phase"],
+            "view": r["manual_view"],
+        }
+    return out
+
+
+def _apply_overrides_to_metadata(
+    image_metadata: list[dict[str, Any]],
+    overrides: dict[str, dict[str, str | None]],
+) -> list[dict[str, Any]]:
+    """Stage B: 把 case_image_overrides 合并到 skill_image_metadata。
+
+    每条 entry 新增 `phase_source` / `view_source` 标 'manual' 或 'skill';manual 优先。
+    在前端这两字段决定 chip 颜色或图标提示。
+    """
+    if not overrides and image_metadata is not None:
+        # No overrides — annotate every entry as skill-sourced for UI determinism.
+        for entry in image_metadata:
+            entry.setdefault("phase_override_source", None)
+            entry.setdefault("view_override_source", None)
+        return image_metadata
+    for entry in image_metadata or []:
+        fname = entry.get("filename")
+        ov = overrides.get(fname) if fname else None
+        if ov and ov.get("phase"):
+            entry["phase"] = ov["phase"]
+            entry["phase_override_source"] = "manual"
+        else:
+            entry["phase_override_source"] = None
+        if ov and ov.get("view"):
+            entry["view_bucket"] = ov["view"]
+            entry["angle"] = ov["view"]
+            entry["view_override_source"] = "manual"
+        else:
+            entry["view_override_source"] = None
+    return image_metadata
+
 
 router = APIRouter(prefix="/api/cases", tags=["cases"])
 
@@ -251,6 +315,11 @@ def case_detail(case_id: int) -> CaseDetail:
         skill_blocking_detail = fb["blocking_detail"]
         skill_warnings = fb["warnings"]
 
+    # Stage B: 合并 case_image_overrides — 手动覆盖优先于 skill 自动判读。
+    with db.connect() as ov_conn:
+        overrides = _fetch_image_overrides(ov_conn, case_id)
+    skill_image_metadata = _apply_overrides_to_metadata(skill_image_metadata, overrides)
+
     summary = _row_to_summary(row, row["canonical_name"])
     return CaseDetail(
         **summary.model_dump(),
@@ -280,6 +349,72 @@ def update_case(case_id: int, payload: CaseUpdate) -> CaseDetail:
             conn, [case_id], befores, op="patch", source_route=f"/api/cases/{case_id}"
         )
     return case_detail(case_id)
+
+
+@router.patch("/{case_id}/images/{filename}", response_model=ImageOverride)
+def patch_image_override(
+    case_id: int, filename: str, payload: ImageOverridePayload
+) -> ImageOverride:
+    """Stage B: 单张源图 phase / view 手动覆盖。
+
+    - filename 是 case 目录下 basename(不接受相对路径或 ..);非法返回 400
+    - manual_phase 必须 ∈ _ALLOWED_OVERRIDE_PHASES 或 ""(清除);其它返回 400
+    - manual_view 必须 ∈ _ALLOWED_OVERRIDE_VIEWS 或 "";其它返回 400
+    - 字段省略(None)= 不修改该维度;空字符串 = 清除该维度回到 skill 自动判读
+    - 两个字段都清完 → 删除整行
+    """
+    if "/" in filename or "\\" in filename or filename in {"", ".", ".."}:
+        raise HTTPException(400, "filename must be a bare basename")
+
+    def _norm(v: str | None, allowed: set[str], label: str) -> tuple[bool, str | None]:
+        """Returns (touch?, value-to-write). Empty string → clear."""
+        if v is None:
+            return False, None
+        if v == "":
+            return True, None
+        if v not in allowed:
+            raise HTTPException(400, f"invalid {label}: {v!r}")
+        return True, v
+
+    touch_phase, phase_val = _norm(payload.manual_phase, _ALLOWED_OVERRIDE_PHASES, "manual_phase")
+    touch_view, view_val = _norm(payload.manual_view, _ALLOWED_OVERRIDE_VIEWS, "manual_view")
+    if not touch_phase and not touch_view:
+        raise HTTPException(400, "no fields to update")
+
+    now = datetime.now(timezone.utc).isoformat()
+    with db.connect() as conn:
+        case_row = conn.execute("SELECT id FROM cases WHERE id = ?", (case_id,)).fetchone()
+        if not case_row:
+            raise HTTPException(404, "case not found")
+        existing = conn.execute(
+            "SELECT manual_phase, manual_view FROM case_image_overrides WHERE case_id = ? AND filename = ?",
+            (case_id, filename),
+        ).fetchone()
+        new_phase = phase_val if touch_phase else (existing["manual_phase"] if existing else None)
+        new_view = view_val if touch_view else (existing["manual_view"] if existing else None)
+        if new_phase is None and new_view is None:
+            conn.execute(
+                "DELETE FROM case_image_overrides WHERE case_id = ? AND filename = ?",
+                (case_id, filename),
+            )
+        else:
+            conn.execute(
+                """INSERT INTO case_image_overrides
+                       (case_id, filename, manual_phase, manual_view, updated_at)
+                   VALUES (?, ?, ?, ?, ?)
+                   ON CONFLICT(case_id, filename) DO UPDATE SET
+                       manual_phase = excluded.manual_phase,
+                       manual_view = excluded.manual_view,
+                       updated_at = excluded.updated_at""",
+                (case_id, filename, new_phase, new_view, now),
+            )
+    return ImageOverride(
+        case_id=case_id,
+        filename=filename,
+        manual_phase=new_phase,
+        manual_view=new_view,
+        updated_at=now,
+    )
 
 
 @router.post("/batch")

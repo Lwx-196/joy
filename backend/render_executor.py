@@ -127,6 +127,14 @@ def _build_render_runner() -> str:
     given brand/template/semantic mode, then calls render_brand_clean.render_from_manifest
     to write final-board.jpg. Emits one JSON line on stdout with output paths
     and the manifest summary.
+
+    Stage B: argv[8] is a JSON dict of {filename: {phase, view}} manual overrides.
+    After build_manifest() returns, the script mutates each matching entry's
+    `phase` / `view.bucket` / `angle` so render labels and any post-build_manifest
+    consumer sees the user's override. The original skill auto-judgment is
+    preserved under `phase_skill_auto` / `view_skill_auto` for traceability.
+    The dict is also written to the manifest top-level as `manual_overrides`
+    so future skill versions can pick it up before pairing.
     """
     return r"""
 import importlib.util
@@ -141,6 +149,14 @@ brand_token = sys.argv[4]
 template = sys.argv[5]
 semantic_judge_mode = sys.argv[6]
 out_root = Path(sys.argv[7])
+manual_overrides_json = sys.argv[8] if len(sys.argv) > 8 else "{}"
+
+try:
+    manual_overrides = json.loads(manual_overrides_json) or {}
+    if not isinstance(manual_overrides, dict):
+        manual_overrides = {}
+except (json.JSONDecodeError, TypeError):
+    manual_overrides = {}
 
 def _load(name, path):
     spec = importlib.util.spec_from_file_location(name, path)
@@ -160,6 +176,35 @@ manifest = case_layout.build_manifest(
     template,
     semantic_judge_mode=semantic_judge_mode,
 )
+
+# Stage B: apply manual overrides to each entry. Pairing already ran inside
+# build_manifest so phase/view changes here only affect render labels and
+# downstream readers. Re-pair would require skill cooperation (Stage C).
+if manual_overrides:
+    applied = []
+    for group in manifest.get("groups") or []:
+        if not isinstance(group, dict):
+            continue
+        for entry in group.get("entries") or []:
+            if not isinstance(entry, dict):
+                continue
+            ov = manual_overrides.get(entry.get("name"))
+            if not ov:
+                continue
+            if ov.get("phase"):
+                entry["phase_skill_auto"] = entry.get("phase")
+                entry["phase"] = ov["phase"]
+                entry["phase_source"] = "manual"
+            if ov.get("view"):
+                view = entry.get("view") if isinstance(entry.get("view"), dict) else {}
+                entry["view_skill_auto"] = {"bucket": view.get("bucket"), "angle": entry.get("angle")}
+                view["bucket"] = ov["view"]
+                entry["view"] = view
+                entry["angle"] = ov["view"]
+                entry["angle_source"] = "manual"
+            applied.append(entry.get("name"))
+    manifest["manual_overrides"] = manual_overrides
+    manifest["manual_overrides_applied"] = applied
 
 out_root.mkdir(parents=True, exist_ok=True)
 final_path = out_root / "final-board.jpg"
@@ -181,6 +226,7 @@ result = {
     "warning_count": int(manifest.get("warning_count") or 0),
     "case_mode": str(manifest.get("case_mode") or ""),
     "effective_templates": manifest.get("effective_templates") or [],
+    "manual_overrides_applied": list(manifest.get("manual_overrides_applied") or []),
 }
 sys.stdout.write(json.dumps(result, ensure_ascii=False))
 """
@@ -192,11 +238,16 @@ def run_render(
     template: str = "tri-compare",
     semantic_judge: str = "off",
     timeout: int = DEFAULT_RENDER_TIMEOUT_SEC,
+    manual_overrides: dict[str, dict[str, str | None]] | None = None,
 ) -> dict[str, Any]:
     """Spawn system Python and run build_manifest + render_brand_clean.
 
     Returns a dict with output_path / manifest_path / status / blocking_issue_count /
-    warning_count / case_mode / effective_templates.
+    warning_count / case_mode / effective_templates / manual_overrides_applied.
+
+    Stage B: `manual_overrides` is the per-image phase/view dict
+    `{filename: {phase: 'before'|'after'|None, view: 'front'|'oblique'|'side'|None}}`.
+    The runner script mutates matching manifest entries before render runs.
 
     Raises:
         FileNotFoundError: case_dir or skill scripts missing.
@@ -217,6 +268,8 @@ def run_render(
 
     _archive_existing_final_board(out_root)
 
+    overrides_json = json.dumps(manual_overrides or {}, ensure_ascii=False)
+
     proc = subprocess.run(
         [
             SKILL_PYTHON,
@@ -229,6 +282,7 @@ def run_render(
             template,
             semantic_judge,
             str(out_root),
+            overrides_json,
         ],
         capture_output=True,
         text=True,

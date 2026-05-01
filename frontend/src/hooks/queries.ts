@@ -62,6 +62,8 @@ import {
   undoUpgradeBatch,
   upgradeCase,
   updateCase,
+  updateImageOverride,
+  type ImageOverridePayload,
   updateCustomer,
   VERDICT_LABEL,
   type CaseDetail,
@@ -292,6 +294,24 @@ export function useUpdateCase() {
         caseIds: [data.id],
         label: describeUpdate(vars.payload),
       });
+    },
+  });
+}
+
+/**
+ * Stage B: 单张图 phase / view 手动覆盖。
+ *
+ * 不写 undo (ImageOverride 是单独的表,不进 case_revisions),错误用 toast 提示。
+ * onSuccess 仅 invalidate caseDetail — render 侧由用户主动重新出图触发,所以
+ * 不需要在 override 后强制重 render。
+ */
+export function useUpdateImageOverride() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (vars: { caseId: number; filename: string; payload: ImageOverridePayload }) =>
+      updateImageOverride(vars.caseId, vars.filename, vars.payload),
+    onSuccess: (_data, vars) => {
+      qc.invalidateQueries({ queryKey: QK.caseDetail(vars.caseId) });
     },
   });
 }

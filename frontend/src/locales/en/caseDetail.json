@@ -46,7 +46,23 @@
     "phaseSourceDirectory": "directory",
     "phaseSourceCompareHint": "compare-hint",
     "rejectionTitle": "Rejection",
-    "thumbnailTitle": "{{name}}\nphase:{{phase}} · view:{{view}}{{rejection}}"
+    "thumbnailTitle": "{{name}}\nphase:{{phase}} · view:{{view}}{{rejection}}",
+    "editOverride": "Edit phase/view",
+    "manualBadge": "manual"
+  },
+  "imageOverride": {
+    "title": "Manual override",
+    "phaseLabel": "Phase",
+    "phaseBefore": "Pre-op",
+    "phaseAfter": "Post-op",
+    "viewLabel": "View",
+    "viewFront": "Front",
+    "viewOblique": "45°",
+    "viewSide": "Side",
+    "clearAll": "Clear override",
+    "clearTitle": "Clear both phase and view overrides",
+    "close": "Close",
+    "error": "Save failed"
   },
   "edit": {
     "cardTitle": "Manual edit layer",

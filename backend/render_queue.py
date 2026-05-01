@@ -230,6 +230,16 @@ class RenderQueue:
             case_id = row["case_id"]
             batch_id = row["batch_id"]
 
+            # Stage B: pull manual phase/view overrides for this case
+            override_rows = conn.execute(
+                "SELECT filename, manual_phase, manual_view FROM case_image_overrides WHERE case_id = ?",
+                (case_id,),
+            ).fetchall()
+            manual_overrides: dict[str, dict[str, str | None]] = {
+                r["filename"]: {"phase": r["manual_phase"], "view": r["manual_view"]}
+                for r in override_rows
+            }
+
         self._publish(
             {
                 "type": "job_update",
@@ -247,6 +257,7 @@ class RenderQueue:
                 brand=brand,
                 template=template,
                 semantic_judge=semantic_judge,
+                manual_overrides=manual_overrides,
             )
         except FileNotFoundError as e:
             self._mark_failed(job_id, f"missing: {e}")

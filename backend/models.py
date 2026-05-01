@@ -53,6 +53,24 @@ class CaseDetail(CaseSummary):
     skill_warnings: list[str] = []
 
 
+class ImageOverridePayload(BaseModel):
+    """Stage B: PATCH /api/cases/{id}/images/{filename} 请求体。
+
+    任一字段为 None 表示"不修改";空字符串 "" 表示清除该维度的覆盖回退到 skill 自动判读。
+    """
+    manual_phase: str | None = None
+    manual_view: str | None = None
+
+
+class ImageOverride(BaseModel):
+    """Stage B: 单张图覆盖记录(响应)。"""
+    case_id: int
+    filename: str
+    manual_phase: str | None = None
+    manual_view: str | None = None
+    updated_at: str
+
+
 class CaseUpdate(BaseModel):
     manual_category: str | None = None
     manual_template_tier: str | None = None

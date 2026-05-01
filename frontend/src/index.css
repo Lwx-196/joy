@@ -579,6 +579,29 @@ input:focus, textarea:focus, select:focus { border-color: var(--ink-1); }
   padding: 1px 4px; border-radius: 3px;
   max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
+.thumb .thumb-edit-btn {
+  position: absolute;
+  bottom: 6px; right: 6px;
+  width: 22px; height: 22px;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(255,255,255,.92);
+  border: 1px solid rgba(28,25,23,.20);
+  border-radius: 4px;
+  color: var(--ink-2);
+  cursor: pointer;
+  z-index: 2;
+  padding: 0;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+.thumb:hover .thumb-edit-btn,
+.thumb .thumb-edit-btn:focus,
+.thumb[data-manual="1"] .thumb-edit-btn { opacity: 1; }
+.thumb .thumb-edit-btn:hover { background: #fff; color: var(--ink-1); border-color: var(--line); }
+.thumb[data-manual="1"] {
+  border-color: rgba(180,83,9,.55);
+  box-shadow: 0 0 0 1px rgba(180,83,9,.3) inset;
+}
 
 /* scroll containers */
 .scroll-y { overflow-y: auto; }

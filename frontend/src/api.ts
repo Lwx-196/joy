@@ -81,6 +81,9 @@ export interface SkillImageMetadata {
   sharpness_level: string | null;
   issues: string[];
   rejection_reason: string | null;
+  // Stage B: 'manual' = user override applied; null/undefined = skill auto-detected
+  phase_override_source?: "manual" | null;
+  view_override_source?: "manual" | null;
 }
 
 export interface CaseDetail extends CaseSummary {
@@ -209,6 +212,35 @@ export const batchUpdateCases = (case_ids: number[], update: CaseUpdatePayload) 
 
 export const caseFileUrl = (id: number, name: string) =>
   `/api/cases/${id}/files?name=${encodeURIComponent(name)}`;
+
+// Stage B: 单张图 phase / view 手动覆盖
+export type ImageOverridePhase = "before" | "after" | null;
+export type ImageOverrideView = "front" | "oblique" | "side" | null;
+
+export interface ImageOverridePayload {
+  manual_phase?: string | null; // null = unchanged; "" = clear; allowed value = set
+  manual_view?: string | null;
+}
+
+export interface ImageOverride {
+  case_id: number;
+  filename: string;
+  manual_phase: ImageOverridePhase;
+  manual_view: ImageOverrideView;
+  updated_at: string;
+}
+
+export const updateImageOverride = (
+  caseId: number,
+  filename: string,
+  payload: ImageOverridePayload,
+) =>
+  api
+    .patch<ImageOverride>(
+      `/api/cases/${caseId}/images/${encodeURIComponent(filename)}`,
+      payload,
+    )
+    .then((r) => r.data);
 
 export interface RenameSuggestion {
   command: string | null;
