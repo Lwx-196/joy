@@ -120,7 +120,6 @@ export function ImageOverridePopover({ caseId, filename, meta, anchorEl, onClose
       role="dialog"
       aria-label={t("imageOverride.title")}
       data-testid="image-override-popover"
-      onClick={(e) => e.stopPropagation()}
       style={{
         position: "fixed",
         top: pos.top,
