@@ -152,6 +152,56 @@ def _coerce_blocking_issue(item: Any) -> dict[str, Any] | None:
     return None
 
 
+def _extract_per_image_metadata(groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Flatten skill `groups[i].entries[j]` into a per-image metadata list.
+
+    Each manifest entry from case-layout-board already carries pose/view/phase/
+    sharpness/issues per image. We surface that here so the UI can render view
+    chips on each thumbnail and explain why a specific image was rejected.
+
+    Returned dict shape (kept narrow, no nested objects beyond pose/view/crop_box):
+        filename: str               # entry["name"], the bare basename
+        relative_path: str          # entry["relative_path"], group-relative
+        phase: str | None           # 'before' | 'after' | None
+        phase_source: str | None    # 'filename' | 'compare_hint' | 'directory' | None
+        angle: str | None           # 'front' | 'oblique' | 'side' | None
+        angle_source: str | None    # 'filename' | 'pose' | 'compare_hint' | None
+        angle_confidence: float | None
+        direction: str | None       # 'left' | 'right' | 'center' | None
+        view_bucket: str | None     # mirrors entry["view"]["bucket"], easier UI binding
+        pose: dict | None           # {pitch, yaw, roll}
+        sharpness_score: float | None
+        sharpness_level: str | None
+        issues: list[str]           # per-image issue strings (already CN)
+        rejection_reason: str | None
+    """
+    out: list[dict[str, Any]] = []
+    for group in groups or []:
+        if not isinstance(group, dict):
+            continue
+        for entry in group.get("entries") or []:
+            if not isinstance(entry, dict):
+                continue
+            view = entry.get("view") if isinstance(entry.get("view"), dict) else None
+            out.append({
+                "filename": entry.get("name"),
+                "relative_path": entry.get("relative_path"),
+                "phase": entry.get("phase"),
+                "phase_source": entry.get("phase_source"),
+                "angle": entry.get("angle"),
+                "angle_source": entry.get("angle_source"),
+                "angle_confidence": entry.get("angle_confidence"),
+                "direction": entry.get("direction"),
+                "view_bucket": (view or {}).get("bucket"),
+                "pose": entry.get("pose"),
+                "sharpness_score": entry.get("sharpness_score"),
+                "sharpness_level": entry.get("sharpness_level"),
+                "issues": list(entry.get("issues") or []),
+                "rejection_reason": entry.get("rejection_reason"),
+            })
+    return out
+
+
 def _extract_geometric_aggregates(groups: list[dict[str, Any]]) -> tuple[float | None, float | None]:
     """Reduce per-group pose/sharpness signals into case-level max/min.
 
@@ -258,6 +308,11 @@ def upgrade_case_to_v3(
     groups = manifest.get("groups") or []
     pose_max, sharp_min = _extract_geometric_aggregates(groups)
 
+    # --- Per-image + raw blocking/warnings transparent passthrough ---
+    image_metadata = _extract_per_image_metadata(groups)
+    raw_blocking_strings = [str(x) for x in (manifest.get("blocking_issues") or [])]
+    raw_warning_strings = [str(x) for x in (manifest.get("warnings") or [])]
+
     # --- meta_extras: things we want to surface in UI but don't have a column for ---
     meta_extras = {
         "source": "skill_v3",
@@ -278,4 +333,8 @@ def upgrade_case_to_v3(
         "meta_extras": meta_extras,
         "raw_status": str(manifest.get("status") or ""),
         "raw_blocking_count": int(manifest.get("blocking_issue_count") or 0),
+        # Stage A: transparent passthrough for UI consumption
+        "skill_image_metadata_json": json.dumps(image_metadata, ensure_ascii=False),
+        "skill_blocking_detail_json": json.dumps(raw_blocking_strings, ensure_ascii=False),
+        "skill_warnings_json": json.dumps(raw_warning_strings, ensure_ascii=False),
     }

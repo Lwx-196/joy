@@ -14,6 +14,47 @@ from fastapi.responses import FileResponse
 from .. import _upgrade_executor, audit, db, issue_translator, scanner, skill_bridge
 from ..models import CaseBatchUpdate, CaseDetail, CaseListResponse, CaseSummary, CaseUpdate
 
+# Stage A: brand 与 template 的默认值,用于 manifest fallback 路径推导。
+# 这里硬编码 fumei + tri-compare 是因为 case_detail 不知道用户当前选了哪个 brand;
+# 如果未来需要按品牌切换,前端应通过 query string 传入,这里再读 query。
+_FALLBACK_BRAND = "fumei"
+_FALLBACK_TEMPLATE = "tri-compare"
+
+
+def _fallback_skill_from_manifest(case_dir: str) -> dict[str, list[Any]]:
+    """Stage A: 当 cases.skill_image_metadata_json 列为空(case 在新增列前已经
+    upgrade 过)时,尝试直接读最近一次渲染的 manifest.final.json,实时透传
+    image_metadata / blocking / warnings。
+
+    返回 {"image_metadata": [...], "blocking_detail": [...], "warnings": [...]},
+    任意错误条件全部空列表 — manifest 缺失/破损不阻塞 case 详情。
+    """
+    empty = {"image_metadata": [], "blocking_detail": [], "warnings": []}
+    if not case_dir:
+        return empty
+    try:
+        p = (
+            Path(case_dir)
+            / ".case-layout-output"
+            / _FALLBACK_BRAND
+            / _FALLBACK_TEMPLATE
+            / "render"
+            / "manifest.final.json"
+        )
+        if not p.is_file():
+            return empty
+        data = json.loads(p.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            return empty
+        groups = data.get("groups") or []
+        return {
+            "image_metadata": skill_bridge._extract_per_image_metadata(groups),
+            "blocking_detail": [str(x) for x in (data.get("blocking_issues") or [])],
+            "warnings": [str(x) for x in (data.get("warnings") or [])],
+        }
+    except (OSError, ValueError, TypeError):
+        return empty
+
 router = APIRouter(prefix="/api/cases", tags=["cases"])
 
 
@@ -187,6 +228,29 @@ def case_detail(case_id: int) -> CaseDetail:
     effective = issue_translator.merge_codes([*auto_raw, *manual_raw])
     meta = json.loads(row["meta_json"] or "{}")
 
+    # Stage A: skill 透传字段(只在 upgrade 后非空)
+    def _safe_list(col: str) -> list[Any]:
+        if col not in row.keys():
+            return []
+        raw = row[col]
+        if not raw:
+            return []
+        try:
+            val = json.loads(raw)
+            return val if isinstance(val, list) else []
+        except (TypeError, ValueError):
+            return []
+
+    skill_image_metadata = _safe_list("skill_image_metadata_json")
+    skill_blocking_detail = _safe_list("skill_blocking_detail_json")
+    skill_warnings = _safe_list("skill_warnings_json")
+    # 兼容 Stage A 之前已升级的 case:db 列为空时直接读 manifest.final.json
+    if not skill_image_metadata and not skill_blocking_detail and not skill_warnings:
+        fb = _fallback_skill_from_manifest(row["abs_path"])
+        skill_image_metadata = fb["image_metadata"]
+        skill_blocking_detail = fb["blocking_detail"]
+        skill_warnings = fb["warnings"]
+
     summary = _row_to_summary(row, row["canonical_name"])
     return CaseDetail(
         **summary.model_dump(),
@@ -197,6 +261,9 @@ def case_detail(case_id: int) -> CaseDetail:
         sharp_ratio_min=row["sharp_ratio_min"],
         meta=meta,
         rename_suggestion=None,
+        skill_image_metadata=skill_image_metadata,
+        skill_blocking_detail=skill_blocking_detail,
+        skill_warnings=skill_warnings,
     )
 
 

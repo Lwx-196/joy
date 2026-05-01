@@ -33,10 +33,20 @@
     "preOp": "术前",
     "postOp": "术后",
     "unlabeled": "未标注",
-    "groupPreOp": "术前 (auto-detected)",
-    "groupPostOp": "术后 (auto-detected)",
+    "groupPreOp": "术前",
+    "groupPostOp": "术后",
     "groupUnlabeled": "未标注",
-    "empty": "该案例目录没有图片"
+    "empty": "该案例目录没有图片",
+    "viewFront": "正面",
+    "viewOblique": "45°",
+    "viewSide": "侧面",
+    "viewUnknown": "—",
+    "phaseSourceSkill": "skill 判读",
+    "phaseSourceFilename": "文件名",
+    "phaseSourceDirectory": "目录名",
+    "phaseSourceCompareHint": "对比线索",
+    "rejectionTitle": "拒绝原因",
+    "thumbnailTitle": "{{name}}\n相位:{{phase}} · 视角:{{view}}{{rejection}}"
   },
   "edit": {
     "cardTitle": "手动编辑层",

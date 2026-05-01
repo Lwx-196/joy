@@ -33,10 +33,20 @@
     "preOp": "Pre-op",
     "postOp": "Post-op",
     "unlabeled": "Unlabeled",
-    "groupPreOp": "Pre-op (auto-detected)",
-    "groupPostOp": "Post-op (auto-detected)",
+    "groupPreOp": "Pre-op",
+    "groupPostOp": "Post-op",
     "groupUnlabeled": "Unlabeled",
-    "empty": "No images in this case directory"
+    "empty": "No images in this case directory",
+    "viewFront": "Front",
+    "viewOblique": "45°",
+    "viewSide": "Side",
+    "viewUnknown": "—",
+    "phaseSourceSkill": "skill",
+    "phaseSourceFilename": "filename",
+    "phaseSourceDirectory": "directory",
+    "phaseSourceCompareHint": "compare-hint",
+    "rejectionTitle": "Rejection",
+    "thumbnailTitle": "{{name}}\nphase:{{phase}} · view:{{view}}{{rejection}}"
   },
   "edit": {
     "cardTitle": "Manual edit layer",

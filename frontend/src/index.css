@@ -553,6 +553,26 @@ input:focus, textarea:focus, select:focus { border-color: var(--ink-1); }
 .thumb .role.pre  { background: rgba(8,145,178,.92); }
 .thumb .role.post { background: rgba(180,83,9,.92); }
 .thumb .role.unl  { background: rgba(120,113,108,.85); }
+.thumb .view {
+  position: absolute; top: 6px; right: 6px;
+  font-size: 10px; font-family: var(--mono); font-weight: 600;
+  background: rgba(255,255,255,.92); color: var(--ink-2);
+  border: 1px solid rgba(28,25,23,.18);
+  padding: 1px 5px; border-radius: 4px;
+  letter-spacing: 0.4px; line-height: 1.4;
+  z-index: 1;
+}
+.thumb .view.front   { background: rgba(8,145,178,.16);  color: var(--cyan-ink, #0E7490); border-color: rgba(8,145,178,.30); }
+.thumb .view.oblique { background: rgba(124,58,237,.14); color: #6D28D9; border-color: rgba(124,58,237,.28); }
+.thumb .view.side    { background: rgba(180,83,9,.14);   color: var(--amber-ink, #B45309); border-color: rgba(180,83,9,.28); }
+.thumb .reject {
+  position: absolute; bottom: 22px; left: 6px; right: 6px;
+  font-size: 9.5px; font-family: var(--mono);
+  background: rgba(239,68,68,.92); color: #fff;
+  padding: 1px 4px; border-radius: 3px;
+  z-index: 1; text-align: center;
+  text-overflow: ellipsis; white-space: nowrap; overflow: hidden;
+}
 .thumb .name {
   position: relative; z-index: 1;
   background: rgba(255,255,255,.86);

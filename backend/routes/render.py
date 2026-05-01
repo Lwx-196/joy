@@ -101,6 +101,28 @@ def _row_to_job(row: sqlite3.Row) -> dict[str, Any]:
     }
 
 
+def _read_manifest_blocking(manifest_path: str | None) -> dict[str, list[str]]:
+    """Stage A: 读 manifest.final.json 透传 blocking_issues + warnings 字符串列表。
+
+    错误条件全部返回空列表 — manifest 缺失/破损不阻塞 job 详情。"""
+    empty = {"blocking_issues": [], "warnings": []}
+    if not manifest_path:
+        return empty
+    try:
+        p = Path(manifest_path)
+        if not p.is_file():
+            return empty
+        data = json.loads(p.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            return empty
+        return {
+            "blocking_issues": [str(x) for x in (data.get("blocking_issues") or [])],
+            "warnings": [str(x) for x in (data.get("warnings") or [])],
+        }
+    except (OSError, ValueError, TypeError):
+        return empty
+
+
 # ----------------------------------------------------------------------
 # Single-case enqueue
 # ----------------------------------------------------------------------
@@ -260,6 +282,10 @@ def latest_case_job(case_id: int) -> dict:
             job["output_mtime"] = out_path.stat().st_mtime
         except OSError:
             job["output_mtime"] = None
+    # Stage A: 透传 manifest.final.json 的 blocking/warnings 列表
+    detail = _read_manifest_blocking(job["manifest_path"])
+    job["blocking_issues"] = detail["blocking_issues"]
+    job["warnings"] = detail["warnings"]
     return {"job": job}
 
 
@@ -385,7 +411,12 @@ def get_job(job_id: int) -> dict:
         ).fetchone()
     if not row:
         raise HTTPException(404, "job not found")
-    return _row_to_job(row)
+    job = _row_to_job(row)
+    # Stage A: 透传 manifest.final.json 的逐条 blocking/warning 字符串
+    detail = _read_manifest_blocking(job["manifest_path"])
+    job["blocking_issues"] = detail["blocking_issues"]
+    job["warnings"] = detail["warnings"]
+    return job
 
 
 @router.get("/api/render/batches/{batch_id}")

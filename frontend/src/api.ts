@@ -63,6 +63,26 @@ export interface BlockingIssue {
   severity?: "block" | "warn";
 }
 
+export type SkillPhase = "before" | "after" | null;
+export type SkillViewBucket = "front" | "oblique" | "side" | null;
+
+export interface SkillImageMetadata {
+  filename: string | null;
+  relative_path: string | null;
+  phase: SkillPhase;
+  phase_source: string | null;
+  angle: string | null;
+  angle_source: string | null;
+  angle_confidence: number | null;
+  direction: string | null;
+  view_bucket: SkillViewBucket;
+  pose: { pitch: number; yaw: number; roll: number } | null;
+  sharpness_score: number | null;
+  sharpness_level: string | null;
+  issues: string[];
+  rejection_reason: string | null;
+}
+
 export interface CaseDetail extends CaseSummary {
   auto_blocking_issues: BlockingIssue[];
   manual_blocking_codes: string[];
@@ -82,6 +102,10 @@ export interface CaseDetail extends CaseSummary {
     skill_upgraded_at?: string;
   };
   rename_suggestion: string | null;
+  // Stage A: skill 透传(v3 升级后非空,数组按 manifest entries 顺序)
+  skill_image_metadata: SkillImageMetadata[];
+  skill_blocking_detail: string[];
+  skill_warnings: string[];
 }
 
 export interface CaseUpdatePayload {
@@ -239,6 +263,11 @@ export interface RenderJob {
    * GET /api/cases/{id}/render/latest when status==='done'. Used as a
    * cache-buster so restore_render forces the <img> to refetch. */
   output_mtime?: number | null;
+  /** Stage A: passthrough of manifest.final.json blocking_issues/warnings
+   * string lists (read on-demand by /api/render/jobs/:id and /render/latest).
+   * Empty when manifest is missing or job is queued/running. */
+  blocking_issues?: string[];
+  warnings?: string[];
 }
 
 export interface RenderBatch {

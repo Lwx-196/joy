@@ -44,6 +44,10 @@ TRACKED_COLUMNS: tuple[str, ...] = (
     "source_count",
     "labeled_count",
     "meta_json",
+    # Stage A: skill 透传缓存,upgrade 写、undo 也要回滚
+    "skill_image_metadata_json",
+    "skill_blocking_detail_json",
+    "skill_warnings_json",
 )
 
 

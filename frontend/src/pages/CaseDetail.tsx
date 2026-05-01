@@ -10,6 +10,7 @@ import {
   type CandidateResult,
   type CaseUpdatePayload,
   type ReviewStatus,
+  type SkillImageMetadata,
 } from "../api";
 import {
   useCaseDetail,
@@ -207,19 +208,47 @@ export default function CaseDetail() {
   const isHeldNow =
     heldUntilDate != null && !isNaN(heldUntilDate.getTime()) && heldUntilDate.getTime() > Date.now();
 
-  // Group images
+  // Group images. Stage A: prefer skill_image_metadata.phase (skill 已识别
+  // before/after/null,比文件名启发式准确，比如「术后即刻10.jpeg」会被识别成
+  // after,但旧的正则 /术后|after|post/i 也能匹配 — 真正修的是「文件名没线索
+  // 但 skill 通过姿态对比确定 phase」的场景)。fallback 保留文件名启发式以兼容
+  // 未升级到 v3 的 case。
   const allImages = data.meta.image_files ?? [];
+  const skillMetaByFile = new Map<string, SkillImageMetadata>();
+  for (const m of data.skill_image_metadata ?? []) {
+    if (m.filename) skillMetaByFile.set(m.filename, m);
+  }
+  const phaseOf = (file: string): "pre" | "post" | "unl" => {
+    const meta = skillMetaByFile.get(file);
+    if (meta && meta.phase === "before") return "pre";
+    if (meta && meta.phase === "after") return "post";
+    if (meta && meta.phase === null) {
+      // skill 见过但识别为 null,信任 skill,不再用文件名兜底
+      return "unl";
+    }
+    // 未升级 / skill 未输出该文件:回退文件名
+    const lower = file.toLowerCase();
+    if (/术前|before|pre/i.test(lower)) return "pre";
+    if (/术后|after|post/i.test(lower)) return "post";
+    return "unl";
+  };
   const groups: { role: "pre" | "post" | "unl"; label: string; files: string[] }[] = [
     { role: "pre", label: t("images.groupPreOp"), files: [] },
     { role: "post", label: t("images.groupPostOp"), files: [] },
     { role: "unl", label: t("images.groupUnlabeled"), files: [] },
   ];
   for (const f of allImages) {
-    const lower = f.toLowerCase();
-    if (/术前|before|pre/i.test(lower)) groups[0].files.push(f);
-    else if (/术后|after|post/i.test(lower)) groups[1].files.push(f);
+    const role = phaseOf(f);
+    if (role === "pre") groups[0].files.push(f);
+    else if (role === "post") groups[1].files.push(f);
     else groups[2].files.push(f);
   }
+  const viewLabel = (bucket: SkillImageMetadata["view_bucket"]): string => {
+    if (bucket === "front") return t("images.viewFront");
+    if (bucket === "oblique") return t("images.viewOblique");
+    if (bucket === "side") return t("images.viewSide");
+    return "";
+  };
 
   return (
     <div style={{ height: "100%", display: "grid", gridTemplateRows: "auto 1fr", overflow: "hidden" }}>
@@ -477,22 +506,45 @@ export default function CaseDetail() {
                   {g.label} · {g.files.length}
                 </div>
                 <div style={{ display: "grid", gridTemplateColumns: "repeat(6, 1fr)", gap: 8, marginBottom: 14 }}>
-                  {g.files.map((name) => (
-                    <a
-                      key={name}
-                      href={caseFileUrl(caseId, name)}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="thumb"
-                      data-source-file={name}
-                    >
-                      <img src={caseFileUrl(caseId, name)} alt={name} loading="lazy" />
-                      <span className={`role ${g.role}`}>
-                        {g.role === "pre" ? "PRE" : g.role === "post" ? "POST" : "UNL"}
-                      </span>
-                      <div className="name">{name}</div>
-                    </a>
-                  ))}
+                  {g.files.map((name) => {
+                    const meta = skillMetaByFile.get(name);
+                    const view = meta?.view_bucket ?? null;
+                    const viewText = viewLabel(view);
+                    const phaseTxt =
+                      g.role === "pre" ? t("images.preOp") : g.role === "post" ? t("images.postOp") : t("images.unlabeled");
+                    const rejection = meta?.rejection_reason ? `\n${t("images.rejectionTitle")}: ${meta.rejection_reason}` : "";
+                    return (
+                      <a
+                        key={name}
+                        href={caseFileUrl(caseId, name)}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="thumb"
+                        data-source-file={name}
+                        data-view={view ?? ""}
+                        title={t("images.thumbnailTitle", {
+                          name,
+                          phase: phaseTxt,
+                          view: viewText || t("images.viewUnknown"),
+                          rejection,
+                        })}
+                      >
+                        <img src={caseFileUrl(caseId, name)} alt={name} loading="lazy" />
+                        <span className={`role ${g.role}`}>
+                          {g.role === "pre" ? "PRE" : g.role === "post" ? "POST" : "UNL"}
+                        </span>
+                        {view && (
+                          <span className={`view ${view}`}>{viewText}</span>
+                        )}
+                        {meta?.rejection_reason && (
+                          <span className="reject" title={meta.rejection_reason}>
+                            {meta.rejection_reason}
+                          </span>
+                        )}
+                        <div className="name">{name}</div>
+                      </a>
+                    );
+                  })}
                 </div>
               </div>
             ),

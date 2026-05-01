@@ -47,6 +47,10 @@ class CaseDetail(CaseSummary):
     sharp_ratio_min: float | None = None
     meta: dict[str, Any] = {}
     rename_suggestion: str | None = None
+    # Stage A: skill 透传(只在 v3 升级后非空)
+    skill_image_metadata: list[dict[str, Any]] = []
+    skill_blocking_detail: list[str] = []
+    skill_warnings: list[str] = []
 
 
 class CaseUpdate(BaseModel):

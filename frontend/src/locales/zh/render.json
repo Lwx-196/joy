@@ -23,7 +23,14 @@
   "actions": {
     "cancel": "取消",
     "retry": "重试",
-    "rerender": "重新出图"
+    "rerender": "重新出图",
+    "expandDetail": "展开详情",
+    "collapseDetail": "收起"
+  },
+  "detail": {
+    "blockingTitle": "阻塞 · {{count}}",
+    "warningsTitle": "警告 · {{count}}",
+    "empty": "manifest 未输出具体条目"
   },
   "messages": {
     "unknownError": "未知错误",

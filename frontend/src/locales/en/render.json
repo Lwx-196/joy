@@ -23,7 +23,14 @@
   "actions": {
     "cancel": "Cancel",
     "retry": "Retry",
-    "rerender": "Re-render"
+    "rerender": "Re-render",
+    "expandDetail": "Show details",
+    "collapseDetail": "Hide"
+  },
+  "detail": {
+    "blockingTitle": "Blocking · {{count}}",
+    "warningsTitle": "Warnings · {{count}}",
+    "empty": "manifest has no detailed entries"
   },
   "messages": {
     "unknownError": "Unknown error",

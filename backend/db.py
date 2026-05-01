@@ -148,6 +148,12 @@ MANUAL_COLUMNS = [
     # held_until=NULL 表示未挂起；非 NULL 表示挂起到该时刻（也可设为遥远未来表示无限期）。
     ("held_until", "TIMESTAMP"),
     ("hold_reason", "TEXT"),
+    # Stage A: skill_bridge 透传的逐图 metadata 与原始阻塞/警告字符串。
+    # 这些列由 _upgrade_executor 写入,scanner 不写;UI 读取后渲染 view chip
+    # 与 blocking 详情。值是 JSON 字符串(列表),空 case 为 NULL。
+    ("skill_image_metadata_json", "TEXT"),
+    ("skill_blocking_detail_json", "TEXT"),
+    ("skill_warnings_json", "TEXT"),
 ]
 
 

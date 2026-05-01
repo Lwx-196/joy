@@ -66,6 +66,9 @@ def execute_upgrade(
                 pose_delta_max = ?,
                 sharp_ratio_min = ?,
                 meta_json = ?,
+                skill_image_metadata_json = ?,
+                skill_blocking_detail_json = ?,
+                skill_warnings_json = ?,
                 indexed_at = ?
                WHERE id = ?""",
             (
@@ -75,6 +78,9 @@ def execute_upgrade(
                 payload["pose_delta_max"],
                 payload["sharp_ratio_min"],
                 json.dumps(merged_meta, ensure_ascii=False),
+                payload.get("skill_image_metadata_json"),
+                payload.get("skill_blocking_detail_json"),
+                payload.get("skill_warnings_json"),
                 datetime.now(timezone.utc).isoformat(),
                 case_id,
             ),

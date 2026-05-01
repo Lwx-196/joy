@@ -204,32 +204,35 @@ export function RenderStatusCard({ caseId, brand: brandOverride }: Props) {
 
       {/* Done: thumbnail + path */}
       {status === "done" && previewUrl && (
-        <div style={{ display: "flex", gap: 12, alignItems: "flex-start" }}>
-          <a
-            href={previewUrl}
-            target="_blank"
-            rel="noreferrer"
-            title={t("thumbnailTitle")}
-            style={{
-              display: "block",
-              width: 120,
-              flexShrink: 0,
-              border: "1px solid var(--line)",
-              borderRadius: 4,
-              overflow: "hidden",
-              background: "var(--bg-2)",
-            }}
-          >
-            <img
-              src={previewUrl}
-              alt="final-board"
-              style={{ width: "100%", display: "block" }}
-            />
-          </a>
-          <div style={{ flex: 1, minWidth: 0, fontSize: 12 }}>
-            <RenderSummary job={job} />
+        <>
+          <div style={{ display: "flex", gap: 12, alignItems: "flex-start" }}>
+            <a
+              href={previewUrl}
+              target="_blank"
+              rel="noreferrer"
+              title={t("thumbnailTitle")}
+              style={{
+                display: "block",
+                width: 120,
+                flexShrink: 0,
+                border: "1px solid var(--line)",
+                borderRadius: 4,
+                overflow: "hidden",
+                background: "var(--bg-2)",
+              }}
+            >
+              <img
+                src={previewUrl}
+                alt="final-board"
+                style={{ width: "100%", display: "block" }}
+              />
+            </a>
+            <div style={{ flex: 1, minWidth: 0, fontSize: 12 }}>
+              <RenderSummary job={job} />
+            </div>
           </div>
-        </div>
+          <RenderBlockingDetail job={job} />
+        </>
       )}
 
       {/* Failed: error + retry */}
@@ -269,6 +272,7 @@ export function RenderStatusCard({ caseId, brand: brandOverride }: Props) {
               {t("actions.retry")}
             </button>
           </div>
+          <RenderBlockingDetail job={job} />
         </div>
       )}
 
@@ -360,6 +364,86 @@ function RenderSummary({ job }: { job: RenderJob }) {
           }}
         >
           {job.output_path}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Stage A: 渲染 manifest.final.json 的 blocking_issues / warnings 字符串列表。
+ *
+ * - 仅当 job.blocking_issues / warnings 任一非空时显示(failed 状态下后端可能仍能写
+ *   manifest;done + block>0 时本来就有完整列表)
+ * - 默认折叠,点「展开详情」展开列表 + 折叠 warnings(warnings 总是单独折叠层,因为
+ *   通常是逐图警告,17 条够多)
+ * - 不调用 issueDict 翻译(后端原始字符串已是中文+具体数字,直接展示更精确)
+ */
+function RenderBlockingDetail({ job }: { job: RenderJob }) {
+  const { t } = useTranslation("render");
+  const blocks = job.blocking_issues ?? [];
+  const warns = job.warnings ?? [];
+  const [expanded, setExpanded] = useState(false);
+  const [warnExpanded, setWarnExpanded] = useState(false);
+  if (blocks.length === 0 && warns.length === 0) return null;
+  const toggleLabel = expanded ? t("actions.collapseDetail") : t("actions.expandDetail");
+  return (
+    <div
+      data-testid="render-detail"
+      style={{
+        marginTop: 8,
+        borderTop: "1px solid var(--line-2)",
+        paddingTop: 8,
+        fontSize: 11.5,
+      }}
+    >
+      <button
+        type="button"
+        className="btn sm ghost"
+        onClick={() => setExpanded((v) => !v)}
+        data-testid="render-detail-toggle"
+        style={{ marginBottom: expanded ? 6 : 0 }}
+      >
+        <Ico name={expanded ? "down" : "arrow-r"} size={11} />
+        {toggleLabel} · {t("detail.blockingTitle", { count: blocks.length })} · {t("detail.warningsTitle", { count: warns.length })}
+      </button>
+      {expanded && (
+        <div style={{ display: "grid", gap: 6 }}>
+          {blocks.length > 0 && (
+            <div data-testid="render-detail-blocks">
+              <div style={{ fontWeight: 600, color: "var(--err)", marginBottom: 3 }}>
+                {t("detail.blockingTitle", { count: blocks.length })}
+              </div>
+              <ul style={{ paddingLeft: 16, margin: 0, color: "var(--ink-2)" }}>
+                {blocks.map((s, i) => (
+                  <li key={i} style={{ marginBottom: 2, wordBreak: "break-all" }}>{s}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {warns.length > 0 && (
+            <div data-testid="render-detail-warnings">
+              <button
+                type="button"
+                className="btn sm ghost"
+                onClick={() => setWarnExpanded((v) => !v)}
+                data-testid="render-detail-warnings-toggle"
+                style={{ marginBottom: 4 }}
+              >
+                <Ico name={warnExpanded ? "down" : "arrow-r"} size={11} />
+                <span style={{ color: "var(--amber, #B45309)" }}>
+                  {t("detail.warningsTitle", { count: warns.length })}
+                </span>
+              </button>
+              {warnExpanded && (
+                <ul style={{ paddingLeft: 16, margin: 0, color: "var(--ink-3)", maxHeight: 220, overflowY: "auto" }}>
+                  {warns.map((s, i) => (
+                    <li key={i} style={{ marginBottom: 2, wordBreak: "break-all" }}>{s}</li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
         </div>
       )}
     </div>
