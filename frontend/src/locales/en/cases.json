@@ -5,7 +5,8 @@
     "importCsv": "Import CSV",
     "importCsvHint": "Bulk-enqueue render jobs from CSV",
     "exportCsv": "Export CSV",
-    "columnSettings": "Columns"
+    "columnSettings": "Columns",
+    "comingSoon": "Coming soon"
   },
   "filter": {
     "category": "Category",

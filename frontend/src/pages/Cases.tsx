@@ -351,11 +351,25 @@ export default function Cases() {
             <Ico name="copy" size={12} />
             {t("headerActions.importCsv")}
           </button>
-          <button className="btn sm ghost">
+          <button
+            type="button"
+            className="btn sm ghost"
+            disabled
+            aria-disabled="true"
+            title={t("headerActions.comingSoon")}
+            style={{ opacity: 0.55, cursor: "not-allowed" }}
+          >
             <Ico name="copy" size={12} />
             {t("headerActions.exportCsv")}
           </button>
-          <button className="btn sm">
+          <button
+            type="button"
+            className="btn sm"
+            disabled
+            aria-disabled="true"
+            title={t("headerActions.comingSoon")}
+            style={{ opacity: 0.55, cursor: "not-allowed" }}
+          >
             <Ico name="filter" size={12} />
             {t("headerActions.columnSettings")}
           </button>

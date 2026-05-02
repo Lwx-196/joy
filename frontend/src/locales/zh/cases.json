@@ -5,7 +5,8 @@
     "importCsv": "导入 CSV",
     "importCsvHint": "从 CSV 批量入队 render 任务",
     "exportCsv": "导出 CSV",
-    "columnSettings": "列设置"
+    "columnSettings": "列设置",
+    "comingSoon": "功能开发中，暂未开放"
   },
   "filter": {
     "category": "类别",
