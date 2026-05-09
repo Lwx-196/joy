@@ -8,6 +8,8 @@
 **Reviewers**: codex (后端 / 数据 / 架构)，gemini (UX / 前端 / 用户路径)
 **Status**: brainstorming v2 — 已吸收 5 项 Critical + 12 项 Warning
 
+> **v3** — 2026-05-09 Round 2 review absorption: A-C1/A-C2/A-I1/A-I2/A-I4, B-C1/B-C2, C-C1/C-C2/C-C3/C-I3 critical fixes applied. Important items moved to writing-plans acceptance criteria.
+
 ## 1. 背景
 
 Wave 1 双轨实施已完成：
@@ -172,7 +174,7 @@ backend/
     └── best_pair_compute_queue.py # 单线程 compute queue（不复用 RenderQueue）
 ```
 
-**修订说明（codex C2）**：抽 `image_override_writer` helper，统一 case_image_overrides 写入。所有现有写入入口（`backend/routes/cases.py` PATCH 主入口 + trash 行 :1476-1479 + `backend/routes/image_workbench.py` 三处 :2428-2435 / :2502-2509 / :2601-2608）改成走该 helper。helper 内部尾部统一调 `mark_best_pair_dirty(case_id)`。
+**修订说明（codex C2）**：抽 `image_override_writer` helper，统一 case_image_overrides 写入。所有现有写入入口（v3 修正：5 处唯一 Python 函数 — `backend/routes/cases.py` PATCH helper + trash DELETE、`backend/routes/image_workbench.py` upload / override / delete handler）改成走该 helper。helper 内部按 R1 dirty 触发白名单规则决定是否调 `mark_best_pair_dirty(case_id, filename)`。
 
 **修订说明（codex C3）**：不复用 `RenderQueue.enqueue_batch`（它会插入 render_jobs 走正式渲染流程），新建 `best_pair_compute_queue` 模块。compute 提交到全局共享 `_job_pool`（backend/_job_pool.py:17-19，MAX_WORKERS=2），best-pair compute 内部串行（MediaPipe singleton 不能多线程）。
 
@@ -183,13 +185,32 @@ backend/
 def compute_best_pair(case_id: int, db) -> dict:
     """
     单 case 同步算（~1s）：
-      1. 读 case_best_pairs 当前 source_version 作为 observed_version
+      1. 读 case_best_pairs 当前 source_version 作为 observed_version（行不存在则 observed_version=0）
       2. 分类术前/术后图（case_image_overrides 优先 → 关键字 fallback）
       3. MediaPipe FaceLandmarker 提 yaw/pitch/roll
       4. 全配对算 delta_deg → top-5 升序
-      5. UPDATE case_best_pairs SET status='ready', candidates_json=..., 
-         candidates_fingerprint=..., scanned_at=now, updated_at=now
-         WHERE case_id=? AND source_version=observed_version
+      5. **UPSERT 写回 + observed_version 护卫**（v3 修正，解 Round 2 A-C1）：
+
+         ```sql
+         INSERT INTO case_best_pairs (
+           case_id, status, source_version,
+           candidates_json, candidates_fingerprint,
+           scanned_at, updated_at
+         ) VALUES (?, 'ready', ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+         ON CONFLICT(case_id) DO UPDATE SET
+           status = 'ready',
+           source_version = excluded.source_version,
+           candidates_json = excluded.candidates_json,
+           candidates_fingerprint = excluded.candidates_fingerprint,
+           scanned_at = excluded.scanned_at,
+           updated_at = excluded.updated_at
+         WHERE case_best_pairs.source_version = ?;  -- observed_version guard
+         ```
+
+         语义：
+         - 首次 compute：INSERT 分支，seed `status='ready' / source_version=max(1, observed_version+1)`
+         - 后续 compute：UPDATE 分支，仅当 `source_version == observed_version` 才写回
+         - 并发冲突：ON CONFLICT DO UPDATE 但 WHERE 不命中 → 0 rows affected → compute 返回 `{recomputed: false, reason: 'superseded'}`，由调用方（endpoint / UI）决定重试或提示
       6. affected=0 → 不写（说明 mark_dirty 在中间插队），保持 dirty 状态
     """
 
@@ -205,11 +226,27 @@ def select_best_pair(
          否则 → 409 'stale'
       3. 读 (before, after) 当前 case_image_overrides 行做快照
       4. INSERT case_best_pair_selections，含 fingerprint + 2 个 before_json
-      5. UPSERT case_image_overrides (case_id, before, manual_phase='before', updated_at=now)
-      6. UPSERT case_image_overrides (case_id, after,  manual_phase='after',  updated_at=now)
-      7. 通过 image_override_writer 入口（自动触发 mark_dirty）— 但因为这是
-         best-pair 自身的 select，本次 mark_dirty 设 skip flag 避免立即作废自己刚选的
-      8. 返回 selection_id
+      5. 通过 image_override_writer.write_image_override(skip_dirty_mark=True) 写两行：
+         - (case_id, before, manual_phase='before')
+         - (case_id, after,  manual_phase='after')
+         `skip_dirty_mark=True` 保证 R1 白名单不会把自己刚选的 selection 标 dirty
+      6. **事务内 bump source_version + 重确认 ready**（v3 新增，解 Round 2 A-C2）：
+
+         ```sql
+         UPDATE case_best_pairs
+         SET status = 'ready',
+             source_version = source_version + 1,
+             candidates_fingerprint = ?,  -- 保持与 compute 写入的 fingerprint 一致
+             updated_at = CURRENT_TIMESTAMP
+         WHERE case_id = ?;
+         ```
+
+         作用：
+         1. `source_version` 推进 → 并发中持旧 observed_version 的 compute 写回时
+            `WHERE source_version=observed_version` 不命中 → 静默丢弃（§9 superseded 路径）
+         2. `status='ready'` 重确认 → 防御 R1 白名单误判（哪怕 R1 mark 了 dirty，select 成功后覆盖回 ready）
+         3. `candidates_fingerprint` 不变 → selection 引用的候选集仍有效
+      7. 返回 selection_id
     校验失败 → 400/404/409；任意失败 → 全 rollback
     """
 
@@ -262,14 +299,118 @@ def write_image_override(
     """
 
 def delete_image_override(case_id: int, filename: str, *, db, skip_dirty_mark=False) -> None:
-    """删除单行；尾部 mark_dirty"""
+    """删除单行；尾部 mark_dirty（同样受白名单约束）"""
 ```
 
-**改造范围**（grep 验证后逐个改）：
-- `backend/routes/cases.py:1467-1480` PATCH 主入口（阶段 22 实施）
-- `backend/routes/cases.py:1476-1479` trash 删除入口
-- `backend/routes/image_workbench.py:2428-2435 / 2502-2509 / 2601-2608` 三处写
-- 任何后续新增的 case_image_overrides 写入必须走该 helper
+**dirty 触发白名单规则**（v3 新增，解 Round 2 B-C1）：
+
+`image_override_writer` 写入 `case_image_overrides` 后，按以下规则决定是否调 `mark_best_pair_dirty`：
+
+| 条件 | 是否 mark_dirty | 说明 |
+|------|----------------|------|
+| `filename` ∈ 当前 `case_best_pairs.candidates_json` 的 before/after 文件名并集 | ✅ 是 | 改到了候选图本身 |
+| 字段改动涉及 `manual_phase` 或 `manual_view`（任意 filename） | ✅ 是 | 影响候选池分组 |
+| 仅写 `manual_transform_json` / 裁剪 / 其他元数据 且 filename ∉ 候选并集 | ❌ 否 | 与 top-5 无关 |
+| `case_best_pairs` 行不存在（首次） | ❌ 否（保持 lazy） | 由 compute 首次运行时 INSERT seed |
+| 调用方显式传 `skip_dirty_mark=True`（仅 `select_best_pair` 内部使用） | ❌ 否 | 见 R2 |
+
+`image_override_writer` 同一事务内 `SELECT candidates_json FROM case_best_pairs WHERE case_id=?`（行存在才判定）；若需 mark_dirty 则
+```sql
+UPDATE case_best_pairs
+SET status='dirty', source_version=source_version+1, updated_at=CURRENT_TIMESTAMP
+WHERE case_id=?;
+```
+未命中保持原状态（lazy）。
+
+**避免 banner 长亮**：transform-only 编辑、无关图 phase/view 改动均不触发 dirty。解 B-C1 "任何 override 改动都 banner 长亮 + 禁用确认按钮" 的日常使用卡死问题。
+
+**改造范围（v3 修正，解 Round 2 A-I1）**：5 处唯一调用点（以 Python 函数为单位，非 SQL 语句）：
+- `backend/routes/cases.py` 2 处：
+  - PATCH helper 内部 `_write_image_override`（阶段 22 实施的写入入口）
+  - trash DELETE 路径 `:1478` 附近的删除入口
+- `backend/routes/image_workbench.py` 3 处（upload / override / delete handler 函数各 1 处）
+- 任何后续新增的 `case_image_overrides` 写入必须走该 helper
+
+**T2 验收硬标准**（v3 新增）：
+
+```bash
+# 1) routes 层不应再有直接写 case_image_overrides 的 SQL
+grep -rn "INSERT INTO case_image_overrides\|UPDATE case_image_overrides\|DELETE FROM case_image_overrides" backend/routes/
+# 期望：0 行（全迁移到 image_override_writer）
+
+# 2) 5 处唯一 Python 函数必须导入 writer
+grep -rn "from backend.services.image_override_writer import" backend/routes/
+# 期望：5 个唯一函数内导入
+```
+
+两条同时满足才算 T2 过。
+
+### 5.x 模块拓扑（v3 新增，解 Round 2 A-I2 import 循环）
+
+```
+backend/services/
+├── best_pair_dirty.py          # leaf: mark_best_pair_dirty(conn, case_id, filename)
+├── image_override_writer.py    # 导入 best_pair_dirty（不反向导入 best_pair_service）
+└── best_pair_service.py        # 导入 image_override_writer + best_pair_dirty
+```
+
+- `best_pair_dirty.py` 只含 `mark_best_pair_dirty(conn, case_id, filename)` + R1 白名单判定的纯函数实现，**不**导入任何其他 `backend.services.*` 模块 → 是依赖图的叶子
+- `image_override_writer.py` 导入 `best_pair_dirty`，不再反向依赖 `best_pair_service`
+- `best_pair_service.py` 内部自身的 `select_best_pair` 需要写 override 时，调 `image_override_writer.write_image_override(skip_dirty_mark=True)`；需要自己 bump 时直接写 SQL，不经过 `mark_best_pair_dirty`
+
+这个拓扑避免 "writer ↔ service" 的循环导入，也让 pytest 可以只 import `best_pair_dirty` 测白名单判定无其他副作用。
+
+### 5.y Compute pool 独立（v3 新增，解 Round 2 A-I4 MediaPipe 线程规约）
+
+`best_pair_compute_queue` **不共享** `backend/_job_pool._job_pool`（后者 `max_workers=2`，是 render 用的）。
+
+新增 `backend/_best_pair_compute_pool.py`：
+
+```python
+from concurrent.futures import ThreadPoolExecutor
+
+# MediaPipe 模型不保证线程安全 → 串行
+_best_pair_compute_pool = ThreadPoolExecutor(
+    max_workers=1,
+    thread_name_prefix='best-pair-compute',
+)
+```
+
+语义：
+- 单 case `POST /recompute` 和 `POST /batch-recompute` 都走这个 pool
+- compute 串行执行，避免 MediaPipe 竞态
+- 不与 render 共享 pool → render 吞吐不受 compute 阻塞
+- 单 worker + 无界 queue，回压由 endpoint 队长检测拒绝：§9 新增 429 `compute_pool_saturated`（threshold=100 待计算任务）
+
+### 4.x schema 补列（v3，随 T1 migration 一起落地）
+
+**`render_jobs` 表补列**：
+
+```python
+# backend/db.py _ensure_render_job_columns helper 内补：
+if "render_mode" not in cols:
+    conn.execute(
+        "ALTER TABLE render_jobs ADD COLUMN render_mode TEXT NOT NULL DEFAULT 'ai'"
+    )
+    # enum: 'ai' | 'best_pair' | 'ai_fallback_from_best_pair'
+if "best_pair_selection_id" not in cols:
+    conn.execute(
+        "ALTER TABLE render_jobs ADD COLUMN "
+        "best_pair_selection_id INTEGER REFERENCES case_best_pair_selections(id)"
+    )
+if "candidates_fingerprint_snapshot" not in cols:
+    conn.execute(
+        "ALTER TABLE render_jobs ADD COLUMN candidates_fingerprint_snapshot TEXT NULL"
+    )
+```
+
+**`case_best_pairs.status` 枚举新增 `'empty'`**（见 §7.4）：
+
+```
+'ready' | 'skipped' | 'pending' | 'dirty' | 'empty'
+```
+
+`empty` 与 `skipped` 的区别：`skipped` 是 compute 之前确定无需算（缺 phase / 目录不存在），`empty` 是 compute 实际跑完但候选池为空（例如所有图都检测不到人脸但又不是 100% 没脸的 skipped case）。MVP 二者 UI 文案可复用，但数据上保持分开便于后续分析。
 
 ## 6. REST 端点（6 个）
 
@@ -286,13 +427,59 @@ def delete_image_override(case_id: int, filename: str, *, db, skip_dirty_mark=Fa
 
 **修订说明（codex Note + Info）**：select 和 render 不合并；保留独立 render 便于"只标注不出图"。
 
-## 7. render_executor.py 改动
+## 7. render_executor.py 分支（v3 完整展开，解 Round 2 C-C1/C-C2/C-C3/C-I3）
+
+### 7.1 函数签名（纯函数，test seam）
 
 ```python
-# backend/render_executor.py 现有 run_render(...) 入口
-# codex 引用 :1593-1600 - 真实签名是
-# def run_render(*, case_id, db_path, manual_overrides=None, selection_plan=None, ...)
-# 当前 RenderQueue._execute_render 调用见 backend/render_queue.py:1562-1569
+# backend/render_executor.py
+
+def _build_overrides_from_selection(selection_row: dict) -> dict[str, dict]:
+    """Selection → {filename: {manual_phase, manual_view}}. 纯函数，不读 DB。
+
+    形状：
+      {
+        "<before_filename>": {"manual_phase": "before", "manual_view": None},
+        "<after_filename>":  {"manual_phase": "after",  "manual_view": None},
+      }
+    view 不由 selection 强制，None 表示沿用 DB override（见 §7.2 precedence）。
+    """
+
+def _build_selection_plan_from_selection(selection_row: dict, case_view: str) -> dict:
+    """Selection → selection_plan（形状对齐 render_queue.py:443 _selection_plan_candidate）。
+
+    仅填 selection 指定的 slot：
+      selection_plan[case_view] = {"before": <before_filename>, "after": <after_filename>}
+    其他 view slot = None（由 case_layout_board.py 按现有逻辑选或留空）。
+    纯函数。
+    """
+
+def load_selection(selection_id: int, conn: sqlite3.Connection) -> dict | None:
+    """模块级函数（非方法），pytest 可 monkeypatch。
+
+    返回 {
+      id, case_id, before_filename, after_filename,
+      delta_deg, candidates_fingerprint,
+      before_override_before_json, after_override_before_json,
+      selected_at, selected_by
+    } 或 None（selection_id 不存在）。
+    """
+
+
+class StaleBestPairSelection(Exception):
+    """run_render 入口检测到 best_pair selection 已过期 / 不可用。
+
+    reason: 'selection_not_found' | 'cache_not_ready' | 'fingerprint_mismatch'
+    """
+    def __init__(self, reason: str, **kwargs):
+        self.reason = reason
+        self.context = kwargs
+        super().__init__(f"stale_best_pair_selection: {reason} {kwargs}")
+```
+
+### 7.2 Precedence 表（selection-synthesized vs DB manual_overrides）
+
+```python
 def run_render(
     *, case_id, db_path,
     render_mode: str = 'ai',
@@ -300,21 +487,136 @@ def run_render(
     manual_overrides=None, selection_plan=None,
     ...
 ):
-    if render_mode == 'best-pair':
-        sel = load_selection(best_pair_selection_id, db_path)
-        # 把 selection 的 (before, after) 转成现有的 manual_overrides + selection_plan 形式
-        # 不需要 strategy pattern，1 个分支即可（codex W5）
-        manual_overrides = _build_overrides_from_selection(sel)
-        selection_plan = _build_selection_plan_from_selection(sel)
-        # 关键：跳过 enhance.js 的 AI 调用
-        skip_enhance = True
+    conn = sqlite3.connect(db_path)
+    manual_overrides_db = _fetch_case_image_overrides(conn, case_id)
+    #  ^^ 既有逻辑：从 case_image_overrides 读当前 overrides
+
+    if render_mode == 'best_pair':
+        # §7.3 入口漂移检测（见下）
+        selection = load_selection(best_pair_selection_id, conn)
+        _assert_best_pair_inputs_fresh(conn, case_id, selection)
+
+        selection_overrides = _build_overrides_from_selection(selection)
+        selection_plan = _build_selection_plan_from_selection(
+            selection, case_view=_fetch_case_view(conn, case_id)
+        )
+
+        # selection 合成 override 优先覆盖同 (filename, field) 的 DB override
+        manual_overrides = {**manual_overrides_db, **selection_overrides}
+        skip_enhance = True  # best-pair 路径不跑 AI
     else:
+        manual_overrides = manual_overrides_db
+        selection_plan = selection_plan  # 保留 caller 传入
         skip_enhance = False
+
+    # 下游既有逻辑：_run_enhance_if_not_skipped + case_layout_board.run(...)
     ...
-    # 现有逻辑：_run_enhance_if_not_skipped + case_layout_board.run(...)
 ```
 
-`render_queue._execute_render` 入队时把 `render_mode` + `best_pair_selection_id` 一起读出来传给 `run_render`。
+**冲突规则**：
+
+| (filename, field) 情况 | 取值来源 |
+|---|---|
+| 只在 DB manual_overrides 有 | DB override |
+| 只在 selection_overrides 有 | selection（合成） |
+| 两者都有，同 filename 同字段 | **selection 赢** |
+| 两者都有，同 filename 不同字段 | 各自字段值并集（dict merge 语义） |
+| 不同 filename | 互不影响（并集） |
+
+MVP selection 只合成 `manual_phase`，不合成 `manual_view` / `manual_transform_json`，因此实际冲突仅在 `manual_phase` 字段发生。
+
+### 7.3 Fingerprint 漂移检测（run_render 入口）
+
+```python
+def _assert_best_pair_inputs_fresh(conn, case_id: int, selection: dict | None) -> None:
+    if selection is None:
+        raise StaleBestPairSelection(
+            'selection_not_found',
+            selection_id='<unknown>',
+        )
+
+    row = conn.execute(
+        "SELECT candidates_fingerprint, status "
+        "FROM case_best_pairs WHERE case_id=?",
+        (case_id,),
+    ).fetchone()
+
+    if row is None or row['status'] != 'ready':
+        raise StaleBestPairSelection(
+            'cache_not_ready',
+            case_id=case_id,
+            status=(row['status'] if row else None),
+        )
+
+    if row['candidates_fingerprint'] != selection['candidates_fingerprint']:
+        raise StaleBestPairSelection(
+            'fingerprint_mismatch',
+            case_id=case_id,
+            selection_fp=selection['candidates_fingerprint'],
+            current_fp=row['candidates_fingerprint'],
+        )
+```
+
+`render_queue._execute_render` 捕获 `StaleBestPairSelection` → 标记 job `failed`，`render_jobs.failure_reason` 写 `stale_best_pair_selection:<reason>`，不静默渲染。前端 RenderHistoryDrawer 该条目显示失败态 + reason i18n 文案。
+
+### 7.4 Fallback 策略
+
+- `compute_best_pair` 返回 empty（所有图均未检测到人脸或候选池为空）→ `case_best_pairs.status='empty'`（新增枚举值，见 §4.x）
+- UI `BestPairPanel` 在 `status='empty'` 时显示 empty state，禁用"生成对比图"按钮
+- URL hack 强行触发 render → endpoint 返回 422 `no_candidates`
+- **不自动回退 AI 模式**，显式失败，用户自己决定走 AI 路径
+- `render_mode` 枚举保留 `'ai_fallback_from_best_pair'` 空位，MVP 不走该路径；Phase 3 评估是否加自动回退开关
+
+### 7.5 可观测性（render 全链路）
+
+**render_jobs 行必须带**（随 T1 migration 补列，见 §4.x）：
+- `render_mode`
+- `best_pair_selection_id`（best-pair 路径必填，ai 路径 NULL）
+- `candidates_fingerprint_snapshot`（render 排队时从 case_best_pairs 快照，对比实际 render 时是否漂移）
+
+**run_render 结果 dict 新增**：
+- `render_mode`
+- `best_pair_selection_id`
+- `selection_fingerprint_at_render`
+
+**manifest.final.json 顶层新增 best_pair_context**（best-pair 路径必出，ai 路径省略）：
+
+```json
+{
+  "selection_id": 123,
+  "before_filename": "术前1.jpg",
+  "after_filename": "术后3.jpg",
+  "candidates_fingerprint": "sha256:...",
+  "rendered_at_source_version": 5
+}
+```
+
+方便后续回溯"这张 final-board 是基于哪次 selection、哪个 fingerprint 渲染的"。
+
+### 7.6 Test seam 清单（T5 pytest）
+
+| 用例 | seam | 覆盖 |
+|---|---|---|
+| (a) `render_mode='ai'`（既有路径） | 不调 `load_selection` | 既有路径 0 回归 |
+| (b) best_pair 无 DB override | monkeypatch `load_selection` 返回 fixture selection + `_fetch_case_image_overrides` 返回 `{}` | selection_overrides 单独生效 |
+| (c) best_pair + DB override 无冲突（不同 filename） | 同上，DB override 另外塞 `c.jpg` | 并集正确，两者都进 manual_overrides |
+| (d) best_pair + DB override 冲突（同 filename 同 `manual_phase`） | 同上，DB override 给 `before_filename` 写 `manual_phase='after'` | selection 赢，最终 `manual_phase='before'` |
+| (e) fingerprint 漂移 | `load_selection` 返回旧 fp + DB 查出新 fp | raise `StaleBestPairSelection('fingerprint_mismatch')` |
+| (f) cache not ready | DB 查 `status='dirty'` | raise `StaleBestPairSelection('cache_not_ready')` |
+| (g) `selection_id` 不存在 | `load_selection` 返回 `None` | raise `StaleBestPairSelection('selection_not_found')` |
+
+所有测试用既有 `backend/tests/conftest.py` DB fixture，**不起 Chrome / 不跑 subprocess** — 在 subprocess 启动前 `run_render` 入口即可 raise 或 assert 合成 overrides 正确，覆盖核心分支无需真实 enhance / case_layout_board 执行。
+
+### 7.7 T5 估时重估
+
+原估 **3h**（"只加一个分支"），v3 实际工作量：
+- `_build_overrides_from_selection` / `_build_selection_plan_from_selection` / `load_selection` 3 个纯函数 + 单测 ~1h
+- `_assert_best_pair_inputs_fresh` + `StaleBestPairSelection` 异常 + run_render 分支接线 ~1.5h
+- `render_queue._execute_render` 捕获异常 + failure_reason 写入 ~0.5h
+- render_jobs 补列（补在 T1）+ manifest.final.json best_pair_context ~0.5h
+- 7 个 pytest seam 用例 ~2.5h
+
+**重估 6h**。其他切片（T1/T2/T3/T4/T6/T7）估时不变。
 
 ## 8. 前端
 
@@ -347,6 +649,23 @@ def run_render(
 - "确认选用此对" → POST select（联动写 override），按钮显示 loading
 - "生成对比图" → POST render，按钮 disabled 直到当前 selection 存在
 - 候选每条显示 before + after 双缩略图 + delta_deg（gemini I1）
+
+**Highlight 本地 state 生命周期规则**（v3 新增，解 Round 2 B-C2）：
+
+1. `highlightIndex` 仅存在于 `BestPairPanel` mount 周期（React `useState`，**不**进 URL / localStorage / zustand global store）
+2. 以下任一事件 → 重置为 0（top-1）：
+   - 组件 unmount（drawer 关闭、切 case 详情页内其他 tab）
+   - `caseId` prop 改变（父组件切 case）
+   - recompute 完成（`status` `dirty` → `ready`，`candidates_fingerprint` 发生变化）
+   - `candidates_json` 长度变化（列表条数发生变化）
+3. 页面 reload / 浏览器导航 / 关浏览器 → 静默丢失，**不**弹"未保存"警告（MVP 简化；Phase 3 再评估是否加草稿保护）
+4. **双 tab 竞争**：tab A 本地高亮 index=2 后 tab B 先点"确认选用此对" → tab A 下次 `GET /best-pair` 拿到新 fingerprint → 规则 2 触发重置。tab A 若此时点"确认选用此对" → 后端 409 `stale_fingerprint` → 前端 refetch + 重置 highlight + toast `bestPair.errors.staleFingerprint`
+
+**键盘支持**：
+- Tab 焦点进入候选缩略图列表（roving tabindex 或 arrow-key navigation）
+- 方向键 `←` / `→` 切 `highlightIndex`（**不**确认）
+- `Enter` = 把 `highlightIndex` 切到当前焦点项（等价鼠标点击）
+- `Ctrl+Enter` 或点击"确认选用此对"按钮 = 写 DB（POST select）
 
 ### 8.2 状态机渲染
 
@@ -461,11 +780,11 @@ def run_render(
 | **T2** image_override_writer 抽离（dirty hook 公共依赖） | 新建 `backend/services/image_override_writer.py`；改 `cases.py` 4 处入口 + `image_workbench.py` 3 处 | 4h |
 | **T3** best_pair_service + compute_queue | `backend/services/best_pair_service.py` + `backend/workers/best_pair_compute_queue.py` + pytest | 6h |
 | **T4** REST 端点 | `backend/routes/best_pair.py` 6 端点 + supertest | 4h |
-| **T5** render_executor 分支 | `backend/render_executor.py` + `backend/render_queue.py` 加 render_mode 透传 + 2 列写入 | 3h |
+| **T5** render_executor 分支 | `backend/render_executor.py` + `backend/render_queue.py` 加 render_mode 透传 + 2 列写入 | 6h (v3 重估，见 §7.7) |
 | **T6** 前端 BestPairPanel + RenderHistoryDrawer mode badge + i18n + 3 状态机文案 | `frontend/src/components/BestPairPanel/*` + `frontend/src/components/RenderHistoryDrawer.tsx` + `frontend/src/locales/{zh,en}/bestPair.json` | 8h |
 | **T7** Playwright E2E + pytest 端到端 | `e2e/best_pair_*.spec.ts` × 3 + `backend/tests/test_best_pair_*.py` 已含的端到端 | 4h |
 
-**Wave 2 总估**：约 31h（3-4 工作日）
+**Wave 2 总估**：约 34h（v3 重估，T5 3h→6h）
 
 ## 12. 不在 MVP 的范围（明确收敛）
 
