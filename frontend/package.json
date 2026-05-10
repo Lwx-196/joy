@@ -10,6 +10,8 @@
     "lint": "eslint src",
     "lint:fix": "eslint src --fix",
     "test:e2e": "playwright test",
+    "test:e2e:local-mainline": "PLAYWRIGHT_BASE_URL=http://127.0.0.1:5292 API_PROXY_TARGET=http://127.0.0.1:5291 playwright test",
+    "test:e2e:stress": "PLAYWRIGHT_BASE_URL=http://127.0.0.1:5292 API_PROXY_TARGET=http://127.0.0.1:5291 playwright test tests/e2e/stress-smoke.spec.ts",
     "test:e2e:ui": "playwright test --ui",
     "test:e2e:report": "playwright show-report"
   },
