@@ -90,7 +90,7 @@ def test_render_recover_resubmits_queued(temp_db, seed_case, no_job_pool):
 
 
 def test_render_recover_skips_terminal_states(temp_db, seed_case, no_job_pool):
-    """`done` / `failed` / `cancelled` / `undone` are terminal — recover()
+    """`done` / issue-done / `blocked` / `failed` / `cancelled` / `undone` are terminal — recover()
     must not touch them or count them as resubmits.
     """
     from backend import db
@@ -98,7 +98,7 @@ def test_render_recover_skips_terminal_states(temp_db, seed_case, no_job_pool):
 
     case_id = seed_case()
     with db.connect() as conn:
-        for status in ("done", "failed", "cancelled", "undone"):
+        for status in ("done", "done_with_issues", "blocked", "failed", "cancelled", "undone"):
             _insert_render_row(conn, case_id, status)
 
     counts = RENDER_QUEUE.recover()
@@ -109,7 +109,7 @@ def test_render_recover_skips_terminal_states(temp_db, seed_case, no_job_pool):
             "SELECT status FROM render_jobs ORDER BY id"
         ).fetchall()
     statuses = [r["status"] for r in rows]
-    assert statuses == ["done", "failed", "cancelled", "undone"]
+    assert statuses == ["done", "done_with_issues", "blocked", "failed", "cancelled", "undone"]
 
 
 def test_render_recover_empty_db_returns_zero_counts(temp_db, no_job_pool):

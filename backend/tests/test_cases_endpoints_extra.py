@@ -193,6 +193,85 @@ def test_files_serves_existing_file(client, seed_case, tmp_path):
 
 
 # ----------------------------------------------------------------------
+# /reveal
+# ----------------------------------------------------------------------
+
+
+def test_reveal_opens_case_root(client, seed_case, tmp_path, monkeypatch):
+    from backend.routes import cases
+
+    opened: list[list[str]] = []
+
+    def fake_run(args, check):
+        opened.append(args)
+        assert check is True
+
+    monkeypatch.setattr(cases.subprocess, "run", fake_run)
+    case_dir = tmp_path / "case-reveal-root"
+    case_dir.mkdir()
+    case_id = seed_case(abs_path=str(case_dir))
+
+    resp = client.post(f"/api/cases/{case_id}/reveal", json={"target": "case_root"})
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {"opened": True, "path": str(case_dir.resolve())}
+    assert opened == [["open", str(case_dir.resolve())]]
+
+
+def test_reveal_opens_render_output(client, seed_case, tmp_path, monkeypatch):
+    from backend.routes import cases
+
+    opened: list[list[str]] = []
+    monkeypatch.setattr(cases.subprocess, "run", lambda args, check: opened.append(args))
+    case_dir = tmp_path / "case-reveal-render"
+    out_dir = case_dir / ".case-layout-output" / "fumei" / "tri-compare" / "render"
+    out_dir.mkdir(parents=True)
+    case_id = seed_case(abs_path=str(case_dir))
+
+    resp = client.post(
+        f"/api/cases/{case_id}/reveal",
+        json={"target": "render_output", "brand": "fumei", "template": "tri-compare"},
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["path"] == str(out_dir.resolve())
+    assert opened == [["open", str(out_dir.resolve())]]
+
+
+def test_reveal_404_for_missing_render_output(client, seed_case, tmp_path, monkeypatch):
+    from backend.routes import cases
+
+    monkeypatch.setattr(cases.subprocess, "run", lambda args, check: None)
+    case_dir = tmp_path / "case-reveal-missing-output"
+    case_dir.mkdir()
+    case_id = seed_case(abs_path=str(case_dir))
+
+    resp = client.post(f"/api/cases/{case_id}/reveal", json={"target": "render_output"})
+
+    assert resp.status_code == 404
+    assert "render output directory not found" in resp.json()["detail"]
+
+
+def test_reveal_rejects_invalid_target_and_path_traversal(client, seed_case, tmp_path, monkeypatch):
+    from backend.routes import cases
+
+    monkeypatch.setattr(cases.subprocess, "run", lambda args, check: None)
+    case_dir = tmp_path / "case-reveal-invalid"
+    case_dir.mkdir()
+    case_id = seed_case(abs_path=str(case_dir))
+
+    bad_target = client.post(f"/api/cases/{case_id}/reveal", json={"target": "desktop"})
+    assert bad_target.status_code == 422
+
+    traversal = client.post(
+        f"/api/cases/{case_id}/reveal",
+        json={"target": "render_output", "brand": "../../../outside", "template": "x"},
+    )
+    assert traversal.status_code == 400
+    assert "invalid path" in traversal.json()["detail"]
+
+
+# ----------------------------------------------------------------------
 # /rename-suggestion
 # ----------------------------------------------------------------------
 

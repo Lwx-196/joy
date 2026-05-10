@@ -33,6 +33,16 @@ def test_iter_image_files_filters_by_extension(tmp_path: Path):
     assert out == ["a.jpg", "b.png", "d.JPEG"]
 
 
+def test_iter_image_files_skips_generated_boards(tmp_path: Path):
+    (tmp_path / "术前-正面.jpg").write_bytes(b"x")
+    (tmp_path / "陈莹-正式品牌版-三联图.jpg").write_bytes(b"x")
+    (tmp_path / "preview.jpg").write_bytes(b"x")
+
+    out = scanner._iter_image_files(tmp_path)
+
+    assert out == ["术前-正面.jpg"]
+
+
 def test_iter_image_files_returns_empty_for_nonexistent_dir(tmp_path: Path):
     """Permission/OS errors must degrade to []; the scanner can't crash on
     one bad directory and abort the whole scan.
@@ -61,9 +71,11 @@ def test_iter_image_files_ignores_subdirectories(tmp_path: Path):
         (".case-layout-pick", True),
         (".case-layout-organize", True),
         (".case-layout-render", True),
+        (".case-workbench-trash", True),
         # Prefix matches (any .case-layout-* not in exact list)
         (".case-layout-output", True),
         (".case-layout-anything", True),
+        (".case-workbench-temp", True),
         ("_download-inbox", True),
         (".cache", True),
         (".DS_Store", True),
@@ -205,6 +217,14 @@ def test_discover_skips_generated_artefact_dirs(tmp_path: Path):
     assert cands == []
 
 
+def test_discover_skips_case_workbench_trash(tmp_path: Path):
+    trash = tmp_path / "客户A" / "case-1" / ".case-workbench-trash" / "20260502"
+    trash.mkdir(parents=True)
+    (trash / "术后-废弃.jpg").write_bytes(b"x")
+    cands = scanner.discover_case_dirs([tmp_path])
+    assert cands == []
+
+
 def test_discover_ignores_dir_without_direct_images(tmp_path: Path):
     """A parent dir whose only images live deeper isn't a leaf — only the
     leaf with direct images counts.
@@ -216,6 +236,21 @@ def test_discover_ignores_dir_without_direct_images(tmp_path: Path):
     cands = scanner.discover_case_dirs([tmp_path])
     assert len(cands) == 1
     assert cands[0].abs_path == leaf
+
+
+def test_discover_groups_stage_subdirs_as_one_case(tmp_path: Path):
+    case_root = tmp_path / "客户A" / "2025.8.1 下颌线"
+    before = case_root / "术前"
+    after = case_root / "术后"
+    before.mkdir(parents=True)
+    after.mkdir(parents=True)
+    (before / "正面.jpg").write_bytes(b"x")
+    (after / "正面.jpg").write_bytes(b"x")
+
+    cands = scanner.discover_case_dirs([tmp_path])
+    assert len(cands) == 1
+    assert cands[0].abs_path == case_root
+    assert cands[0].image_files == ["术前/正面.jpg", "术后/正面.jpg"]
 
 
 def test_discover_skips_nonexistent_root_silently(tmp_path: Path):

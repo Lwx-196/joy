@@ -6,6 +6,11 @@ enqueued jobs stay in 'queued' status — we never actually run mediapipe.
 """
 from __future__ import annotations
 
+import json
+from datetime import datetime, timezone
+
+from backend import db
+
 
 def test_enqueue_single_404_for_missing_case(client, no_job_pool):
     resp = client.post("/api/cases/9999/render", json={"brand": "fumei"})
@@ -45,6 +50,7 @@ def test_enqueue_single_inserts_queued_row(client, seed_case, no_job_pool):
     assert detail["status"] == "queued"
     assert detail["brand"] == "fumei"
     assert detail["template"] == "tri-compare"
+    assert detail["semantic_judge"] == "auto"
 
 
 def test_batch_enqueue_400_empty(client, no_job_pool):
@@ -123,6 +129,119 @@ def test_latest_job_returns_most_recent(client, seed_case, no_job_pool):
     assert j2 > j1
     body = client.get(f"/api/cases/{case_id}/render/latest").json()
     assert body["job"]["id"] == j2
+
+
+def test_render_queue_passes_review_exclusions_to_runner(seed_case, tmp_path, monkeypatch):
+    from backend import db, render_queue
+
+    case_dir = tmp_path / "case-render-exclusion"
+    case_dir.mkdir()
+    filenames = [
+        "术前正面.jpg",
+        "术后正面.jpg",
+        "术前45.jpg",
+        "术后45.jpg",
+        "术前侧面.jpg",
+        "术后侧面.jpg",
+        "术后正面-废片.jpg",
+    ]
+    for filename in filenames:
+        (case_dir / filename).write_bytes(b"fake")
+    case_id = seed_case(abs_path=str(case_dir))
+    meta = {
+        "image_files": filenames,
+        "image_review_states": {
+            "术后正面-废片.jpg": {
+                "verdict": "excluded",
+                "render_excluded": True,
+                "reviewer": "tester",
+            }
+        },
+    }
+    now = datetime.now(timezone.utc).isoformat()
+    with db.connect() as conn:
+        conn.execute(
+            "UPDATE cases SET meta_json = ? WHERE id = ?",
+            (json.dumps(meta, ensure_ascii=False), case_id),
+        )
+        job_id = conn.execute(
+            """
+            INSERT INTO render_jobs
+                (case_id, brand, template, status, enqueued_at, semantic_judge)
+            VALUES (?, 'fumei', 'tri-compare', 'queued', ?, 'off')
+            """,
+            (case_id, now),
+        ).lastrowid
+
+    captured: dict[str, dict] = {}
+
+    def fake_run_render(case_dir_arg, **kwargs):
+        captured.update(kwargs.get("manual_overrides") or {})
+        out = tmp_path / "final-board.jpg"
+        manifest = tmp_path / "manifest.final.json"
+        out.write_bytes(b"fake")
+        manifest.write_text(json.dumps({"groups": []}), encoding="utf-8")
+        return {
+            "output_path": str(out),
+            "manifest_path": str(manifest),
+            "status": "ok",
+            "blocking_issue_count": 0,
+            "warning_count": 0,
+            "case_mode": "face",
+            "effective_templates": ["tri-compare"],
+            "ai_usage": {},
+            "blocking_issues": [],
+            "warnings": [],
+            "composition_alerts": [],
+        }
+
+    monkeypatch.setattr(render_queue.render_executor, "run_render", fake_run_render)
+    worker = render_queue.RenderQueue()
+    worker._execute_render(job_id)
+
+    assert captured["术后正面-废片.jpg"]["render_excluded"] is True
+    with db.connect() as conn:
+        row = conn.execute("SELECT status FROM render_jobs WHERE id = ?", (job_id,)).fetchone()
+    assert row["status"] == "done"
+
+
+def test_latest_job_prefers_visible_output_over_newer_failed_job(client, seed_case, tmp_path, no_job_pool):
+    case_dir = tmp_path / "case-with-output"
+    case_dir.mkdir()
+    out_dir = case_dir / ".case-layout-output" / "fumei" / "tri-compare" / "render"
+    out_dir.mkdir(parents=True)
+    output_path = out_dir / "final-board.jpg"
+    output_path.write_bytes(b"fake-jpg")
+    now = datetime.now(timezone.utc).isoformat()
+    case_id = seed_case(abs_path=str(case_dir))
+    with db.connect() as conn:
+        done_id = conn.execute(
+            """
+            INSERT INTO render_jobs
+              (case_id, brand, template, status, batch_id, enqueued_at, started_at, finished_at,
+               output_path, manifest_path, error_message, semantic_judge, meta_json)
+            VALUES (?, 'fumei', 'tri-compare', 'done_with_issues', NULL, ?, ?, ?,
+                    ?, NULL, NULL, 'auto', ?)
+            """,
+            (case_id, now, now, now, str(output_path), json.dumps({"status": "ok"})),
+        ).lastrowid
+        failed_id = conn.execute(
+            """
+            INSERT INTO render_jobs
+              (case_id, brand, template, status, batch_id, enqueued_at, started_at, finished_at,
+               output_path, manifest_path, error_message, semantic_judge, meta_json)
+            VALUES (?, 'fumei', 'tri-compare', 'failed', NULL, datetime(?, '+1 second'), ?, datetime(?, '+1 second'),
+                    NULL, NULL, 'render failed', 'auto', '{}')
+            """,
+            (case_id, now, now, now),
+        ).lastrowid
+    assert failed_id > done_id
+
+    body = client.get(f"/api/cases/{case_id}/render/latest").json()
+    assert body["job"]["id"] == done_id
+    assert body["job"]["status"] == "done_with_issues"
+    assert body["job"]["output_path"] == str(output_path)
+    assert body["job"]["output_mtime"] is not None
 
 
 def test_get_job_404(client, no_job_pool):

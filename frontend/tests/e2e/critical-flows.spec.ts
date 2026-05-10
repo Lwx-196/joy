@@ -1,7 +1,7 @@
 import { test, expect } from "@playwright/test";
 
 /**
- * Critical flows that require the real backend (port 5174 via /api proxy):
+ * Critical flows that require the real backend (default 5291 via /api proxy):
  *   1. Cases category filter narrows the list
  *   2. Cases list -> CaseDetail navigation
  *   3. Customers list -> CustomerDetail navigation
