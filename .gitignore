@@ -16,9 +16,12 @@ frontend/**/*.tsbuildinfo
 
 # Project-root test artifacts (Playwright leaves traces here too)
 test-results/
+stress-results/
 
 # Live database (CI uses tests/fixtures/case-workbench.test.db instead)
 case-workbench.db
+case_workbench.db
+cases.db
 
 # Backend test artifacts
 backend/.pytest_cache/
