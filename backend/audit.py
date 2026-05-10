@@ -54,7 +54,13 @@ TRACKED_COLUMNS: tuple[str, ...] = (
 
 
 def _snapshot(conn: sqlite3.Connection, case_id: int) -> dict[str, Any]:
-    """Capture the tracked-columns subset of a case row as a dict."""
+    """Capture the tracked-columns subset of a case row as a dict.
+
+    Also includes a nested `_image_overrides` dict keyed by filename for
+    image_workbench mutations to be detected as state changes (before != after).
+    apply_undo iterates TRACKED_COLUMNS only, so the nested dict is observed
+    but not replayed (full undo for image_workbench requires hardening N11).
+    """
     cols = ",".join(TRACKED_COLUMNS)
     row = conn.execute(
         f"SELECT {cols} FROM cases WHERE id = ?", (case_id,)
@@ -67,6 +73,27 @@ def _snapshot(conn: sqlite3.Connection, case_id: int) -> dict[str, Any]:
             out[col] = row[col]
         except (IndexError, KeyError):
             out[col] = None
+    # Image-workbench overrides snapshot — observed for audit detection,
+    # not replayed by apply_undo (key is not in TRACKED_COLUMNS).
+    # Review-state mutations already flow through cases.meta_json (tracked).
+    overrides_rows = conn.execute(
+        """
+        SELECT filename, manual_phase, manual_view, manual_transform_json, updated_at
+        FROM case_image_overrides
+        WHERE case_id = ?
+        ORDER BY filename
+        """,
+        (case_id,),
+    ).fetchall()
+    out["_image_overrides"] = {
+        r["filename"]: {
+            "manual_phase": r["manual_phase"],
+            "manual_view": r["manual_view"],
+            "manual_transform_json": r["manual_transform_json"],
+            "updated_at": r["updated_at"],
+        }
+        for r in overrides_rows
+    }
     return out
 
 
@@ -138,13 +165,22 @@ def latest_active_revision(
     POST /api/cases/{id}/render/restore on `previous_archived_at`) instead of
     `apply_undo()`, because their before/after payloads don't fit TRACKED_COLUMNS;
     routing them through apply_undo would null every tracked column.
+
+    image_workbench_* ops are also excluded: they mutate case_image_overrides
+    rather than tracked columns on `cases`, so apply_undo would only restore
+    cases-row state — a partial undo that misleads users. Audit revisions are
+    still written (visible in RevisionsDrawer) but not undoable until
+    hardening N11 implements case_image_overrides replay.
     """
     return conn.execute(
         """
         SELECT * FROM case_revisions
         WHERE case_id = ?
           AND undone_at IS NULL
-          AND op NOT IN ('undo', 'render', 'undo_render', 'evaluate', 'undo_evaluate', 'restore_render')
+          AND op NOT IN (
+            'undo', 'render', 'undo_render', 'evaluate', 'undo_evaluate', 'restore_render',
+            'image_workbench_batch', 'image_workbench_confirm_suggestions', 'image_workbench_transfer'
+          )
         ORDER BY changed_at DESC, id DESC
         LIMIT 1
         """,

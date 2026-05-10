@@ -126,7 +126,7 @@ def status_payload(*, db_path: Path, extra: dict[str, Any] | None = None) -> dic
         "stress_mode": is_stress_mode(),
         "stress_run_id": stress_run_id(),
         "repo_root": str(REPO_ROOT),
-        "expected_repo_root": "/Users/a1234/Desktop/案例生成器/case-workbench",
+        "expected_repo_root": str(REPO_ROOT),
         "db_path": str(db_path),
         "default_db_path": str(DEFAULT_DB_PATH),
         "db_is_default": db_path.resolve() == DEFAULT_DB_PATH.resolve(),

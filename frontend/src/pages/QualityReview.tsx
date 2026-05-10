@@ -352,11 +352,18 @@ export default function QualityReview() {
     if (status) drillRender(status);
   };
 
+  // Backend errors come through errorText() as ZH HTTP detail, axios EN err.message,
+  // or the t("errors.operationFailed") fallback. Match all three forms — do NOT
+  // route through t() (i18n-extraction antipattern: protocol parsing must not
+  // depend on UI locale).
   const messageIsError = useMemo(() => {
     if (!message) return false;
-    const failedKeyword = t("statuses.failed");
-    return message.includes(failedKeyword) || message.includes("not");
-  }, [message, t]);
+    return (
+      message.includes("失败")
+      || message.includes("Failed")
+      || message.toLowerCase().includes("error")
+    );
+  }, [message]);
 
   return (
     <div style={{ height: "100%", display: "grid", gridTemplateRows: "auto 1fr", overflow: "hidden" }}>
