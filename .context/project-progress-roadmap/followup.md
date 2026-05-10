@@ -52,14 +52,97 @@ created_at: 2026-05-10T11:30:00+08:00
 - **W5**: `subprocess.run(timeout=240)` 不带 `start_new_session` → Node 子孙进程僵尸残留
 - **W6**: enqueue_batch `except ValueError: continue` 静默跳 missing case，用户不知哪些被跳
 
+## review gate 新增（eval-auditor + integration-checker，2026-05-10 12:30）
+
+### N6: 测试评估自身需返工（eval-auditor 12/25）
+
+eval-auditor 评分：抽样 2/5、对照 2/5、可证伪 2/5。**关键认知：N1-N5 任一 bug 真在生产触发，pytest 351 仍可全绿** —— 测试无法证伪 push-blocker。
+
+**hardening 必须包含的硬证伪测试**（每项绑死对应 N，否则修了 bug 验不出）：
+
+| push-blocker | 必加硬证伪测试 |
+|---|---|
+| N1 (WAL/并发锁) | `test_concurrent_finish_result_does_not_drop_render_quality` — multiprocessing.Process×2 同时调 `_finish_result` 写 50 row，断言 render_quality 行数 == render_jobs 行数 |
+| N2 (recover 重复提交) | `test_recover_with_live_pool_does_not_double_submit` — 真起 ThreadPoolExecutor(max=2) + 计数 fn，让 recover() 在 fetchall 后 yield，测同 job_id 是否只跑 1 次 |
+| N4 (transfer DB/磁盘分裂) | `test_transfer_rollbacks_disk_when_rescan_fails` — monkeypatch scanner.rescan_one 抛 ValueError，断言 target_dir 内**无**新文件 + DB 无 case_image_overrides 行 |
+| N5 (schema 并发 ALTER) | `test_concurrent_init_schema_two_processes_no_missing_column` — subprocess×2 竞争 ALTER，断言列存在性 |
+
+### N6.1: stress 测试 4 用例不在 subprocess
+
+- **位置**：`backend/tests/test_stress_mode.py`
+- **风险**：CASE_WORKBENCH_OUTPUT_ROOT env 设了但 conftest import-time 已定型 `db.DB_PATH`，`test_stress_status_reports_isolated_paths` / `test_audit_revision_is_tagged_in_stress_mode` 实际只测了 status_payload 函数对 env 的反射，**未测 stress mode 端到端隔离**
+- **修复**：4 用例搬到 subprocess（参考 `test_db_path_can_be_configured_by_env`）
+- **gaming risk**：`test_stress_mode_blocks_destructive_routes` 5 行用 case_id=1（不存在）→ block 未生效会 404 而非 403，断言区分不出 "block 生效" vs "case 不存在"。改成"先 seed 真 case + 关 stress 跑确认会动数据 + 开 stress 跑 403 + 断言 case 行未变"两段对照
+
+### N6.2: 新模块 runtime 路径 0 真覆盖
+
+- `simulation_quality.py` 只 monkeypatch `POLICY_PATH`，0 直接覆盖 → 加 5 unit test (policy 缺失 / score 阈值 / review 状态写回)
+- `issue_translator.py` 0 测试 → 加 zh/en 入参穷举
+- `source_images.py` 0 测试
+- `ai_generation_adapter.py` build_after_enhancement_prompt + _create_difference_heatmap 是 pure-fn 测试，"真正调用 PS-router"路径全 stub → 加 contract-test：fake_run input shape vs 真实 `run_ps_model_router_after_simulation` 签名 assert（防 stub 漂移）
+
+### N6.3: e2e fixture 空库下静默 PASS
+
+- **位置**：`frontend/tests/e2e/source-blockers.spec.ts` / `stress-smoke.spec.ts`
+- **风险**：`if (await firstSnapshot.count())` 守卫意味着 fixture 若空，spec 只跑顶层 visible 断言仍 PASS，"功能坏了 0 cards" vs "空库" 区分不出
+- **修复**：beforeAll 显式 `expect(supplementTrigger).toBeVisible()` 或 `expect(cards.first()).toHaveCount({min:1})`
+
+### N6.4: test_image_workbench_transfer_rejects_trashed_source_path 文案断言
+
+- **位置**：`test_image_overrides_basic.py` line 883-1013 transfer 段
+- **风险**：断言全是 `reason 文本相等 + body.copied==0 + skipped[0].reason` 文案断言；文案重写一行该测试就崩，且不验证 trashed 文件物理上没被 access 的业务不变量
+- **修复**：补加文件系统 inode mtime 不变 / shutil.copy2 未被调用的断言
+
+## integration-checker 新发现（2026-05-10 13:00）
+
+### N7: SimulateAfterResponse 同名 schema 双 endpoint 不一致
+
+- **位置**：`backend/routes/case_groups.py:188-196` ↔ `backend/routes/cases.py` simulate-after / `frontend/src/api.ts:866-878`
+- **风险**：Group-level POST `/api/case-groups/{id}/simulate-after` 返回 `{simulation_job_id, group_id, case_id, status, focus_targets, policy, error_message}`；Case-level 用 `response_model=SimulateAfterResponse` 返回 `{input_refs, output_refs, audit, focus_regions, provider, model_name}`。FE 在 `api.ts:1441-1449` 用 inline type 处理 group 变体（正确），但任何 reuser 把 `SimulateAfterResponse` 复用到 group 路由就 break（缺 policy/group_id，多出 input_refs/audit）
+- **修复**：rename group 返回到 `GroupSimulateAfterResponse` 并锁 `response_model=`；api.ts 加注释说明两个 endpoint 故意不互换
+- **严重度**：HIGH（schema 漂移 footgun，T2 best-pair 引入新 simulate-after 调用前必修）
+
+### N8: QualityReview renderIssueTarget 漏 "侧向"
+
+- **位置**：`backend/source_selection.py:1011` (warning text "侧向术前术后方向不一致") ↔ `frontend/src/pages/QualityReview.tsx:122-124` (renderIssueTarget)
+- **风险**：FE renderIssueTarget 按 `String.includes("侧面"|"侧脸"|"正面"|"45")` 算 slot，后端 direction_mismatch warning 用"侧向"（不是侧面/侧脸）→ slot=null → 整条 issue 在 FE drilldown **静默 drop**，用户看不到 direction_mismatch warning
+- **修复（短期）**：QualityReview.tsx:122 includes 列表加 "侧向"
+- **修复（长期，推荐）**：backend 改成 emit 结构化字段 `{code, slot, severity}` 替代 String.includes 中文 prose（这条沉 lessons：协议字符串解析跨 FE/BE 必须结构化）
+- **严重度**：MEDIUM —— 不阻断 push（只是某些 warning 在 EN/ZH UI 都看不到，但底层数据正确）
+
+### N9: image_workbench transfer 字节上限/自循环检查/跨 customer
+
+- **位置**：`backend/routes/image_workbench.py:2543-2635` POST `/api/image-workbench/transfer`
+- 已有：path-traversal 防御（relative_to + extension whitelist）OK
+- **缺失 1**：无 per-request 字节上限。payload caps 100 items 但单 item 可大；shutil.copy2 会写 GB 级到 target case dir
+- **缺失 2**：`target_case_id == source_case_id` 检查在 `_case_dir(target)` 之后，self-target 仍会 hit DB+filesystem 才返回 error
+- **缺失 3**：`inherit_review` 写 `copied_from_case_id` 不验证 source/target 同 customer，跨 customer transfer 当前直通
+- **修复**：
+  - 加 env `IMAGE_WORKBENCH_TRANSFER_MAX_BYTES`（默认 500MB）loop 内累计校验
+  - self-target 检查上移到 `_case_dir(target)` 之前
+  - 跨 customer transfer 加 guard（业务侧确认是否允许）
+- **严重度**：MEDIUM —— 不阻断 push；但跟 N4（transfer DB/磁盘分裂）同源，hardening 一起做
+
+### N10: CaseGroups ai_generation_authorized 装饰 flag
+
+- **位置**：`frontend/src/pages/CaseGroups.tsx:62-64` ↔ `backend/routes/case_groups.py:118-124`
+- **风险**：FE 总发送 `ai_generation_authorized: true` + `provider: "ps_model_router"` 硬编码；UI "授权" gate 只是 `window.prompt(focus_targets)`。真正 gate 在后端 env `CASE_WORKBENCH_ENABLE_AI_GENERATION=1`。flag 是装饰用
+- **修复**：移除 payload 里的 authorized flag（env-only gate），或加真正的 confirmation dialog
+- **严重度**：INFO —— lessons 候选（"装饰性同意 flag" 反模式）
+
 ## hardening 子任务建议顺序（T2 启动前）
 
-1. N1 (WAL + busy_timeout) — 最容易修，影响最大
-2. N5 (schema_versions 表) — 修了能预防未来 migration 风险
-3. N2 (recover 原子化) — 关键正确性
-4. N3 (staging cleanup) — 长跑必修
-5. N4 (transfer 两阶段) — 状态一致性
-6. W1 (response_model) — 跨 FE/BE 契约（与 T2 best-pair plan 改 4 文件相关，建议 T2 前做）
-7. W3-W6 — 渐进改善
+每项独立 commit + 对应硬证伪测试 + 文档更新。
 
-每项独立 commit + 对应 backend pytest 用例。
+1. **N1 (WAL + busy_timeout) + 硬证伪 test_concurrent_finish_result** — 最容易修，影响最大
+2. **N5 (schema_versions 表) + 硬证伪 test_concurrent_init_schema** — 预防未来 migration 风险
+3. **N2 (recover 原子化) + 硬证伪 test_recover_with_live_pool** — 关键正确性
+4. **N3 (staging cleanup)** — 长跑必修（可挂 startup scan + finally 块）
+5. **N4 (transfer 两阶段) + N9 (transfer 字节/self/跨customer guard) + 硬证伪 test_transfer_rollbacks_disk** — 状态一致性 + 防滥用
+6. **N7 (rename GroupSimulateAfterResponse) + response_model lock** — T2 best-pair 引入新 simulate-after 前必修
+7. **N8 (QualityReview includes 加 "侧向") + 长期改结构化字段** — UI 可见 bug fix
+8. **N6.1-N6.4 测试返工** — 把 stress 4 用例搬 subprocess + 加 simulation_quality/issue_translator/source_images runtime 测试 + e2e fixture min count 守卫 + transfer 文件系统不变量断言
+9. **W1 (Pydantic response_model 全覆盖)** — 跨 FE/BE 契约（与 T2 best-pair 相关）
+10. **W3-W6** — 渐进改善
+
+每项 commit message 用 `fix(case-workbench): hardening N<X> ...` 前缀。

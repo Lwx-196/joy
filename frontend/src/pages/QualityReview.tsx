@@ -119,7 +119,7 @@ function shortText(text: string, max = 220): string {
 function renderIssueTarget(text: string): { slot: "front" | "oblique" | "side"; code: string; contains: string } | null {
   const value = String(text || "");
   if (!value) return null;
-  const slot = value.includes("45") || value.includes("45°") ? "oblique" : value.includes("侧面") || value.includes("侧脸") ? "side" : value.includes("正面") ? "front" : null;
+  const slot = value.includes("45") || value.includes("45°") ? "oblique" : value.includes("侧面") || value.includes("侧脸") || value.includes("侧向") ? "side" : value.includes("正面") ? "front" : null;
   if (!slot) return null;
   if (value.includes("方向不一致")) return { slot, code: "direction_mismatch", contains: "方向不一致" };
   if (value.includes("姿态差")) return { slot, code: "pose_delta_large", contains: "姿态差" };
