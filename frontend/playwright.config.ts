@@ -22,6 +22,11 @@ export default defineConfig({
     trace: "retain-on-failure",
     video: "retain-on-failure",
     screenshot: "only-on-failure",
+    // Force zh-CN locale so existing specs that use Chinese text selectors (e.g.
+    // getByPlaceholder("搜索…")) keep working after wave-1 i18n extraction.
+    // Long-term fix is N14 hardening: switch all interactive elements to data-testid.
+    locale: "zh-CN",
+    extraHTTPHeaders: { "Accept-Language": "zh-CN,zh;q=0.9" },
   },
 
   projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],

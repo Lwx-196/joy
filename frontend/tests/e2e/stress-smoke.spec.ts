@@ -48,7 +48,11 @@ async function capture(page: Page, name: string) {
   await page.screenshot({ path: `${root}/${name}.png`, fullPage: true });
 }
 
+// Requires real DB + real case fixtures populated by scripts/stress/prepare_data.py.
+// Set SMOKE_STRESS=1 to run locally after preparing data; CI lacks the fixture.
+// Long-term: hardening N19 will fixture this with synthetic data so CI can run.
 test.describe("stress smoke: real full-chain surfaces", () => {
+  test.skip(!process.env.SMOKE_STRESS, "Set SMOKE_STRESS=1 with prepared stress fixture to run");
   test("main pages, images, render history, supplement candidates, and AI QA load cleanly", async ({ page }) => {
     const failures = collectRuntimeFailures(page);
 
