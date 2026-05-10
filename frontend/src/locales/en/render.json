@@ -3,6 +3,8 @@
     "queued": "Queued",
     "running": "Rendering",
     "done": "Done",
+    "doneWithIssues": "Done with issues",
+    "blocked": "Quality blocked",
     "failed": "Failed",
     "cancelled": "Cancelled",
     "undone": "Undone"
@@ -20,23 +22,55 @@
     "block": "block",
     "warn": "warn"
   },
+  "quality": {
+    "label": "Quality",
+    "publishable": "publishable",
+    "reviewRequired": "needs review"
+  },
+  "composition": {
+    "title": "Composition note",
+    "generic": "Before/after composition differs and should be reviewed.",
+    "action": "Pick a closer matching source image in the manual organization panel; if repair is required, use the separate AI edge repair flow."
+  },
   "actions": {
     "cancel": "Cancel",
     "retry": "Retry",
     "rerender": "Re-render",
+    "visionRetry": "Retry with vision",
+    "visionRetryTitle": "Enable vision-assisted screening for before/after phase and angle, then re-render",
+    "openPreview": "Preview",
+    "copyOutputPath": "Copy output path",
+    "copyCaseRoot": "Copy root",
+    "openCaseRoot": "Open root",
+    "openOutputDir": "Open output",
+    "openInNewTab": "New tab",
     "expandDetail": "Show details",
     "collapseDetail": "Hide"
+  },
+  "previewModal": {
+    "title": "Final render preview",
+    "close": "Close"
   },
   "detail": {
     "blockingTitle": "Blocking · {{count}}",
     "warningsTitle": "Warnings · {{count}}",
+    "groupedWarningsTitle": "Warnings · {{groups}} groups / {{count}} items",
+    "warningSamples": "Examples:",
+    "rawWarningsTitle": "Raw details · {{count}}",
     "empty": "manifest has no detailed entries"
   },
   "messages": {
     "unknownError": "Unknown error",
     "cancelledHint": "Cancelled.",
     "rerunButton": "Restart",
+    "blockedHint": "The artifact did not pass the quality gate. Fix classification/pairing or re-render first.",
     "undoneHint": "Previous render undone (output deleted).",
-    "undoLabel": "Brand-final version generated"
+    "undoLabel": "Brand-final version generated",
+    "previewLoadFailed": "Final image failed to load",
+    "outputPathCopied": "Output path copied",
+    "caseRootCopied": "Case root copied",
+    "openedPath": "Opened: {{path}}",
+    "openFallbackCopied": "Open failed; path copied",
+    "openFailed": "Open failed"
   }
 }

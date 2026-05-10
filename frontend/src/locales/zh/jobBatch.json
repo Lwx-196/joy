@@ -21,6 +21,8 @@
     "queued": "排队",
     "running": "处理中",
     "done": "成功",
+    "done_with_issues": "需复核",
+    "blocked": "质量阻塞",
     "failed": "失败",
     "cancelled": "取消",
     "undone": "已撤销"
@@ -39,6 +41,8 @@
     "queued": "排队中",
     "running": "处理中",
     "done": "已完成",
+    "done_with_issues": "完成需复核",
+    "blocked": "质量阻塞",
     "failed": "失败",
     "cancelled": "已取消",
     "undone": "已撤销"

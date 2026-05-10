@@ -1,0 +1,73 @@
+{
+  "header": {
+    "title": "Case groups",
+    "subtitle": "Unify case boundaries, image recognition, pairing templates and the low-confidence queue"
+  },
+  "filter": {
+    "queueLabel": "Queue",
+    "all": "All"
+  },
+  "status": {
+    "confirmed": "Confirmed",
+    "needs_review": "Low confidence",
+    "auto": "Auto"
+  },
+  "stats": {
+    "lowConfidence": "Low confidence {{n}}",
+    "confirmed": "Confirmed {{n}}"
+  },
+  "actions": {
+    "rescan": "Re-scan cases",
+    "rescanRunning": "Scanning…",
+    "detail": "Details",
+    "confirm": "Confirm classification",
+    "renderByDiagnosis": "Render by diagnosis",
+    "simulate": "AI post-op simulation"
+  },
+  "states": {
+    "emptyList": "No groups yet — click Re-scan cases",
+    "emptyDetail": "Select a case group"
+  },
+  "diagnosis": {
+    "imageCount": "Images {{n}}",
+    "lowConfidence": "Low confidence {{n}}",
+    "blockingPair": "Pairing issues {{n}}",
+    "suggestedTemplate": "Suggested template {{template}}",
+    "suggestedTemplateFallback": "manual-review"
+  },
+  "pairs": {
+    "title": "Before / after pairs",
+    "headers": {
+      "view": "View",
+      "before": "Before",
+      "after": "After",
+      "score": "Score",
+      "status": "Status"
+    },
+    "missing": "missing"
+  },
+  "observations": {
+    "title": "Per-image recognition",
+    "headers": {
+      "image": "Image",
+      "phase": "Phase",
+      "view": "View",
+      "bodyPart": "Body part",
+      "confidence": "Confidence",
+      "sourceReason": "Source / reason"
+    }
+  },
+  "groupTitle": {
+    "needsReview": "Review",
+    "imageShort": "Img {{n}}",
+    "lowShort": "Low {{n}}",
+    "suggestedTemplateFallback": "manual-review"
+  },
+  "simulate": {
+    "promptTargets": "Enter target areas for AI post-op simulation, comma-separated, e.g. 下颌线,口角 (jawline, mouth corner)",
+    "note": "由整理诊断页创建",
+    "successCreated": "Simulation task created",
+    "successBlocked": "Simulation task recorded but currently blocked by safety: {{message}}",
+    "failed": "Failed to create"
+  }
+}

@@ -1,0 +1,288 @@
+{
+  "header": {
+    "title": "Quality Review",
+    "subtitle": "Unified review entry for production renders and AI post-op enhancements; status and publish eligibility tracked separately",
+    "refresh": "Refresh",
+    "refreshing": "Refreshing…"
+  },
+  "kindTabs": {
+    "render": "Production render",
+    "simulation": "AI enhancement"
+  },
+  "renderFilters": {
+    "review_required": "Pending review",
+    "done_with_issues": "Needs recheck",
+    "blocked": "Blocked",
+    "failed": "Failed",
+    "reviewed": "Reviewed",
+    "all": "All"
+  },
+  "simFilters": {
+    "review_required": "Pending review",
+    "done_with_issues": "Needs recheck",
+    "failed": "Failed",
+    "approved": "Approved",
+    "reviewed": "Reviewed",
+    "all": "All"
+  },
+  "statuses": {
+    "done": "Pass",
+    "done_with_issues": "Needs recheck",
+    "blocked": "Blocked",
+    "failed": "Failed",
+    "approved": "Approved",
+    "needs_recheck": "Recheck needed",
+    "rejected": "Rejected"
+  },
+  "recommendations": {
+    "approved": "Approve candidate",
+    "needs_recheck": "Needs recheck",
+    "rejected": "Reject suggested",
+    "manual_override": "Manual override",
+    "aligned": "Human-AI aligned",
+    "unknown": "Unknown",
+    "all": "All"
+  },
+  "policyThresholds": {
+    "approve_full_max": "Approve: full-frame change max",
+    "approve_non_target_max": "Approve: out-of-target change max",
+    "approve_p95_max": "Approve: P95 max",
+    "approve_changed_ratio_max": "Approve: 8%+ changed pixel ratio max",
+    "approve_target_min": "Approve: target region change min",
+    "reject_full_min": "Reject: full-frame change min",
+    "reject_non_target_min": "Reject: out-of-target change min",
+    "reject_p95_min": "Reject: P95 min",
+    "reject_changed_ratio_min": "Reject: 8%+ changed pixel ratio min"
+  },
+  "summaryBadges": {
+    "needsReview": "Needs recheck {{count}}",
+    "blocked": "Blocked {{count}}",
+    "failed": "Failed {{count}}",
+    "reviewed": "Reviewed {{count}}",
+    "archived": "Archived {{count}}",
+    "approved": "Approved {{count}}"
+  },
+  "summary": {
+    "renderActiveIssues": "Production render has {{total}} active issues, {{archived}} archived; sorted by failed, blocked, needs-recheck",
+    "simByRecommendation": "AI enhancement queue {{total}} items, filtered by system suggestion: {{label}}",
+    "simDefault": "AI enhancement queue {{total}} items; review results do not mix into real production renders"
+  },
+  "recommendationFilter": {
+    "label": "System suggestion filter: {{label}}",
+    "clear": "Clear filter"
+  },
+  "messages": {
+    "renderRecorded": "Render job #{{id}} recorded: {{status}}",
+    "simRecorded": "AI enhancement job #{{id}} recorded: {{status}}",
+    "policySaved": "AI review policy saved: {{name}} v{{version}}",
+    "policyPreviewDone": "Policy preview done: {{count}} AI tasks would change",
+    "drillRender": "Drilled into production render: {{label}}",
+    "drillSim": "Drilled into AI system suggestion: {{label}}",
+    "drillSimReviewQueue": "Drilled into AI enhancement review queue",
+    "operationFailed": "Operation failed"
+  },
+  "prompts": {
+    "approveNote": "Review note (optional)",
+    "needsRecheckNote": "Reason for recheck",
+    "rejectNote": "Reason for rejection",
+    "approveSimNote": "AI enhancement review note (optional)"
+  },
+  "report": {
+    "loading": "Loading unified quality report…",
+    "loadError": "Failed to load unified quality report",
+    "title": "Unified quality report",
+    "metaPrefix": "Delivery baseline first",
+    "metaPolicy": "Policy {{name}} v{{version}}",
+    "metaCommitUnknown": "unknown",
+    "metaDirty": "Workspace {{count}} changes",
+    "metaArchived": "Archived {{count}}",
+    "refresh": "Refresh report",
+    "refreshing": "Refreshing…",
+    "metricNa": "—",
+    "metrics": {
+      "deliverySample": "Delivery sample",
+      "currentLatest": "Current latest case",
+      "rendererSuccess": "Renderer success rate",
+      "rendererFailed": "Renderer failure rate",
+      "currentCleanDone": "Current clean done",
+      "currentDoneWithIssues": "Current done_with_issues",
+      "currentPublishRate": "Current publish rate",
+      "finalBoardVisible": "Final board visible rate",
+      "classificationRate": "Classification completion rate",
+      "blockedGuardrail": "Blocked guardrail",
+      "rendererFailedCount": "Renderer failed",
+      "currentReviewRequired": "Pending review",
+      "currentActionable": "Actionable items",
+      "totalArtifacts": "Total artifacts",
+      "reviewed": "Reviewed",
+      "publishable": "Publishable / usable",
+      "notPublishable": "Not publishable / pending",
+      "renderAvgScore": "Production avg score",
+      "simAvgNonTarget": "AI out-of-target avg"
+    },
+    "classificationBadges": {
+      "sourceImages": "Real source images {{count}}",
+      "classified": "Classified {{count}}",
+      "needsManual": "Pending manual {{count}}",
+      "lowConfidence": "Low confidence {{count}}"
+    },
+    "rootCausesTitle": "Current root cause ranking",
+    "renderSection": "Production render",
+    "simSection": "AI enhancement",
+    "drillRender": {
+      "done": "Pass",
+      "done_with_issues": "Needs recheck",
+      "blocked": "Blocked",
+      "failed": "Failed"
+    },
+    "drillSim": {
+      "approved": "Approve candidate",
+      "needs_recheck": "Needs recheck",
+      "rejected": "Reject suggested",
+      "manual_override": "Manual override"
+    }
+  },
+  "rootCause": {
+    "units": {
+      "image": "images",
+      "case": "cases",
+      "default": "items"
+    },
+    "jobImpact": "Affects {{count}} latest jobs",
+    "caseTag": "case {{id}}",
+    "jobTag": "job {{id}}"
+  },
+  "blockerQueue": {
+    "loading": "Loading classification blocker queue…",
+    "title": "Classification blocker queue",
+    "viewAll": "View all",
+    "caseTitle": "case #{{id}} · {{title}}",
+    "untitled": "Untitled case",
+    "ready": "ready {{score}}",
+    "needsManual": "Pending manual {{count}}",
+    "missingPhase": "Missing phase {{count}}",
+    "missingView": "Missing angle {{count}}",
+    "lowConfidence": "Low confidence {{count}}",
+    "safeConfirm": "Safe confirm {{count}}",
+    "missingSlot": "{{label}} missing {{roles}}",
+    "missingJoin": " · ",
+    "rolesJoin": "/",
+    "actionFixSource": "Fix source dir",
+    "actionFixBlocker": "Fix blocked images",
+    "viewPreflight": "View preflight"
+  },
+  "roles": {
+    "before": "Before",
+    "after": "After"
+  },
+  "policyPanel": {
+    "loading": "Loading AI review policy…",
+    "loadError": "Failed to load AI review policy",
+    "title": "AI enhancement review policy",
+    "defaultUpdated": "Default policy",
+    "preview": "Preview impact",
+    "previewing": "Previewing…",
+    "save": "Save policy",
+    "saving": "Saving…",
+    "metaSeparator": " · "
+  },
+  "policyPreview": {
+    "title": "Policy replay result",
+    "subtitle": "Read-only preview of {{total}} AI enhancement tasks; not saved, no review state changes",
+    "changed": "Changed {{count}}",
+    "manualOverride": "Manual override {{count}}",
+    "newConflict": "New conflict {{count}}",
+    "approved": "Approved candidate {{count}}",
+    "needsRecheck": "Needs recheck {{count}}",
+    "rejected": "Reject suggested {{count}}",
+    "transitionValue": "{{from}} → {{to}} {{count}}",
+    "itemTitle": "AI job #{{id}}",
+    "itemMeta": " · {{customer}} · Manual {{reviewStatus}}",
+    "unboundCustomer": "Unbound customer",
+    "unreviewed": "Unreviewed",
+    "verdictTransition": "{{from}} → {{to}}"
+  },
+  "renderQueue": {
+    "loading": "Loading production render quality queue…",
+    "loadError": "Failed to load production render quality queue",
+    "empty": "No production render artifacts to handle under current filter"
+  },
+  "simQueue": {
+    "loading": "Loading AI enhancement quality queue…",
+    "loadError": "Failed to load AI enhancement quality queue",
+    "empty": "No AI enhancement artifacts to handle under current filter"
+  },
+  "case": {
+    "unbound": "Unbound case"
+  },
+  "renderItem": {
+    "brandTemplate": "{{brand}} · {{template}}",
+    "publishable": "Publishable",
+    "notPublishable": "Not publishable",
+    "reviewBadge": "Review {{status}}",
+    "customer": "Customer: {{name}}",
+    "customerUnbound": "Unbound",
+    "renderJob": "Render job #{{id}}",
+    "noFinishedAt": "No finish time",
+    "selected": "Selected {{slots}}",
+    "selectedJoin": " / ",
+    "dropped": "Dropped {{count}} slots",
+    "manifestAudit": "manifest audit",
+    "actionTag": "Action: {{label}}",
+    "fixSlot": "Fix {{slot}}",
+    "slotLabels": {
+      "front": "Front",
+      "oblique": "45°",
+      "side": "Side"
+    },
+    "approveTitleNoOutput": "No reviewable final output; please re-render first"
+  },
+  "simItem": {
+    "watermarked": "Watermarked",
+    "noWatermark": "No watermark",
+    "publishable": "AI review usable",
+    "notPublishable": "Not publishable",
+    "decisionPlaceholder": "Awaiting suggestion",
+    "diff": "Change {{full}} / Out-of-target {{nonTarget}}",
+    "customer": "Customer: {{name}}",
+    "customerUnbound": "Unbound",
+    "simJob": "AI job #{{id}}",
+    "focus": "Target: {{focus}}",
+    "focusFallback": "Selection region",
+    "focusJoin": ", ",
+    "diffLine": "Target: {{target}} / Full: {{full}} / Out: {{nonTarget}}{{p95}}{{ratio}}",
+    "diffP95": " / P95: {{p95}}",
+    "diffRatio": " / 8%+: {{ratio}}%",
+    "diffNa": "—",
+    "standalone": "Standalone AI enhancement task",
+    "approveTitleNoApprove": "AI enhancement requires final image, watermark, selection region, and no hard rejections",
+    "kindBadge": "AI enhancement"
+  },
+  "simulationFiles": {
+    "noFiles": "No AI task images to display; check task output files or regenerate",
+    "labels": {
+      "original_after": "Original after",
+      "ai_after_simulation": "AI enhancement",
+      "difference_heatmap": "Difference heatmap",
+      "controlled_policy_comparison": "Comparison",
+      "before_reference": "Before reference"
+    }
+  },
+  "preview": {
+    "loadFailed": "Load failed",
+    "imageLoadFailed": "Image load failed",
+    "noOutput": "No final image",
+    "noAiOutput": "AI image unavailable"
+  },
+  "actions": {
+    "openCase": "Open case",
+    "noCase": "No case",
+    "approve": "Approve",
+    "recheck": "Recheck",
+    "reject": "Reject"
+  },
+  "modelDefault": "PS model-router",
+  "errors": {
+    "operationFailed": "Operation failed"
+  }
+}

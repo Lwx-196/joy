@@ -3,13 +3,15 @@ import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { CATEGORY_LABEL, TIER_LABEL, type Category, type CaseSummary, type CaseListParams } from "../api";
+import { CATEGORY_LABEL, TIER_LABEL, type Category, type CaseSummary, type CaseListParams, type RenderBatchPreviewInvalid } from "../api";
 import {
   useBatchRenderCases,
   useBatchUpdateCases,
   useBatchUpgradeCases,
   useCasesPage,
   useCustomers,
+  usePreviewBatchRender,
+  useTrashCases,
 } from "../hooks/queries";
 import Pagination from "../components/Pagination";
 import { useBrand } from "../lib/brand-context";
@@ -44,6 +46,7 @@ const COL_WIDTHS: number[] = [
   196,  // 模板
   78,   // 源图
   72,   // 阻塞
+  116,  // 出图质量
   110,  // 审核状态
   116,  // 最后修改
 ];
@@ -71,6 +74,22 @@ function rowStateClass(c: CaseSummary, now: Date): string {
     // shows the precise breakdown.
     false;
   return supplemented ? "row-supplemented" : "row-auto";
+}
+
+const RENDER_BLOCKER_LABEL: Record<string, string> = {
+  case_not_found: "案例不存在",
+  duplicate_in_batch: "批次内重复",
+  no_real_source_photos: "不是案例源目录",
+  insufficient_source_photos: "真实源图不足",
+  missing_before_after_pair: "缺术前/术后配对",
+};
+
+function renderBlockerLine(item: RenderBatchPreviewInvalid) {
+  const profile = item.source_profile;
+  const counts = profile
+    ? `源图 ${profile.source_count}，生成图 ${profile.generated_artifact_count}，术前 ${profile.before_count}，术后 ${profile.after_count}`
+    : "";
+  return `#${item.case_id} ${RENDER_BLOCKER_LABEL[item.reason] ?? item.reason}${counts ? `（${counts}）` : ""}`;
 }
 
 export default function Cases() {
@@ -159,15 +178,17 @@ export default function Cases() {
 
   const customersQ = useCustomers();
   const batchMut = useBatchUpdateCases();
+  const trashCasesMut = useTrashCases();
   // Phase 3: batch render hook + global toast.
   const batchRenderMut = useBatchRenderCases();
+  const previewRenderMut = usePreviewBatchRender();
   // Stage 2: batch v3 upgrade hook (shares the same job toast).
   const batchUpgradeMut = useBatchUpgradeCases();
   const showBatchToast = useBatchJobToastStore((s) => s.show);
   const brand = useBrand();
 
   const customers = customersQ.data ?? [];
-  const busy = batchMut.isPending;
+  const busy = batchMut.isPending || trashCasesMut.isPending;
 
   // OOB page self-heal: if current page exceeds total pages, jump to last valid page.
   useEffect(() => {
@@ -326,6 +347,74 @@ export default function Cases() {
       caseIds: [...selected],
       update: { clear_fields: ["manual_category", "manual_template_tier"] },
     });
+  };
+
+  const trashSelectedCases = () => {
+    if (selected.size === 0) return;
+    const ids = [...selected];
+    const ok = window.confirm(t("bulk.confirmTrash", { count: ids.length }));
+    if (!ok) return;
+    trashCasesMut.mutate(
+      { caseIds: ids, reason: t("bulk.trashReason") },
+      {
+        onSuccess: (data) => {
+          setSelected((prev) => {
+            const next = new Set(prev);
+            data.case_ids.forEach((id) => next.delete(id));
+            return next;
+          });
+          if (data.skipped.length > 0) {
+            window.alert(t("bulk.trashSkipped", { count: data.skipped.length }));
+          }
+        },
+      }
+    );
+  };
+
+  const renderSelectedCases = async () => {
+    if (selected.size === 0) return;
+    let ids = [...selected];
+    if (ids.length > MAX_BATCH_RENDER) {
+      const ok = window.confirm(
+        t("bulk.confirmRenderOver", { count: ids.length, max: MAX_BATCH_RENDER })
+      );
+      if (!ok) return;
+      ids = ids.slice(0, MAX_BATCH_RENDER);
+    }
+    let preview;
+    try {
+      preview = await previewRenderMut.mutateAsync({
+        caseIds: ids,
+        payload: { brand, template: "tri-compare", semantic_judge: "auto" },
+      });
+    } catch (e) {
+      window.alert(`批量出图预检失败：${e instanceof Error ? e.message : String(e)}`);
+      return;
+    }
+    if (preview.valid_count === 0) {
+      const lines = preview.invalid.slice(0, 10).map(renderBlockerLine).join("\n");
+      window.alert(`没有可入队的案例。\n\n${lines}`);
+      return;
+    }
+    const skippedLines = preview.invalid.slice(0, 10).map(renderBlockerLine).join("\n");
+    const more = preview.invalid.length > 10 ? `\n…另有 ${preview.invalid.length - 10} 个阻断` : "";
+    const message =
+      preview.invalid_count > 0
+        ? `批量出图前置预检：将入队 ${preview.valid_count} 个，跳过 ${preview.invalid_count} 个。\n\n${skippedLines}${more}\n\n继续只渲染可入队案例？`
+        : t("bulk.confirmRender", { count: ids.length, brand });
+    const ok = window.confirm(message);
+    if (!ok) return;
+    batchRenderMut.mutate(
+      {
+        caseIds: preview.valid_case_ids,
+        payload: { brand, template: "tri-compare", semantic_judge: "auto" },
+      },
+      {
+        onSuccess: (data) => {
+          showBatchToast("render", data.batch_id, data.job_ids.length);
+        },
+      }
+    );
   };
 
   return (
@@ -541,41 +630,24 @@ export default function Cases() {
                 <Ico name="x" size={12} />
                 {t("bulk.clearOverride")}
               </button>
+              <button
+                className="btn danger"
+                onClick={trashSelectedCases}
+                disabled={busy}
+                title={t("bulk.trashTitle")}
+              >
+                <Ico name="folder" size={12} />
+                {trashCasesMut.isPending ? t("bulk.trashing") : t("bulk.trashCases", { n: selected.size })}
+              </button>
               <span className="sep"></span>
               <button
                 className="btn"
                 style={{ background: "var(--cyan-100, #ECFEFF)", color: "var(--cyan-ink, #0E7490)" }}
-                onClick={() => {
-                  if (selected.size === 0) return;
-                  let ids = [...selected];
-                  if (ids.length > MAX_BATCH_RENDER) {
-                    const ok = window.confirm(
-                      t("bulk.confirmRenderOver", { count: ids.length, max: MAX_BATCH_RENDER })
-                    );
-                    if (!ok) return;
-                    ids = ids.slice(0, MAX_BATCH_RENDER);
-                  } else {
-                    const ok = window.confirm(
-                      t("bulk.confirmRender", { count: ids.length, brand })
-                    );
-                    if (!ok) return;
-                  }
-                  batchRenderMut.mutate(
-                    {
-                      caseIds: ids,
-                      payload: { brand, template: "tri-compare", semantic_judge: "off" },
-                    },
-                    {
-                      onSuccess: (data) => {
-                        showBatchToast("render", data.batch_id, ids.length);
-                      },
-                    }
-                  );
-                }}
-                disabled={batchRenderMut.isPending}
+                onClick={() => void renderSelectedCases()}
+                disabled={batchRenderMut.isPending || previewRenderMut.isPending}
               >
                 <Ico name="image" size={12} />
-                {batchRenderMut.isPending ? t("bulk.rendering") : t("bulk.batchRender", { n: selected.size })}
+                {batchRenderMut.isPending || previewRenderMut.isPending ? t("bulk.rendering") : t("bulk.batchRender", { n: selected.size })}
               </button>
               <button
                 className="btn"
@@ -650,6 +722,7 @@ export default function Cases() {
               <th>{t("table.tier")}</th>
               <th>{t("table.source")}</th>
               <th>{t("table.blocking")}</th>
+              <th>{t("table.renderQuality")}</th>
               <th>{t("table.review")}</th>
               <th>{t("table.lastModified")}</th>
             </tr>
@@ -705,7 +778,7 @@ export default function Cases() {
               ))}
               {cases.length === 0 && !loading && (
                 <tr>
-                  <td colSpan={9} className="empty">
+                  <td colSpan={10} className="empty">
                     {t("table.empty")}
                   </td>
                 </tr>
@@ -844,15 +917,49 @@ function CaseRow({
         <IssueCountBadge count={c.blocking_issue_count} />
       </td>
       <td style={tdStyle(7)}>
-        <ReviewPill status={c.review_status ?? "unreviewed"} />
+        <QualityBadge c={c} />
       </td>
       <td style={tdStyle(8)}>
+        <ReviewPill status={c.review_status ?? "unreviewed"} />
+      </td>
+      <td style={tdStyle(9)}>
         <span className="num">
           {new Date(c.last_modified).toLocaleDateString("zh-CN")}
         </span>
       </td>
     </tr>
   );
+}
+
+function QualityBadge({ c }: { c: CaseSummary }) {
+  const quality = c.latest_render_quality_status;
+  const status = c.latest_render_status;
+  if (!status) return <span style={{ color: "var(--ink-4)", fontFamily: "var(--mono)" }}>—</span>;
+  if (quality === "done") {
+    return (
+      <span className="badge" style={{ background: "var(--ok-50)", color: "var(--ok)", borderColor: "var(--ok-100)" }}>
+        <Ico name="check" size={10} />
+        {Math.round(c.latest_render_quality_score ?? 0)}
+      </span>
+    );
+  }
+  if (quality === "done_with_issues" || status === "done_with_issues") {
+    return (
+      <span className="badge" style={{ background: "var(--amber-50)", color: "var(--amber-ink)", borderColor: "var(--amber-200)" }}>
+        <Ico name="alert" size={10} />
+        复核
+      </span>
+    );
+  }
+  if (quality === "blocked" || status === "blocked") {
+    return (
+      <span className="badge" style={{ background: "var(--err-50)", color: "var(--err)", borderColor: "var(--err-100)" }}>
+        <Ico name="alert" size={10} />
+        阻塞
+      </span>
+    );
+  }
+  return <span style={{ color: "var(--ink-4)", fontFamily: "var(--mono)" }}>{status}</span>;
 }
 
 function FilterSelect({

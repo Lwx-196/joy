@@ -3,6 +3,8 @@
     "queued": "排队中",
     "running": "渲染中",
     "done": "已完成",
+    "doneWithIssues": "完成需复核",
+    "blocked": "质量阻塞",
     "failed": "失败",
     "cancelled": "已取消",
     "undone": "已撤销"
@@ -20,23 +22,55 @@
     "block": "block",
     "warn": "warn"
   },
+  "quality": {
+    "label": "质量",
+    "publishable": "可发布",
+    "reviewRequired": "需复核"
+  },
+  "composition": {
+    "title": "构图提示",
+    "generic": "术前/术后构图存在差异，建议人工复核。",
+    "action": "建议回到人工整理区重选更接近构图的照片；如必须修边，走独立 AI 边缘修复。"
+  },
   "actions": {
     "cancel": "取消",
     "retry": "重试",
     "rerender": "重新出图",
+    "visionRetry": "视觉筛选重试",
+    "visionRetryTitle": "开启视觉补判，重新筛选术前/术后与角度后出图",
+    "openPreview": "高清预览",
+    "copyOutputPath": "复制成品路径",
+    "copyCaseRoot": "复制根目录",
+    "openCaseRoot": "打开根目录",
+    "openOutputDir": "打开输出目录",
+    "openInNewTab": "新窗口",
     "expandDetail": "展开详情",
     "collapseDetail": "收起"
+  },
+  "previewModal": {
+    "title": "正式出图高清预览",
+    "close": "关闭"
   },
   "detail": {
     "blockingTitle": "阻塞 · {{count}}",
     "warningsTitle": "警告 · {{count}}",
+    "groupedWarningsTitle": "警告 · {{groups}} 组 / {{count}} 条",
+    "warningSamples": "示例：",
+    "rawWarningsTitle": "原始明细 · {{count}}",
     "empty": "manifest 未输出具体条目"
   },
   "messages": {
     "unknownError": "未知错误",
     "cancelledHint": "已取消。",
     "rerunButton": "重新开始",
+    "blockedHint": "产物没有通过质量门槛，请先处理分类/配对或重新出图。",
     "undoneHint": "已撤销上一次出图（产物已删除）。",
-    "undoLabel": "已生成正式品牌版"
+    "undoLabel": "已生成正式品牌版",
+    "previewLoadFailed": "成品图加载失败",
+    "outputPathCopied": "已复制成品路径",
+    "caseRootCopied": "已复制案例根目录",
+    "openedPath": "已打开：{{path}}",
+    "openFallbackCopied": "打开失败，已复制路径",
+    "openFailed": "打开失败"
   }
 }

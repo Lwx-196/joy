@@ -20,7 +20,10 @@
   "previewTitle": "校验完成 — 有效 {{valid}} 条 / 无效 {{invalid}} 条",
   "reason": {
     "case_not_found": "案例不存在",
-    "duplicate_in_batch": "本批次内重复"
+    "duplicate_in_batch": "本批次内重复",
+    "no_real_source_photos": "不是源照片目录",
+    "insufficient_source_photos": "真实源图不足",
+    "missing_before_after_pair": "缺术前/术后配对"
   },
   "cancel": "取消",
   "validate": "校验 ({{n}})",

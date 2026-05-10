@@ -1,0 +1,73 @@
+{
+  "header": {
+    "title": "案例整理",
+    "subtitle": "统一案例边界、图片识别、配对模板和低置信度队列"
+  },
+  "filter": {
+    "queueLabel": "队列",
+    "all": "全部"
+  },
+  "status": {
+    "confirmed": "已确认",
+    "needs_review": "低置信",
+    "auto": "自动"
+  },
+  "stats": {
+    "lowConfidence": "低置信 {{n}}",
+    "confirmed": "已确认 {{n}}"
+  },
+  "actions": {
+    "rescan": "重新整理案例",
+    "rescanRunning": "整理中…",
+    "detail": "详情",
+    "confirm": "确认分类",
+    "renderByDiagnosis": "按诊断出图",
+    "simulate": "AI 术后模拟"
+  },
+  "states": {
+    "emptyList": "暂无分组，点击重新整理案例",
+    "emptyDetail": "请选择一个案例分组"
+  },
+  "diagnosis": {
+    "imageCount": "图片 {{n}}",
+    "lowConfidence": "低置信 {{n}}",
+    "blockingPair": "配对问题 {{n}}",
+    "suggestedTemplate": "建议模板 {{template}}",
+    "suggestedTemplateFallback": "manual-review"
+  },
+  "pairs": {
+    "title": "术前/术后配对",
+    "headers": {
+      "view": "视角",
+      "before": "术前",
+      "after": "术后",
+      "score": "分数",
+      "status": "状态"
+    },
+    "missing": "缺失"
+  },
+  "observations": {
+    "title": "图片级识别",
+    "headers": {
+      "image": "图片",
+      "phase": "阶段",
+      "view": "视角",
+      "bodyPart": "部位",
+      "confidence": "置信",
+      "sourceReason": "来源/原因"
+    }
+  },
+  "groupTitle": {
+    "needsReview": "复核",
+    "imageShort": "图 {{n}}",
+    "lowShort": "低 {{n}}",
+    "suggestedTemplateFallback": "manual-review"
+  },
+  "simulate": {
+    "promptTargets": "填写本次 AI 术后模拟目标部位，用逗号分隔，例如：下颌线,口角",
+    "note": "由整理诊断页创建",
+    "successCreated": "已创建模拟任务",
+    "successBlocked": "已记录模拟任务，但当前被安全阻塞：{{message}}",
+    "failed": "创建失败"
+  }
+}

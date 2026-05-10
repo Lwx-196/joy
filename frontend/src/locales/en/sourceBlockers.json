@@ -1,0 +1,54 @@
+{
+  "header": {
+    "title": "Source blockers",
+    "subtitle": "Queue of real-case directories with source/before/after pairing issues",
+    "refresh": "Refresh",
+    "refreshing": "Refreshing…"
+  },
+  "reasons": {
+    "all": "All blockers",
+    "no_real_source_photos": "Not a source dir",
+    "insufficient_source_photos": "Insufficient sources",
+    "missing_before_after_pair": "Missing before/after"
+  },
+  "counts": {
+    "markedNotSource": "Archived as assets: {{n}}"
+  },
+  "states": {
+    "loading": "Loading…",
+    "loadError": "Failed to load blocker queue",
+    "empty": "No source blockers under current filter"
+  },
+  "profile": {
+    "line": "Source {{source}} / Generated {{generated}} / Before {{before}} / After {{after}} / Unlabeled {{unlabeled}}"
+  },
+  "badge": {
+    "markedNotSource": "Archived as assets"
+  },
+  "row": {
+    "boundLabel": "Bound source dirs: ",
+    "boundJoin": ", "
+  },
+  "actions": {
+    "detail": "Details",
+    "rescan": "Re-run precheck",
+    "markNotSource": "Archive as assets",
+    "clearNotSource": "Reopen",
+    "clearBinding": "Unbind"
+  },
+  "prompts": {
+    "markNotSourceTitle": "Reviewer note",
+    "markNotSourceDefault": "Confirmed that this directory contains finished artwork/posters/asset sets and should not enter formal render",
+    "confirmClearNotSource": "Reopen case {{id}} for review?",
+    "confirmBind": "Bind case {{caseId}} with case {{candidateId}}?\n\n{{reasons}}",
+    "confirmClearBinding": "Clear source-directory binding for case {{id}}?"
+  },
+  "binding": {
+    "loading": "Searching sibling directories…",
+    "empty": "No bindable sibling directories",
+    "bind": "Bind",
+    "alreadyBound": "Bound",
+    "mergedPrefix": "After merge: ",
+    "reasonsJoin": " / "
+  }
+}

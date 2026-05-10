@@ -14,8 +14,12 @@ const CHORD_TIMEOUT_MS = 1500;
 const CHORD_ROUTES: Record<string, string> = {
   d: "/",
   c: "/cases",
+  i: "/images",
+  b: "/source-blockers",
+  o: "/case-groups",
   u: "/customers",
   e: "/evaluations",
+  q: "/quality",
   v: "/dict",
 };
 
@@ -89,8 +93,12 @@ export default function Layout() {
     () => [
       { to: "/", label: t("nav.overview"), end: true, ico: "home" as const, key: "overview" },
       { to: "/cases", label: t("nav.cases"), ico: "list" as const, key: "cases" },
+      { to: "/images", label: t("nav.images"), ico: "image" as const, key: "images" },
+      { to: "/source-blockers", label: t("nav.sourceBlockers"), ico: "alert" as const, key: "sourceBlockers" },
+      { to: "/case-groups", label: t("nav.caseGroups"), ico: "split" as const, key: "caseGroups" },
       { to: "/customers", label: t("nav.customers"), ico: "users" as const, key: "customers" },
       { to: "/evaluations", label: t("nav.evaluations"), ico: "check" as const, key: "evaluations" },
+      { to: "/quality", label: t("nav.quality"), ico: "eye" as const, key: "quality" },
       { to: "/dict", label: t("nav.dict"), ico: "merge" as const, key: "dict" },
     ],
     [t]

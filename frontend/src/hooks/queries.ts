@@ -22,17 +22,29 @@ import {
 } from "@tanstack/react-query";
 import {
   batchUpdateCases,
+  batchUpdateImageWorkbench,
+  acceptSourceGroupWarning,
+  applySourceBlockerAction,
+  bindSourceDirectories,
   cancelRenderJob,
   cancelUpgradeJob,
+  confirmImageWorkbenchSuggestions,
+  clearSourceDirectoryBindings,
+  confirmCaseGroupClassification,
   createCustomer,
   createEvaluation,
+  clearSourceGroupSlotLock,
   enqueueBatchRender,
   enqueueBatchUpgrade,
   enqueueRender,
   previewBatchRender,
   fetchCaseDetail,
+  fetchCaseGroupDiagnosis,
+  fetchCaseGroups,
   fetchCaseRenderJobs,
   fetchCaseRevisions,
+  fetchCaseSimulationJobs,
+  fetchCaseSourceGroup,
   fetchRenderHistory,
   restoreRenderSnapshot,
   fetchCases,
@@ -40,33 +52,67 @@ import {
   fetchCustomers,
   fetchEvaluationsBySubject,
   fetchIssueDict,
+  fetchImageWorkbenchQueue,
   fetchLatestCaseRenderJob,
   fetchPendingCaseEvaluations,
   fetchPendingRenderEvaluations,
+  fetchPsImageModelOptions,
+  previewAiReviewPolicy,
+  previewManualRender,
   fetchRecentCaseEvaluations,
   fetchRecentRenderEvaluations,
   fetchRenameSuggestion,
   fetchRenderBatch,
+  fetchRenderQualityQueue,
   fetchRenderJob,
+  fetchAiReviewPolicy,
+  fetchQualityReport,
+  fetchSimulationQualityQueue,
   fetchScanLatest,
+  fetchSourceBindingCandidates,
+  fetchSourceBlockers,
   fetchStats,
+  fetchSupplementCandidates,
   fetchUpgradeBatch,
   fetchUpgradeJob,
   mergeCases,
+  prepareManualRenderSources,
+  lockSourceGroupSlot,
+  renderCaseGroup,
+  revealCasePath,
+  restoreCaseImage,
   rescanCase,
+  rescanCaseGroups,
   retryUpgradeJob,
+  reviewCaseImage,
+  reviewRenderQuality,
+  reviewSimulationJobById,
+  reviewSimulationJob,
+  simulateCaseAfter,
+  simulateCaseGroupAfter,
+  trashCaseImage,
+  trashCases,
   triggerScan,
   undoCase,
   undoCaseRender,
   undoEvaluation,
   undoUpgradeBatch,
   upgradeCase,
+  updateAiReviewPolicy,
   updateCase,
   updateImageOverride,
+  transferImageWorkbenchImages,
   type ImageOverridePayload,
+  type ImageReviewPayload,
+  type ImageWorkbenchBatchPayload,
+  type ImageWorkbenchConfirmSuggestionsPayload,
+  type ImageWorkbenchTransferPayload,
+  type ManualRenderSourcesPayload,
+  type ManualRenderPreviewPayload,
   updateCustomer,
   VERDICT_LABEL,
   type CaseDetail,
+  type CaseGroupDiagnosis,
   type CaseRevision,
   type CaseListParams,
   type CasesPage,
@@ -78,8 +124,19 @@ import {
   type EnqueueRenderPayload,
   type Evaluation,
   type EvaluationSubjectKind,
+  type SimulateAfterPayload,
   type RenderJob,
   type RenderBatch,
+  type RenderQualityQueueStatus,
+  type CaseRevealPayload,
+  type AiReviewPolicy,
+  type AiReviewPolicyPreview,
+  type SimulationJob,
+  type SimulationQualityQueueStatus,
+  type SourceBlockerReason,
+  type SourceBindingCandidatesResponse,
+  type SourceGroupResponse,
+  type SupplementCandidatesResponse,
   type UpgradeBatch,
   type UpgradeJob,
 } from "../api";
@@ -94,8 +151,39 @@ export const QK = {
     params && Object.keys(params).length > 0
       ? (["cases", params] as const)
       : (["cases"] as const),
+  sourceBlockers: (params?: { reason?: "all" | SourceBlockerReason; limit?: number }) =>
+    params && Object.keys(params).length > 0
+      ? (["cases", "source-blockers", params] as const)
+      : (["cases", "source-blockers"] as const),
+  sourceBindingCandidates: (caseId: number, params?: { limit?: number }) =>
+    params && Object.keys(params).length > 0
+      ? (["cases", caseId, "source-binding-candidates", params] as const)
+      : (["cases", caseId, "source-binding-candidates"] as const),
+  sourceGroup: (caseId: number) => ["cases", caseId, "source-group"] as const,
   caseDetail: (id: number) => ["cases", id] as const,
   caseRename: (id: number) => ["cases", id, "rename"] as const,
+  caseGroups: (params?: { status?: string; limit?: number }) =>
+    params && Object.keys(params).length > 0
+      ? (["case-groups", params] as const)
+      : (["case-groups"] as const),
+  caseGroupDiagnosis: (id: number) => ["case-groups", id, "diagnosis"] as const,
+  imageWorkbenchQueue: (params?: {
+    status?: string;
+    phase?: string;
+    view?: string;
+    body_part?: string;
+    q?: string;
+    case_id?: number;
+    limit?: number;
+    offset?: number;
+  }) =>
+    params && Object.keys(params).length > 0
+      ? (["image-workbench", "queue", params] as const)
+      : (["image-workbench", "queue"] as const),
+  supplementCandidates: (caseId: number, params?: { limit_per_gap?: number }) =>
+    params && Object.keys(params).length > 0
+      ? (["image-workbench", "supplement-candidates", caseId, params] as const)
+      : (["image-workbench", "supplement-candidates", caseId] as const),
   customers: (q?: string) =>
     q ? (["customers", { q }] as const) : (["customers"] as const),
   customerDetail: (id: number) => ["customers", id] as const,
@@ -104,6 +192,10 @@ export const QK = {
   renderJobsForCase: (caseId: number) => ["render", "case", caseId, "jobs"] as const,
   renderLatestForCase: (caseId: number) => ["render", "case", caseId, "latest"] as const,
   renderJob: (jobId: number) => ["render", "job", jobId] as const,
+  renderQualityQueue: (params?: { status?: RenderQualityQueueStatus; limit?: number }) =>
+    params && Object.keys(params).length > 0
+      ? (["render", "quality-queue", params] as const)
+      : (["render", "quality-queue"] as const),
   renderBatch: (batchId: string) => ["render", "batch", batchId] as const,
   // 阶段 11: render 历史归档抽屉 (per-brand+template)
   renderHistory: (caseId: number, brand: string, template: string) =>
@@ -113,6 +205,17 @@ export const QK = {
   upgradeBatch: (batchId: string) => ["upgrade", "batch", batchId] as const,
   // Stage 1 (post-Phase-3): per-case audit log for the "近期变更" drawer.
   caseRevisions: (caseId: number) => ["cases", caseId, "revisions"] as const,
+  simulationJobsForCase: (caseId: number) => ["cases", caseId, "simulation-jobs"] as const,
+  simulationQualityQueue: (params?: { status?: SimulationQualityQueueStatus; recommendation?: string | null; limit?: number }) =>
+    params && Object.keys(params).length > 0
+      ? (["simulation", "quality-queue", params] as const)
+      : (["simulation", "quality-queue"] as const),
+  aiReviewPolicy: ["simulation", "review-policy"] as const,
+  qualityReport: (params?: { limit?: number }) =>
+    params && Object.keys(params).length > 0
+      ? (["quality", "report", params] as const)
+      : (["quality", "report"] as const),
+  psImageModelOptions: ["cases", "ps-image-model-options"] as const,
   // 阶段 3: 评估台 (evaluations namespace).
   evaluationsPendingCase: ["evaluations", "pending", "case"] as const,
   evaluationsPendingRender: (brand?: string) =>
@@ -196,6 +299,148 @@ export function useCasesPage(params: CaseListParams) {
   });
 }
 
+export function useSourceBlockers(params: { reason?: "all" | SourceBlockerReason; limit?: number } = {}) {
+  return useQuery({
+    queryKey: QK.sourceBlockers(params),
+    queryFn: () => fetchSourceBlockers(params),
+    staleTime: 10_000,
+  });
+}
+
+export function useSourceBlockerAction() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (vars: {
+      caseId: number;
+      payload: { action: "mark_not_source" | "clear_not_source"; reviewer?: string | null; note?: string | null };
+    }) => applySourceBlockerAction(vars.caseId, vars.payload),
+    onSuccess: (_data, vars) => {
+      qc.invalidateQueries({ queryKey: ["cases", "source-blockers"] });
+      qc.invalidateQueries({ queryKey: QK.caseDetail(vars.caseId) });
+      qc.invalidateQueries({ queryKey: ["cases"] });
+    },
+  });
+}
+
+export function useSourceBindingCandidates(caseId: number | null | undefined, params: { limit?: number } = {}) {
+  return useQuery<SourceBindingCandidatesResponse>({
+    queryKey: caseId ? QK.sourceBindingCandidates(caseId, params) : ["cases", "_source_binding_disabled"],
+    queryFn: () => fetchSourceBindingCandidates(caseId as number, params),
+    enabled: !!caseId,
+    staleTime: 10_000,
+  });
+}
+
+export function useCaseSourceGroup(caseId: number | null | undefined) {
+  return useQuery<SourceGroupResponse>({
+    queryKey: caseId ? QK.sourceGroup(caseId) : ["cases", "_source_group_disabled"],
+    queryFn: () => fetchCaseSourceGroup(caseId as number),
+    enabled: !!caseId,
+    staleTime: 10_000,
+  });
+}
+
+export function useBindSourceDirectories() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (vars: { caseId: number; sourceCaseIds: number[]; note?: string | null }) =>
+      bindSourceDirectories(vars.caseId, {
+        source_case_ids: vars.sourceCaseIds,
+        reviewer: "source-binding-workbench",
+        note: vars.note ?? null,
+      }),
+    onSuccess: (_data, vars) => {
+      qc.invalidateQueries({ queryKey: ["cases", "source-blockers"] });
+      qc.invalidateQueries({ queryKey: QK.sourceBindingCandidates(vars.caseId) });
+      qc.invalidateQueries({ queryKey: QK.sourceGroup(vars.caseId) });
+      qc.invalidateQueries({ queryKey: QK.caseDetail(vars.caseId) });
+      qc.invalidateQueries({ queryKey: ["cases"] });
+    },
+  });
+}
+
+export function useClearSourceDirectoryBindings() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (caseId: number) => clearSourceDirectoryBindings(caseId),
+    onSuccess: (_data, caseId) => {
+      qc.invalidateQueries({ queryKey: ["cases", "source-blockers"] });
+      qc.invalidateQueries({ queryKey: QK.sourceBindingCandidates(caseId) });
+      qc.invalidateQueries({ queryKey: QK.sourceGroup(caseId) });
+      qc.invalidateQueries({ queryKey: QK.caseDetail(caseId) });
+      qc.invalidateQueries({ queryKey: ["cases"] });
+    },
+  });
+}
+
+export function useLockSourceGroupSlot() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (vars: {
+      caseId: number;
+      view: string;
+      before: { case_id: number; filename: string };
+      after: { case_id: number; filename: string };
+      reason?: string | null;
+    }) =>
+      lockSourceGroupSlot(vars.caseId, {
+        view: vars.view,
+        before: vars.before,
+        after: vars.after,
+        reviewer: "source-group-workbench",
+        reason: vars.reason ?? null,
+      }),
+    onSuccess: (_data, vars) => {
+      qc.invalidateQueries({ queryKey: QK.sourceGroup(vars.caseId) });
+      qc.invalidateQueries({ queryKey: QK.caseDetail(vars.caseId) });
+      qc.invalidateQueries({ queryKey: ["render", "case", vars.caseId] });
+      qc.invalidateQueries({ queryKey: ["render", "quality-queue"] });
+    },
+  });
+}
+
+export function useClearSourceGroupSlotLock() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (vars: { caseId: number; view: string }) => clearSourceGroupSlotLock(vars.caseId, vars.view),
+    onSuccess: (_data, vars) => {
+      qc.invalidateQueries({ queryKey: QK.sourceGroup(vars.caseId) });
+      qc.invalidateQueries({ queryKey: QK.caseDetail(vars.caseId) });
+      qc.invalidateQueries({ queryKey: ["render", "case", vars.caseId] });
+      qc.invalidateQueries({ queryKey: ["render", "quality-queue"] });
+    },
+  });
+}
+
+export function useAcceptSourceGroupWarning() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (vars: {
+      caseId: number;
+      slot: string;
+      code: string;
+      jobId?: number | null;
+      messageContains?: string | null;
+      note?: string | null;
+    }) =>
+      acceptSourceGroupWarning(vars.caseId, {
+        slot: vars.slot,
+        code: vars.code,
+        job_id: vars.jobId ?? null,
+        message_contains: vars.messageContains ?? null,
+        reviewer: "source-group-workbench",
+        note: vars.note ?? null,
+      }),
+    onSuccess: (_data, vars) => {
+      qc.invalidateQueries({ queryKey: QK.sourceGroup(vars.caseId) });
+      qc.invalidateQueries({ queryKey: QK.caseDetail(vars.caseId) });
+      qc.invalidateQueries({ queryKey: ["render", "case", vars.caseId] });
+      qc.invalidateQueries({ queryKey: ["render", "quality-queue"] });
+      qc.invalidateQueries({ queryKey: ["quality", "report"] });
+    },
+  });
+}
+
 export function useCaseDetail(id: number | null | undefined) {
   return useQuery({
     queryKey: id ? QK.caseDetail(id) : ["cases", "_disabled"],
@@ -211,6 +456,41 @@ export function useCaseRename(id: number | null | undefined) {
     queryFn: () => fetchRenameSuggestion(id as number),
     enabled: !!id,
     staleTime: 60_000,
+  });
+}
+
+export function useCaseGroups(params: { status?: string; limit?: number } = {}) {
+  return useQuery({
+    queryKey: QK.caseGroups(params),
+    queryFn: () => fetchCaseGroups(params),
+    staleTime: 10_000,
+  });
+}
+
+export function useCaseGroupDiagnosis(id: number | null | undefined) {
+  return useQuery({
+    queryKey: id ? QK.caseGroupDiagnosis(id) : ["case-groups", "_disabled"],
+    queryFn: () => fetchCaseGroupDiagnosis(id as number),
+    enabled: !!id,
+    staleTime: 10_000,
+  });
+}
+
+export function useImageWorkbenchQueue(params: {
+  status?: string;
+  phase?: string;
+  view?: string;
+  body_part?: string;
+  q?: string;
+  case_id?: number;
+  limit?: number;
+  offset?: number;
+}) {
+  return useQuery({
+    queryKey: QK.imageWorkbenchQueue(params),
+    queryFn: () => fetchImageWorkbenchQueue(params),
+    placeholderData: (prev) => prev,
+    staleTime: 5_000,
   });
 }
 
@@ -312,6 +592,259 @@ export function useUpdateImageOverride() {
       updateImageOverride(vars.caseId, vars.filename, vars.payload),
     onSuccess: (_data, vars) => {
       qc.invalidateQueries({ queryKey: QK.caseDetail(vars.caseId) });
+      qc.invalidateQueries({ queryKey: QK.sourceGroup(vars.caseId) });
+    },
+  });
+}
+
+export function useReviewCaseImage() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (vars: { caseId: number; filename: string; payload: ImageReviewPayload }) =>
+      reviewCaseImage(vars.caseId, vars.filename, vars.payload),
+    onSuccess: (data) => {
+      qc.setQueryData(QK.caseDetail(data.case_id), data.detail);
+      qc.invalidateQueries({ queryKey: QK.caseDetail(data.case_id) });
+      qc.invalidateQueries({ queryKey: QK.sourceGroup(data.case_id) });
+      qc.invalidateQueries({ queryKey: QK.caseRevisions(data.case_id) });
+      qc.invalidateQueries({ queryKey: ["cases"] });
+      qc.invalidateQueries({ queryKey: ["render", "case", data.case_id] });
+    },
+  });
+}
+
+export function useBatchUpdateImageWorkbench() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (payload: ImageWorkbenchBatchPayload) => batchUpdateImageWorkbench(payload),
+    onSuccess: (_data, payload) => {
+      qc.invalidateQueries({ queryKey: ["image-workbench"] });
+      qc.invalidateQueries({ queryKey: ["case-groups"] });
+      qc.invalidateQueries({ queryKey: ["cases"] });
+      qc.invalidateQueries({ queryKey: ["render"] });
+      for (const caseId of new Set(payload.items.map((item) => item.case_id))) {
+        qc.invalidateQueries({ queryKey: QK.caseDetail(caseId) });
+        qc.invalidateQueries({ queryKey: QK.sourceGroup(caseId) });
+      }
+    },
+  });
+}
+
+export function useConfirmImageWorkbenchSuggestions() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (payload: ImageWorkbenchConfirmSuggestionsPayload) => confirmImageWorkbenchSuggestions(payload),
+    onSuccess: (_data, payload) => {
+      qc.invalidateQueries({ queryKey: ["image-workbench"] });
+      qc.invalidateQueries({ queryKey: ["case-groups"] });
+      qc.invalidateQueries({ queryKey: ["cases"] });
+      qc.invalidateQueries({ queryKey: ["render"] });
+      for (const caseId of new Set(payload.items.map((item) => item.case_id))) {
+        qc.invalidateQueries({ queryKey: QK.caseDetail(caseId) });
+        qc.invalidateQueries({ queryKey: QK.sourceGroup(caseId) });
+      }
+    },
+  });
+}
+
+export function useTransferImageWorkbenchImages() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (payload: ImageWorkbenchTransferPayload) => transferImageWorkbenchImages(payload),
+    onSuccess: (_data, vars) => {
+      qc.invalidateQueries({ queryKey: ["image-workbench"] });
+      qc.invalidateQueries({ queryKey: ["case-groups"] });
+      qc.invalidateQueries({ queryKey: ["cases"] });
+      qc.invalidateQueries({ queryKey: QK.caseDetail(vars.target_case_id) });
+      qc.invalidateQueries({ queryKey: QK.sourceGroup(vars.target_case_id) });
+      for (const item of vars.items) {
+        qc.invalidateQueries({ queryKey: QK.caseDetail(item.case_id) });
+        qc.invalidateQueries({ queryKey: QK.sourceGroup(item.case_id) });
+      }
+    },
+  });
+}
+
+export function useSupplementCandidates(
+  caseId: number | null,
+  opts: { enabled?: boolean; limitPerGap?: number } = {},
+) {
+  const params = { limit_per_gap: opts.limitPerGap ?? 8 };
+  return useQuery<SupplementCandidatesResponse>({
+    queryKey: caseId ? QK.supplementCandidates(caseId, params) : ["image-workbench", "supplement-candidates", "none"],
+    queryFn: () => fetchSupplementCandidates(caseId as number, params),
+    enabled: Boolean(caseId && (opts.enabled ?? true)),
+    staleTime: 10_000,
+  });
+}
+
+export function usePrepareManualRenderSources() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (vars: { caseId: number; payload: ManualRenderSourcesPayload }) =>
+      prepareManualRenderSources(vars.caseId, vars.payload),
+    onSuccess: (data) => {
+      qc.setQueryData(QK.caseDetail(data.case_id), data.detail);
+      qc.invalidateQueries({ queryKey: QK.caseDetail(data.case_id) });
+      qc.invalidateQueries({ queryKey: ["cases"] });
+      qc.invalidateQueries({ queryKey: QK.stats });
+    },
+  });
+}
+
+export function usePreviewManualRender() {
+  return useMutation({
+    mutationFn: (vars: { caseId: number; payload: ManualRenderPreviewPayload }) =>
+      previewManualRender(vars.caseId, vars.payload),
+  });
+}
+
+export function useTrashCaseImage() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (vars: { caseId: number; filename: string }) =>
+      trashCaseImage(vars.caseId, vars.filename),
+    onSuccess: (data) => {
+      qc.setQueryData(QK.caseDetail(data.case_id), data.detail);
+      qc.invalidateQueries({ queryKey: QK.caseDetail(data.case_id) });
+      qc.invalidateQueries({ queryKey: ["cases"] });
+      qc.invalidateQueries({ queryKey: QK.stats });
+    },
+  });
+}
+
+export function useRestoreCaseImage() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (vars: { caseId: number; trashPath: string; restoreTo?: string | null }) =>
+      restoreCaseImage(vars.caseId, { trash_path: vars.trashPath, restore_to: vars.restoreTo ?? null }),
+    onSuccess: (data) => {
+      qc.setQueryData(QK.caseDetail(data.case_id), data.detail);
+      qc.invalidateQueries({ queryKey: QK.caseDetail(data.case_id) });
+      qc.invalidateQueries({ queryKey: ["cases"] });
+      qc.invalidateQueries({ queryKey: QK.stats });
+    },
+  });
+}
+
+export function useTrashCases() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (vars: { caseIds: number[]; reason?: string | null }) =>
+      trashCases(vars.caseIds, vars.reason ?? null),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["cases"] });
+      qc.invalidateQueries({ queryKey: QK.stats });
+      qc.invalidateQueries({ queryKey: ["customers"] });
+      qc.invalidateQueries({ queryKey: ["case-groups"] });
+    },
+  });
+}
+
+export function useSimulateCaseAfter() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (vars: { caseId: number; payload: SimulateAfterPayload }) =>
+      simulateCaseAfter(vars.caseId, vars.payload),
+    onSuccess: (_data, vars) => {
+      qc.invalidateQueries({ queryKey: QK.caseDetail(vars.caseId) });
+      qc.invalidateQueries({ queryKey: QK.simulationJobsForCase(vars.caseId) });
+      qc.invalidateQueries({ queryKey: ["simulation", "quality-queue"] });
+    },
+  });
+}
+
+export function usePsImageModelOptions() {
+  return useQuery({
+    queryKey: QK.psImageModelOptions,
+    queryFn: fetchPsImageModelOptions,
+    staleTime: 60_000,
+  });
+}
+
+export function useCaseSimulationJobs(caseId: number | null | undefined, limit = 10) {
+  return useQuery({
+    queryKey: caseId ? QK.simulationJobsForCase(caseId) : ["cases", "_simulation_jobs_disabled"],
+    queryFn: () => fetchCaseSimulationJobs(caseId as number, limit),
+    enabled: !!caseId,
+    staleTime: 5_000,
+  });
+}
+
+export function useReviewSimulationJob() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (vars: {
+      caseId: number;
+      jobId: number;
+      payload: { verdict: "approved" | "needs_recheck" | "rejected"; reviewer: string; note?: string | null };
+    }) => reviewSimulationJob(vars.caseId, vars.jobId, vars.payload),
+    onSuccess: (data: SimulationJob, vars) => {
+      qc.invalidateQueries({ queryKey: QK.simulationJobsForCase(vars.caseId) });
+      qc.invalidateQueries({ queryKey: QK.caseDetail(vars.caseId) });
+      qc.invalidateQueries({ queryKey: ["simulation", "quality-queue"] });
+      qc.setQueryData<SimulationJob[] | undefined>(QK.simulationJobsForCase(vars.caseId), (old) =>
+        old?.map((job) => (job.id === data.id ? data : job)),
+      );
+    },
+  });
+}
+
+export function useSimulationQualityQueue(params: { status?: SimulationQualityQueueStatus; recommendation?: string | null; limit?: number }) {
+  return useQuery({
+    queryKey: QK.simulationQualityQueue(params),
+    queryFn: () => fetchSimulationQualityQueue(params),
+    staleTime: 5_000,
+  });
+}
+
+export function useAiReviewPolicy() {
+  return useQuery({
+    queryKey: QK.aiReviewPolicy,
+    queryFn: fetchAiReviewPolicy,
+    staleTime: 30_000,
+  });
+}
+
+export function useQualityReport(params: { limit?: number } = {}) {
+  return useQuery({
+    queryKey: QK.qualityReport(params),
+    queryFn: () => fetchQualityReport(params),
+    staleTime: 5_000,
+  });
+}
+
+export function usePreviewAiReviewPolicy() {
+  return useMutation<AiReviewPolicyPreview, Error, Partial<AiReviewPolicy>>({
+    mutationFn: (payload: Partial<AiReviewPolicy>) => previewAiReviewPolicy(payload, { limit: 500 }),
+  });
+}
+
+export function useUpdateAiReviewPolicy() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (payload: Partial<AiReviewPolicy>) => updateAiReviewPolicy(payload),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: QK.aiReviewPolicy });
+      qc.invalidateQueries({ queryKey: ["simulation", "quality-queue"] });
+      qc.invalidateQueries({ queryKey: ["quality", "report"] });
+    },
+  });
+}
+
+export function useReviewSimulationJobById() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (vars: {
+      jobId: number;
+      payload: { verdict: "approved" | "needs_recheck" | "rejected"; reviewer: string; note?: string | null };
+    }) => reviewSimulationJobById(vars.jobId, vars.payload),
+    onSuccess: (data: SimulationJob) => {
+      qc.invalidateQueries({ queryKey: ["simulation", "quality-queue"] });
+      if (data.case_id) {
+        qc.invalidateQueries({ queryKey: QK.simulationJobsForCase(data.case_id) });
+        qc.invalidateQueries({ queryKey: QK.caseDetail(data.case_id) });
+      }
     },
   });
 }
@@ -365,6 +898,7 @@ export function useRescanCase() {
     onSuccess: (_data, caseId) => {
       qc.invalidateQueries({ queryKey: QK.caseDetail(caseId) });
       qc.invalidateQueries({ queryKey: ["cases"] });
+      qc.invalidateQueries({ queryKey: ["cases", "source-blockers"] });
       qc.invalidateQueries({ queryKey: QK.stats });
       // Rescan IS the kind of thing you might want to undo (if scanner now
       // judges differently than what user manually edited). Open undo window.
@@ -386,6 +920,60 @@ export function useTriggerScan() {
       qc.invalidateQueries({ queryKey: ["cases"] });
       qc.invalidateQueries({ queryKey: QK.stats });
     },
+  });
+}
+
+export function useRescanCaseGroups() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: rescanCaseGroups,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["case-groups"] });
+      qc.invalidateQueries({ queryKey: ["cases"] });
+    },
+  });
+}
+
+export function useConfirmCaseGroup() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (vars: {
+      groupId: number;
+      payload: { status?: string; category?: string | null; template_tier?: string | null; note?: string | null };
+    }) => confirmCaseGroupClassification(vars.groupId, vars.payload),
+    onSuccess: (data: CaseGroupDiagnosis) => {
+      qc.setQueryData(QK.caseGroupDiagnosis(data.group.id), data);
+      qc.invalidateQueries({ queryKey: ["case-groups"] });
+      qc.invalidateQueries({ queryKey: ["cases"] });
+    },
+  });
+}
+
+export function useRenderCaseGroup() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (vars: { groupId: number; payload?: EnqueueRenderPayload }) =>
+      renderCaseGroup(vars.groupId, vars.payload || {}),
+    onSuccess: (data) => {
+      qc.invalidateQueries({ queryKey: QK.renderLatestForCase(data.case_id) });
+      qc.invalidateQueries({ queryKey: QK.renderJobsForCase(data.case_id) });
+      qc.invalidateQueries({ queryKey: ["case-groups"] });
+    },
+  });
+}
+
+export function useSimulateCaseGroupAfter() {
+  return useMutation({
+    mutationFn: (vars: {
+      groupId: number;
+      payload: {
+        focus_targets: string[];
+        ai_generation_authorized: boolean;
+        provider?: string | null;
+        model_name?: string | null;
+        note?: string | null;
+      };
+    }) => simulateCaseGroupAfter(vars.groupId, vars.payload),
   });
 }
 
@@ -468,6 +1056,13 @@ export function useCancelRenderJob() {
       qc.invalidateQueries({ queryKey: ["render", "case"] });
       qc.invalidateQueries({ queryKey: ["render", "batch"] });
     },
+  });
+}
+
+export function useRevealCasePath() {
+  return useMutation({
+    mutationFn: (vars: { caseId: number; payload: CaseRevealPayload }) =>
+      revealCasePath(vars.caseId, vars.payload),
   });
 }
 
@@ -557,6 +1152,30 @@ export function useRenderJob(jobId: number | null | undefined) {
   });
 }
 
+export function useRenderQualityQueue(params: { status?: RenderQualityQueueStatus; limit?: number }) {
+  return useQuery({
+    queryKey: QK.renderQualityQueue(params),
+    queryFn: () => fetchRenderQualityQueue(params),
+    staleTime: 5_000,
+  });
+}
+
+export function useReviewRenderQuality() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (vars: {
+      jobId: number;
+      payload: { verdict: "approved" | "needs_recheck" | "rejected"; reviewer: string; note?: string | null; can_publish?: boolean };
+    }) => reviewRenderQuality(vars.jobId, vars.payload),
+    onSuccess: (data) => {
+      qc.invalidateQueries({ queryKey: ["render", "quality-queue"] });
+      qc.invalidateQueries({ queryKey: QK.renderJob(data.render_job_id) });
+      qc.invalidateQueries({ queryKey: ["render", "case"] });
+      qc.invalidateQueries({ queryKey: ["cases"] });
+    },
+  });
+}
+
 export function useRenderBatch(batchId: string | null | undefined) {
   return useQuery({
     queryKey: batchId ? QK.renderBatch(batchId) : ["render", "_batch_disabled"],
@@ -610,7 +1229,7 @@ export function useJobStream(opts?: {
         if (parsed.case_id != null) {
           qc.invalidateQueries({ queryKey: QK.renderLatestForCase(parsed.case_id) });
           qc.invalidateQueries({ queryKey: QK.renderJobsForCase(parsed.case_id) });
-          if (parsed.status === "done" || parsed.status === "undone") {
+          if (["done", "done_with_issues", "blocked", "undone"].includes(String(parsed.status))) {
             qc.invalidateQueries({ queryKey: ["cases"] });
           }
         }

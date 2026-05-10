@@ -1,0 +1,54 @@
+{
+  "header": {
+    "title": "源目录阻断",
+    "subtitle": "真实案例源目录、源图不足和术前术后配对阻断队列",
+    "refresh": "刷新",
+    "refreshing": "刷新中…"
+  },
+  "reasons": {
+    "all": "全部阻断",
+    "no_real_source_photos": "不是源目录",
+    "insufficient_source_photos": "源图不足",
+    "missing_before_after_pair": "缺术前/术后"
+  },
+  "counts": {
+    "markedNotSource": "已素材归档 {{n}}"
+  },
+  "states": {
+    "loading": "加载中…",
+    "loadError": "阻断队列加载失败",
+    "empty": "当前筛选下没有源目录阻断"
+  },
+  "profile": {
+    "line": "源图 {{source}} / 生成图 {{generated}} / 术前 {{before}} / 术后 {{after}} / 未标注 {{unlabeled}}"
+  },
+  "badge": {
+    "markedNotSource": "已素材归档"
+  },
+  "row": {
+    "boundLabel": "已绑定源目录：",
+    "boundJoin": "、"
+  },
+  "actions": {
+    "detail": "详情",
+    "rescan": "复跑预检",
+    "markNotSource": "素材归档",
+    "clearNotSource": "待检查",
+    "clearBinding": "清绑定"
+  },
+  "prompts": {
+    "markNotSourceTitle": "处理备注",
+    "markNotSourceDefault": "确认该目录为成品图/海报/素材集合，不进入正式出图",
+    "confirmClearNotSource": "恢复 case {{id}} 为待检查？",
+    "confirmBind": "绑定 case {{caseId}} 与 case {{candidateId}}？\n\n{{reasons}}",
+    "confirmClearBinding": "清除 case {{id}} 的源目录绑定？"
+  },
+  "binding": {
+    "loading": "查找兄弟目录…",
+    "empty": "暂无可绑定兄弟目录",
+    "bind": "绑定",
+    "alreadyBound": "已绑定",
+    "mergedPrefix": "合并后：",
+    "reasonsJoin": " / "
+  }
+}

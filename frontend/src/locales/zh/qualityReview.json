@@ -1,0 +1,288 @@
+{
+  "header": {
+    "title": "生成质检",
+    "subtitle": "正式出图和 AI 术后增强统一审核入口，状态与发布资格分开记录",
+    "refresh": "刷新",
+    "refreshing": "刷新中…"
+  },
+  "kindTabs": {
+    "render": "正式出图",
+    "simulation": "AI 增强"
+  },
+  "renderFilters": {
+    "review_required": "待质检",
+    "done_with_issues": "需复核",
+    "blocked": "阻塞",
+    "failed": "失败",
+    "reviewed": "已审核",
+    "all": "全部"
+  },
+  "simFilters": {
+    "review_required": "待质检",
+    "done_with_issues": "需复核",
+    "failed": "失败",
+    "approved": "已通过",
+    "reviewed": "已审核",
+    "all": "全部"
+  },
+  "statuses": {
+    "done": "通过",
+    "done_with_issues": "需复核",
+    "blocked": "阻塞",
+    "failed": "失败",
+    "approved": "已通过",
+    "needs_recheck": "需复检",
+    "rejected": "已拒绝"
+  },
+  "recommendations": {
+    "approved": "通过候选",
+    "needs_recheck": "需复核",
+    "rejected": "建议拒绝",
+    "manual_override": "人工覆盖",
+    "aligned": "人机一致",
+    "unknown": "未知",
+    "all": "全部"
+  },
+  "policyThresholds": {
+    "approve_full_max": "通过：全图变化上限",
+    "approve_non_target_max": "通过：框外变化上限",
+    "approve_p95_max": "通过：P95 上限",
+    "approve_changed_ratio_max": "通过：8%+ 像素占比上限",
+    "approve_target_min": "通过：目标区变化下限",
+    "reject_full_min": "拒绝：全图变化下限",
+    "reject_non_target_min": "拒绝：框外变化下限",
+    "reject_p95_min": "拒绝：P95 下限",
+    "reject_changed_ratio_min": "拒绝：8%+ 像素占比下限"
+  },
+  "summaryBadges": {
+    "needsReview": "需复核 {{count}}",
+    "blocked": "阻塞 {{count}}",
+    "failed": "失败 {{count}}",
+    "reviewed": "已审核 {{count}}",
+    "archived": "历史归档 {{count}}",
+    "approved": "已通过 {{count}}"
+  },
+  "summary": {
+    "renderActiveIssues": "正式出图当前有效问题 {{total}} 条，历史归档 {{archived}} 条，按失败、阻塞、需复核优先排序",
+    "simByRecommendation": "AI 增强队列 {{total}} 条，按系统建议筛选：{{label}}",
+    "simDefault": "AI 增强队列 {{total}} 条，审核结果不会混入真实正式出图"
+  },
+  "recommendationFilter": {
+    "label": "系统建议筛选：{{label}}",
+    "clear": "清除筛选"
+  },
+  "messages": {
+    "renderRecorded": "正式出图 job #{{id}} 已记录：{{status}}",
+    "simRecorded": "AI 增强 job #{{id}} 已记录：{{status}}",
+    "policySaved": "AI 审核策略已保存：{{name}} v{{version}}",
+    "policyPreviewDone": "策略预览完成：{{count}} 个 AI 任务建议会变化",
+    "drillRender": "已下钻到正式出图：{{label}}",
+    "drillSim": "已下钻到 AI 系统建议：{{label}}",
+    "drillSimReviewQueue": "已下钻到 AI 增强待审核队列",
+    "operationFailed": "操作失败"
+  },
+  "prompts": {
+    "approveNote": "审核备注，可留空",
+    "needsRecheckNote": "填写需要复检的原因",
+    "rejectNote": "填写拒绝原因",
+    "approveSimNote": "AI 增强审核备注，可留空"
+  },
+  "report": {
+    "loading": "加载统一质检报表中…",
+    "loadError": "统一质检报表加载失败",
+    "title": "统一质检报表",
+    "metaPrefix": "交付基线优先",
+    "metaPolicy": "策略 {{name}} v{{version}}",
+    "metaCommitUnknown": "unknown",
+    "metaDirty": "工作区 {{count}} 个改动",
+    "metaArchived": "历史归档 {{count}}",
+    "refresh": "刷新报表",
+    "refreshing": "刷新中…",
+    "metricNa": "—",
+    "metrics": {
+      "deliverySample": "交付样本",
+      "currentLatest": "当前 latest case",
+      "rendererSuccess": "renderer 成功率",
+      "rendererFailed": "renderer 失败率",
+      "currentCleanDone": "当前 clean done",
+      "currentDoneWithIssues": "当前 done_with_issues",
+      "currentPublishRate": "当前发布率",
+      "finalBoardVisible": "成品可见率",
+      "classificationRate": "分类完成率",
+      "blockedGuardrail": "blocked 保护",
+      "rendererFailedCount": "renderer failed",
+      "currentReviewRequired": "当前待质检",
+      "currentActionable": "当前行动项",
+      "totalArtifacts": "总产物",
+      "reviewed": "已审核",
+      "publishable": "可发布/可用",
+      "notPublishable": "不可发布/待处理",
+      "renderAvgScore": "正式平均分",
+      "simAvgNonTarget": "AI 框外均值"
+    },
+    "classificationBadges": {
+      "sourceImages": "真实源图 {{count}}",
+      "classified": "已分类 {{count}}",
+      "needsManual": "待补 {{count}}",
+      "lowConfidence": "低置信 {{count}}"
+    },
+    "rootCausesTitle": "当前 root cause 排行",
+    "renderSection": "正式出图",
+    "simSection": "AI 增强",
+    "drillRender": {
+      "done": "通过",
+      "done_with_issues": "需复核",
+      "blocked": "阻塞",
+      "failed": "失败"
+    },
+    "drillSim": {
+      "approved": "通过候选",
+      "needs_recheck": "需复核",
+      "rejected": "建议拒绝",
+      "manual_override": "人工覆盖"
+    }
+  },
+  "rootCause": {
+    "units": {
+      "image": "张",
+      "case": "个 case",
+      "default": "项"
+    },
+    "jobImpact": "影响当前最新 job {{count}} 项",
+    "caseTag": "case {{id}}",
+    "jobTag": "job {{id}}"
+  },
+  "blockerQueue": {
+    "loading": "加载分类阻断处理队列中…",
+    "title": "分类阻断处理队列",
+    "viewAll": "查看全部",
+    "caseTitle": "case #{{id}} · {{title}}",
+    "untitled": "未命名 case",
+    "ready": "ready {{score}}",
+    "needsManual": "待补 {{count}}",
+    "missingPhase": "缺阶段 {{count}}",
+    "missingView": "缺角 {{count}}",
+    "lowConfidence": "低信 {{count}}",
+    "safeConfirm": "安全确认 {{count}}",
+    "missingSlot": "{{label}}缺{{roles}}",
+    "missingJoin": " · ",
+    "rolesJoin": "/",
+    "actionFixSource": "修源目录",
+    "actionFixBlocker": "处理阻断图",
+    "viewPreflight": "看预检"
+  },
+  "roles": {
+    "before": "术前",
+    "after": "术后"
+  },
+  "policyPanel": {
+    "loading": "加载 AI 审核策略中…",
+    "loadError": "AI 审核策略加载失败",
+    "title": "AI 增强审核策略",
+    "defaultUpdated": "默认策略",
+    "preview": "预览影响",
+    "previewing": "预览中…",
+    "save": "保存策略",
+    "saving": "保存中…",
+    "metaSeparator": " · "
+  },
+  "policyPreview": {
+    "title": "策略回放结果",
+    "subtitle": "只读预览 {{total}} 个 AI 增强任务，不保存、不改审核状态",
+    "changed": "变化 {{count}}",
+    "manualOverride": "人工覆盖 {{count}}",
+    "newConflict": "新冲突 {{count}}",
+    "approved": "候选通过 {{count}}",
+    "needsRecheck": "需复核 {{count}}",
+    "rejected": "建议拒绝 {{count}}",
+    "transitionValue": "{{from}} → {{to}} {{count}}",
+    "itemTitle": "AI job #{{id}}",
+    "itemMeta": " · {{customer}} · 人工 {{reviewStatus}}",
+    "unboundCustomer": "未绑定客户",
+    "unreviewed": "未审核",
+    "verdictTransition": "{{from}} → {{to}}"
+  },
+  "renderQueue": {
+    "loading": "加载正式出图质检队列中…",
+    "loadError": "正式出图质检队列加载失败",
+    "empty": "当前筛选下没有需要处理的正式出图产物"
+  },
+  "simQueue": {
+    "loading": "加载 AI 增强质检队列中…",
+    "loadError": "AI 增强质检队列加载失败",
+    "empty": "当前筛选下没有需要处理的 AI 增强产物"
+  },
+  "case": {
+    "unbound": "未绑定案例"
+  },
+  "renderItem": {
+    "brandTemplate": "{{brand}} · {{template}}",
+    "publishable": "可发布",
+    "notPublishable": "不可发布",
+    "reviewBadge": "审核 {{status}}",
+    "customer": "客户：{{name}}",
+    "customerUnbound": "未绑定",
+    "renderJob": "正式出图 job #{{id}}",
+    "noFinishedAt": "未完成时间",
+    "selected": "入选 {{slots}}",
+    "selectedJoin": " / ",
+    "dropped": "降级 {{count}} 槽",
+    "manifestAudit": "manifest 审计",
+    "actionTag": "处理：{{label}}",
+    "fixSlot": "处理 {{slot}}",
+    "slotLabels": {
+      "front": "正面",
+      "oblique": "45°",
+      "side": "侧面"
+    },
+    "approveTitleNoOutput": "没有可审核成品图，需先重新出图"
+  },
+  "simItem": {
+    "watermarked": "已水印",
+    "noWatermark": "无水印",
+    "publishable": "AI审核可用",
+    "notPublishable": "不可发布",
+    "decisionPlaceholder": "待系统建议",
+    "diff": "变化 {{full}} / 框外 {{nonTarget}}",
+    "customer": "客户：{{name}}",
+    "customerUnbound": "未绑定",
+    "simJob": "AI job #{{id}}",
+    "focus": "目标：{{focus}}",
+    "focusFallback": "框选区域",
+    "focusJoin": "，",
+    "diffLine": "目标：{{target}} / 全脸：{{full}} / 框外：{{nonTarget}}{{p95}}{{ratio}}",
+    "diffP95": " / P95：{{p95}}",
+    "diffRatio": " / 8%+：{{ratio}}%",
+    "diffNa": "—",
+    "standalone": "独立 AI 增强任务",
+    "approveTitleNoApprove": "AI 增强图需要有成品图、水印、框选区域，并且没有硬性拒绝项",
+    "kindBadge": "AI 增强"
+  },
+  "simulationFiles": {
+    "noFiles": "没有可展示的 AI 任务图片；请检查任务输出文件或重新生成",
+    "labels": {
+      "original_after": "原术后",
+      "ai_after_simulation": "AI 增强",
+      "difference_heatmap": "差异热区",
+      "controlled_policy_comparison": "对比图",
+      "before_reference": "术前参考"
+    }
+  },
+  "preview": {
+    "loadFailed": "加载失败",
+    "imageLoadFailed": "图片加载失败",
+    "noOutput": "无成品图",
+    "noAiOutput": "AI 图不可见"
+  },
+  "actions": {
+    "openCase": "打开案例",
+    "noCase": "无案例",
+    "approve": "通过",
+    "recheck": "复检",
+    "reject": "拒绝"
+  },
+  "modelDefault": "PS model-router",
+  "errors": {
+    "operationFailed": "操作失败"
+  }
+}

@@ -340,6 +340,8 @@ function StatusPill({ status }: { status: AnyStatus }) {
     queued: { bg: "var(--bg-2)", fg: "var(--ink-2)" },
     running: { bg: "var(--cyan-50, #ECFEFF)", fg: "var(--cyan-ink, #0E7490)" },
     done: { bg: "var(--ok-50, #DCFCE7)", fg: "var(--ok)" },
+    done_with_issues: { bg: "var(--amber-50)", fg: "var(--amber-ink)" },
+    blocked: { bg: "var(--err-50)", fg: "var(--err)" },
     failed: { bg: "var(--err-50)", fg: "var(--err)" },
     cancelled: { bg: "var(--bg-2)", fg: "var(--ink-3)" },
     undone: { bg: "var(--bg-2)", fg: "var(--ink-3)" },
@@ -382,8 +384,8 @@ function RenderJobRow({
   onEvaluate: () => void;
 }) {
   const { t } = useTranslation("jobBatch");
-  const previewUrl =
-    job.status === "done" ? renderOutputUrl(job.case_id, job.brand, job.template) : null;
+  const isRenderable = job.status === "done" || job.status === "done_with_issues";
+  const previewUrl = isRenderable ? renderOutputUrl(job.case_id, job.brand, job.template) : null;
   const elapsed = formatDuration(job.started_at, job.finished_at);
   return (
     <tr style={{ borderBottom: "1px solid var(--line-2)" }}>
@@ -422,7 +424,7 @@ function RenderJobRow({
               }}
             />
           </a>
-        ) : job.status === "failed" ? (
+        ) : job.status === "failed" || job.status === "blocked" ? (
           <span
             style={{
               fontFamily: "var(--mono)",
@@ -453,7 +455,7 @@ function RenderJobRow({
               {t("row.cancel")}
             </button>
           )}
-          {job.status === "done" && (
+          {isRenderable && (
             <button
               className="btn sm ghost"
               onClick={onEvaluate}

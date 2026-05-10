@@ -13,6 +13,10 @@ import caseDetail from "../locales/zh/caseDetail.json";
 import importCsv from "../locales/zh/importCsv.json";
 import hotkeys from "../locales/zh/hotkeys.json";
 import renderHistory from "../locales/zh/renderHistory.json";
+import caseGroups from "../locales/zh/caseGroups.json";
+import imageWorkbench from "../locales/zh/imageWorkbench.json";
+import qualityReview from "../locales/zh/qualityReview.json";
+import sourceBlockers from "../locales/zh/sourceBlockers.json";
 
 declare module "i18next" {
   interface CustomTypeOptions {
@@ -32,6 +36,10 @@ declare module "i18next" {
       importCsv: typeof importCsv;
       hotkeys: typeof hotkeys;
       renderHistory: typeof renderHistory;
+      caseGroups: typeof caseGroups;
+      imageWorkbench: typeof imageWorkbench;
+      qualityReview: typeof qualityReview;
+      sourceBlockers: typeof sourceBlockers;
     };
   }
 }

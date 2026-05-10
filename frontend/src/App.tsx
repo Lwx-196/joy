@@ -6,11 +6,15 @@ import { UndoToast } from "./lib/undo-toast";
 import { BatchJobToast } from "./lib/batch-job-toast";
 
 const Cases = lazy(() => import("./pages/Cases"));
+const CaseGroups = lazy(() => import("./pages/CaseGroups"));
+const ImageWorkbench = lazy(() => import("./pages/ImageWorkbench"));
+const SourceBlockers = lazy(() => import("./pages/SourceBlockers"));
 const CaseDetail = lazy(() => import("./pages/CaseDetail"));
 const Customers = lazy(() => import("./pages/Customers"));
 const CustomerDetail = lazy(() => import("./pages/CustomerDetail"));
 const Dict = lazy(() => import("./pages/Dict"));
 const Evaluations = lazy(() => import("./pages/Evaluations"));
+const QualityReview = lazy(() => import("./pages/QualityReview"));
 const JobBatch = lazy(() => import("./pages/JobBatch"));
 
 /** Permanent redirect from the legacy /render/batches/:batchId path to the
@@ -28,11 +32,15 @@ export default function App() {
         <Route element={<Layout />}>
           <Route index element={<Dashboard />} />
           <Route path="cases" element={<Cases />} />
+          <Route path="images" element={<ImageWorkbench />} />
+          <Route path="source-blockers" element={<SourceBlockers />} />
+          <Route path="case-groups" element={<CaseGroups />} />
           <Route path="cases/:id" element={<CaseDetail />} />
           <Route path="customers" element={<Customers />} />
           <Route path="customers/:id" element={<CustomerDetail />} />
           <Route path="dict" element={<Dict />} />
           <Route path="evaluations" element={<Evaluations />} />
+          <Route path="quality" element={<QualityReview />} />
           <Route path="jobs/batches/:batchId" element={<JobBatch />} />
           <Route
             path="render/batches/:batchId"

@@ -15,6 +15,10 @@ import zhCaseDetail from "../locales/zh/caseDetail.json";
 import zhImportCsv from "../locales/zh/importCsv.json";
 import zhHotkeys from "../locales/zh/hotkeys.json";
 import zhRenderHistory from "../locales/zh/renderHistory.json";
+import zhCaseGroups from "../locales/zh/caseGroups.json";
+import zhImageWorkbench from "../locales/zh/imageWorkbench.json";
+import zhQualityReview from "../locales/zh/qualityReview.json";
+import zhSourceBlockers from "../locales/zh/sourceBlockers.json";
 import enCommon from "../locales/en/common.json";
 import enCustomers from "../locales/en/customers.json";
 import enRender from "../locales/en/render.json";
@@ -29,6 +33,10 @@ import enCaseDetail from "../locales/en/caseDetail.json";
 import enImportCsv from "../locales/en/importCsv.json";
 import enHotkeys from "../locales/en/hotkeys.json";
 import enRenderHistory from "../locales/en/renderHistory.json";
+import enCaseGroups from "../locales/en/caseGroups.json";
+import enImageWorkbench from "../locales/en/imageWorkbench.json";
+import enQualityReview from "../locales/en/qualityReview.json";
+import enSourceBlockers from "../locales/en/sourceBlockers.json";
 
 void i18n
   .use(LanguageDetector)
@@ -50,6 +58,10 @@ void i18n
         importCsv: zhImportCsv,
         hotkeys: zhHotkeys,
         renderHistory: zhRenderHistory,
+        caseGroups: zhCaseGroups,
+        imageWorkbench: zhImageWorkbench,
+        qualityReview: zhQualityReview,
+        sourceBlockers: zhSourceBlockers,
       },
       en: {
         common: enCommon,
@@ -66,12 +78,16 @@ void i18n
         importCsv: enImportCsv,
         hotkeys: enHotkeys,
         renderHistory: enRenderHistory,
+        caseGroups: enCaseGroups,
+        imageWorkbench: enImageWorkbench,
+        qualityReview: enQualityReview,
+        sourceBlockers: enSourceBlockers,
       },
     },
     fallbackLng: "zh",
     supportedLngs: ["zh", "en"],
     defaultNS: "common",
-    ns: ["common", "customers", "render", "revisions", "customerDetail", "evaluations", "dict", "jobBatch", "dashboard", "cases", "caseDetail", "importCsv", "hotkeys", "renderHistory"],
+    ns: ["common", "customers", "render", "revisions", "customerDetail", "evaluations", "dict", "jobBatch", "dashboard", "cases", "caseDetail", "importCsv", "hotkeys", "renderHistory", "caseGroups", "imageWorkbench", "qualityReview", "sourceBlockers"],
     interpolation: { escapeValue: false },
     react: { useSuspense: false },
     detection: {

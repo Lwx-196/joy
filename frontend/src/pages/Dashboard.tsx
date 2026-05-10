@@ -89,7 +89,7 @@ export default function Dashboard() {
     batchRenderMut.mutate(
       {
         caseIds: target.map((c) => c.id),
-        payload: { brand, template: "tri-compare", semantic_judge: "off" },
+        payload: { brand, template: "tri-compare", semantic_judge: "auto" },
       },
       {
         onSuccess: (data) => {

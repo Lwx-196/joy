@@ -2,14 +2,18 @@
   "nav": {
     "overview": "Overview",
     "cases": "Cases",
+    "caseGroups": "Organize",
+    "sourceBlockers": "Blockers",
     "customers": "Customers",
     "evaluations": "Evaluations",
-    "dict": "Customer Dictionary"
+    "quality": "QA",
+    "dict": "Customer Dictionary",
+    "images": "Images"
   },
   "brand": {
     "title": "Case Workbench",
     "phase": "Phase 1 · Local Index",
-    "selectorTitle": "Switch render brand (affects upgrade-to-v3 / final render)",
+    "selectorTitle": "Switch the final render brand: controls the brand template, logo, and .case-layout-output/<brand>/ archive directory. Source images are not changed.",
     "selectorLabel": "Brand"
   },
   "search": {

@@ -21,6 +21,8 @@
     "queued": "Queued",
     "running": "Running",
     "done": "Done",
+    "done_with_issues": "Needs review",
+    "blocked": "Quality blocked",
     "failed": "Failed",
     "cancelled": "Cancelled",
     "undone": "Undone"
@@ -39,6 +41,8 @@
     "queued": "Queued",
     "running": "Running",
     "done": "Done",
+    "done_with_issues": "Done with issues",
+    "blocked": "Quality blocked",
     "failed": "Failed",
     "cancelled": "Cancelled",
     "undone": "Undone"

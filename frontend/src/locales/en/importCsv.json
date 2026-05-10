@@ -20,7 +20,10 @@
   "previewTitle": "Validation done — valid {{valid}} / invalid {{invalid}}",
   "reason": {
     "case_not_found": "case not found",
-    "duplicate_in_batch": "duplicate in batch"
+    "duplicate_in_batch": "duplicate in batch",
+    "no_real_source_photos": "not a source-photo folder",
+    "insufficient_source_photos": "not enough source photos",
+    "missing_before_after_pair": "missing before/after pair"
   },
   "cancel": "Cancel",
   "validate": "Validate ({{n}})",
