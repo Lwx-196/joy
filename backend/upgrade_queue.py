@@ -99,7 +99,7 @@ class UpgradeQueue:
             raise ValueError("brand required")
         with db.connect() as conn:
             row = conn.execute(
-                "SELECT id FROM cases WHERE id = ?", (case_id,)
+                "SELECT id FROM cases WHERE id = ? AND trashed_at IS NULL", (case_id,)
             ).fetchone()
             if not row:
                 raise ValueError(f"case {case_id} not found")

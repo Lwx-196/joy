@@ -58,6 +58,29 @@ if spec is None or spec.loader is None:
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 
+def _is_workbench_generated_path(path):
+    return any(str(part).startswith(".case-workbench-") for part in Path(path).parts)
+
+if hasattr(module, "is_image_file"):
+    _original_is_image_file = module.is_image_file
+
+    def _is_image_file_without_workbench_outputs(path):
+        if _is_workbench_generated_path(Path(path)):
+            return False
+        return _original_is_image_file(path)
+
+    module.is_image_file = _is_image_file_without_workbench_outputs
+
+if hasattr(module, "is_generated_case_layout_path"):
+    _original_is_generated_case_layout_path = module.is_generated_case_layout_path
+
+    def _is_generated_or_workbench_path(path, scan_root=None):
+        if _is_workbench_generated_path(Path(path)):
+            return True
+        return _original_is_generated_case_layout_path(path, scan_root)
+
+    module.is_generated_case_layout_path = _is_generated_or_workbench_path
+
 brand_dict = module.resolve_brand(brand_token)
 manifest = module.build_manifest(
     Path(case_dir),
@@ -240,7 +263,7 @@ def upgrade_case_to_v3(
     case_dir: Path | str,
     brand: str = "fumei",
     template: str = "auto",
-    semantic_judge_mode: str = "off",
+    semantic_judge_mode: str = "auto",
 ) -> dict[str, Any]:
     """Run case-layout-board's `build_manifest()` and map the result into the
     case-workbench schema.

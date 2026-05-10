@@ -35,7 +35,8 @@ def list_customers(q: str | None = None) -> list[CustomerSummary]:
     with db.connect() as conn:
         rows = conn.execute("SELECT * FROM customers ORDER BY canonical_name").fetchall()
         counts = {r["customer_id"]: r["n"] for r in conn.execute(
-            "SELECT customer_id, COUNT(*) AS n FROM cases WHERE customer_id IS NOT NULL GROUP BY customer_id"
+            "SELECT customer_id, COUNT(*) AS n FROM cases "
+            "WHERE customer_id IS NOT NULL AND trashed_at IS NULL GROUP BY customer_id"
         ).fetchall()}
     out: list[CustomerSummary] = []
     for r in rows:
@@ -70,7 +71,7 @@ def customer_detail(customer_id: int) -> CustomerDetail:
         case_rows = conn.execute(
             """SELECT c.*, cu.canonical_name AS canonical_name FROM cases c
                LEFT JOIN customers cu ON cu.id = c.customer_id
-               WHERE c.customer_id = ? ORDER BY c.last_modified DESC""",
+               WHERE c.customer_id = ? AND c.trashed_at IS NULL ORDER BY c.last_modified DESC""",
             (customer_id,),
         ).fetchall()
 
@@ -108,7 +109,7 @@ def update_customer(customer_id: int, payload: CustomerUpdate) -> CustomerSummar
         )
         row = conn.execute("SELECT * FROM customers WHERE id = ?", (customer_id,)).fetchone()
         case_count = conn.execute(
-            "SELECT COUNT(*) FROM cases WHERE customer_id = ?", (customer_id,)
+            "SELECT COUNT(*) FROM cases WHERE customer_id = ? AND trashed_at IS NULL", (customer_id,)
         ).fetchone()[0]
     return _summary_from_row(row, case_count)
 

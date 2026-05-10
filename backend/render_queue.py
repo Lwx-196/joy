@@ -25,7 +25,10 @@ Public API used by routes/render.py:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
+import os
+import re
 import sqlite3
 import subprocess
 import threading
@@ -34,14 +37,1124 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, AsyncIterator
 
-from . import _job_pool, audit, db, render_executor
+from . import _job_pool, audit, db, render_executor, render_quality, skill_bridge, source_images, source_selection, stress
 
 DEFAULT_TEMPLATE = "tri-compare"
-DEFAULT_SEMANTIC_JUDGE = "off"
+DEFAULT_SEMANTIC_JUDGE = "auto"
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
+SEMANTIC_AUTO_SOURCE_LIMIT = _env_int("CASE_WORKBENCH_SEMANTIC_AUTO_SOURCE_LIMIT", 18)
+
+
+def _code_version_summary() -> dict[str, Any]:
+    try:
+        commit = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=Path(__file__).resolve().parents[1],
+            text=True,
+            capture_output=True,
+            timeout=1,
+            check=False,
+        ).stdout.strip()
+    except Exception:
+        commit = ""
+    return {
+        "commit": commit or "unknown",
+        "dirty": True,
+    }
+
+
+def _source_manifest_hash(result: dict[str, Any]) -> str | None:
+    plan = result.get("render_selection_plan")
+    if not isinstance(plan, dict):
+        plan = {
+            "provenance": result.get("render_selection_source_provenance") or [],
+            "dropped": result.get("render_selection_dropped_slots") or [],
+            "missing": result.get("render_selection_missing_slots") or [],
+        }
+    try:
+        payload = json.dumps(plan, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+    except (TypeError, ValueError):
+        return None
+    return "sha256:" + hashlib.sha256(payload).hexdigest()
+BEFORE_TOKENS = ("术前", "治疗前", "before", "pre")
+AFTER_TOKENS = ("术后", "治疗后", "after", "post")
+IMAGE_REVIEW_META_KEY = "image_review_states"
+LOW_CONFIDENCE_REVIEW_BELOW = 0.55
 
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _parse_case_meta(raw: str | None) -> dict[str, Any]:
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+    except (TypeError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _case_source_info(raw_meta: str | None, abs_path: str | None = None) -> tuple[int, list[str]]:
+    meta = _parse_case_meta(raw_meta)
+    raw_files = [str(item) for item in (meta.get("image_files") or []) if item]
+    if abs_path:
+        split = source_images.existing_source_image_files(abs_path, raw_files)
+        image_files = [str(item) for item in split["existing"]]
+    else:
+        image_files = source_images.filter_source_image_files(raw_files)
+    return len(image_files), image_files
+
+
+def _case_source_profile(raw_meta: str | None, abs_path: str | None = None) -> dict[str, object]:
+    meta = _parse_case_meta(raw_meta)
+    image_files = [str(item) for item in (meta.get("image_files") or []) if item]
+    if abs_path:
+        return source_images.classify_existing_case_source_profile(abs_path, image_files)
+    return source_images.classify_source_profile(image_files)
+
+
+def _json_list(raw: str | None) -> list[object]:
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+    except (TypeError, ValueError):
+        return []
+    return data if isinstance(data, list) else []
+
+
+def _source_binding_case_ids(raw_meta: str | None) -> list[int]:
+    meta = _parse_case_meta(raw_meta)
+    bindings = meta.get(source_images.SOURCE_BINDINGS_META_KEY)
+    raw_ids = bindings.get("case_ids") if isinstance(bindings, dict) else bindings if isinstance(bindings, list) else []
+    out: list[int] = []
+    for item in raw_ids or []:
+        try:
+            cid = int(item)
+        except (TypeError, ValueError):
+            continue
+        if cid > 0 and cid not in out:
+            out.append(cid)
+    return out
+
+
+def _merged_bound_profile(rows: list[dict[str, Any]]) -> dict[str, object]:
+    merged_files: list[str] = []
+    missing_files: list[str] = []
+    raw_meta_image_count = 0
+    for row in rows:
+        case_name = Path(str(row.get("abs_path") or "")).name or f"case-{row.get('id')}"
+        meta = _parse_case_meta(str(row.get("meta_json") or ""))
+        raw_files = [str(item) for item in (meta.get("image_files") or []) if item]
+        raw_meta_image_count += len(raw_files)
+        split = source_images.existing_source_image_files(str(row.get("abs_path") or ""), raw_files)
+        for filename in [str(item) for item in split["existing"]]:
+            merged_files.append(str(Path(f"case{row.get('id')}-{case_name}") / filename))
+        for filename in [str(item) for item in raw_files if not source_images.is_source_image_file(str(item))]:
+            merged_files.append(str(Path(f"case{row.get('id')}-{case_name}") / filename))
+        for filename in [str(item) for item in split["missing"]]:
+            missing_files.append(str(Path(f"case{row.get('id')}-{case_name}") / filename))
+    profile = source_images.classify_source_profile(merged_files)
+    profile["raw_meta_image_count"] = raw_meta_image_count
+    profile["missing_source_count"] = len(missing_files)
+    profile["missing_source_samples"] = missing_files[:8]
+    profile["file_integrity_status"] = "missing_source_files" if missing_files else "ok"
+    if missing_files and not merged_files:
+        profile["source_kind"] = "missing_source_files"
+    return profile
+
+
+def _safe_link_name(case_id: int, case_path: str, filename: str) -> str:
+    case_name = Path(case_path).name or f"case-{case_id}"
+    rel = str(filename).replace("\\", "/").strip("/")
+    safe = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff._-]+", "-", f"case{case_id}-{case_name}-{rel}")
+    return safe[:180] or f"case{case_id}-{Path(filename).name}"
+
+
+def _build_bound_source_staging(
+    job_id: int,
+    rows: list[dict[str, Any]],
+    primary_case_dir: str,
+) -> tuple[Path, list[str], dict[tuple[int, str], str]]:
+    staging = Path(primary_case_dir) / ".case-workbench-bound-render" / f"job-{job_id}"
+    staging.mkdir(parents=True, exist_ok=True)
+    linked: list[str] = []
+    render_names: dict[tuple[int, str], str] = {}
+    used_names: set[str] = set()
+    for row in rows:
+        case_id = int(row["id"])
+        case_dir = Path(str(row["abs_path"]))
+        meta = _parse_case_meta(str(row.get("meta_json") or ""))
+        for filename in [str(item) for item in (meta.get("image_files") or []) if item]:
+            if not source_images.is_source_image_file(filename):
+                continue
+            rel = Path(filename)
+            if rel.is_absolute() or ".." in rel.parts:
+                continue
+            source = (case_dir / rel).resolve()
+            if not source.is_file():
+                continue
+            link_name = _safe_link_name(case_id, str(case_dir), filename)
+            stem = Path(link_name).stem
+            suffix = Path(link_name).suffix
+            candidate = link_name
+            idx = 2
+            while candidate in used_names or (staging / candidate).exists():
+                candidate = f"{stem}-{idx}{suffix}"
+                idx += 1
+            used_names.add(candidate)
+            target = staging / candidate
+            try:
+                os.symlink(source, target)
+            except FileExistsError:
+                pass
+            linked.append(candidate)
+            render_names[(case_id, filename)] = candidate
+    return staging, linked, render_names
+
+
+def _render_excluded_files(raw_meta: str | None) -> set[str]:
+    meta = _parse_case_meta(raw_meta)
+    states = meta.get(IMAGE_REVIEW_META_KEY)
+    if not isinstance(states, dict):
+        return set()
+    out: set[str] = set()
+    for filename, state in states.items():
+        if not isinstance(state, dict):
+            continue
+        if state.get("render_excluded") or state.get("verdict") == "excluded":
+            out.add(str(filename))
+    return out
+
+
+def _image_review_states(raw_meta: str | None) -> dict[str, dict[str, Any]]:
+    meta = _parse_case_meta(raw_meta)
+    states = meta.get(IMAGE_REVIEW_META_KEY)
+    if not isinstance(states, dict):
+        return {}
+    out: dict[str, dict[str, Any]] = {}
+    for filename, state in states.items():
+        if isinstance(state, dict):
+            out[str(filename)] = dict(state)
+    return out
+
+
+def _state_for_filename(states: dict[str, dict[str, Any]], filename: str) -> dict[str, Any] | None:
+    return states.get(filename) or states.get(Path(filename).name)
+
+
+def _skill_metadata_by_file(raw: str | None) -> dict[str, dict[str, Any]]:
+    data = []
+    if raw:
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, list):
+                data = parsed
+        except (TypeError, ValueError):
+            data = []
+    out: dict[str, dict[str, Any]] = {}
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        for key in (item.get("filename"), item.get("relative_path")):
+            if key:
+                out[str(key)] = item
+                out[Path(str(key)).name] = item
+    return out
+
+
+_METADATA_FALLBACK_FIELDS = {
+    "angle_confidence",
+    "rejection_reason",
+    "issues",
+    "pose",
+    "direction",
+    "sharpness_score",
+}
+
+
+def _empty_metadata_value(value: Any) -> bool:
+    return value is None or value == "" or value == [] or value == {}
+
+
+def _selection_metadata_with_fallback(
+    metadata: dict[str, Any] | None,
+    fallback: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if not isinstance(fallback, dict):
+        return metadata if isinstance(metadata, dict) else None
+    if not isinstance(metadata, dict):
+        merged = dict(fallback)
+        merged["selection_metadata_source"] = "primary_render_history"
+        return merged
+    merged = dict(metadata)
+    used = False
+    for key in _METADATA_FALLBACK_FIELDS:
+        if _empty_metadata_value(merged.get(key)) and not _empty_metadata_value(fallback.get(key)):
+            merged[key] = fallback.get(key)
+            used = True
+    if used:
+        merged["selection_metadata_source"] = "primary_render_history"
+    return merged
+
+
+def _fetch_case_image_overrides(conn: sqlite3.Connection, case_id: int) -> dict[str, dict[str, Any]]:
+    rows = conn.execute(
+        "SELECT filename, manual_phase, manual_view, manual_transform_json FROM case_image_overrides WHERE case_id = ?",
+        (case_id,),
+    ).fetchall()
+    out: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        item: dict[str, Any] = {"phase": row["manual_phase"], "view": row["manual_view"]}
+        if row["manual_transform_json"]:
+            try:
+                transform = json.loads(row["manual_transform_json"])
+            except (TypeError, ValueError):
+                transform = None
+            if isinstance(transform, dict):
+                item["transform"] = transform
+        out[str(row["filename"])] = item
+    return out
+
+
+def _phase_from_filename(filename: str) -> str | None:
+    lowered = filename.lower()
+    if any(token.lower() in lowered for token in BEFORE_TOKENS):
+        return "before"
+    if any(token.lower() in lowered for token in AFTER_TOKENS):
+        return "after"
+    return None
+
+
+def _view_from_filename(filename: str) -> str | None:
+    lowered = filename.lower()
+    if re.search(r"3/4|34|45|45°|微侧|斜侧|半侧|oblique", filename, re.I):
+        return "oblique"
+    if "正面" in filename or "正脸" in filename or "front" in lowered:
+        return "front"
+    if "侧面" in filename or "侧脸" in filename or "side" in lowered or "profile" in lowered:
+        return "side"
+    return None
+
+
+def _metadata_phase_view(
+    filename: str,
+    manual_override: dict[str, Any] | None,
+    metadata: dict[str, Any] | None,
+) -> tuple[str | None, str | None, bool]:
+    manual_phase = (manual_override or {}).get("phase")
+    manual_view = (manual_override or {}).get("view")
+    phase = manual_phase if manual_phase in {"before", "after"} else None
+    view = manual_view if manual_view in {"front", "oblique", "side"} else None
+    manual = (
+        (phase is not None and str((manual_override or {}).get("phase_source") or "manual") == "manual")
+        or (view is not None and str((manual_override or {}).get("view_source") or "manual") == "manual")
+    )
+    if phase is None and isinstance(metadata, dict):
+        meta_phase = metadata.get("phase")
+        if meta_phase in {"before", "after"}:
+            phase = str(meta_phase)
+    if view is None and isinstance(metadata, dict):
+        view_bucket = metadata.get("view_bucket") or metadata.get("angle")
+        if view_bucket in {"front", "oblique", "side"}:
+            view = str(view_bucket)
+    return phase or _phase_from_filename(filename), view or _view_from_filename(filename), manual
+
+
+def _selection_phase_view(
+    filename: str,
+    case_title: str,
+    manual_override: dict[str, Any] | None,
+    metadata: dict[str, Any] | None,
+) -> tuple[str | None, str, str | None, str, bool]:
+    manual_phase = (manual_override or {}).get("phase")
+    manual_view = (manual_override or {}).get("view")
+    if manual_phase in {"before", "after"}:
+        phase = str(manual_phase)
+        phase_source = "manual"
+    elif isinstance(metadata, dict) and metadata.get("phase") in {"before", "after"}:
+        phase = str(metadata.get("phase"))
+        phase_source = str(metadata.get("phase_source") or "skill")
+    else:
+        phase = _phase_from_filename(filename)
+        phase_source = "filename" if phase else "unknown"
+        if not phase:
+            phase = _phase_from_filename(str(Path(case_title) / filename))
+            phase_source = "directory" if phase else "unknown"
+
+    if manual_view in {"front", "oblique", "side"}:
+        view = str(manual_view)
+        view_source = "manual"
+    elif isinstance(metadata, dict) and (metadata.get("view_bucket") or metadata.get("angle")) in {"front", "oblique", "side"}:
+        view = str(metadata.get("view_bucket") or metadata.get("angle"))
+        view_source = str(metadata.get("angle_source") or "skill")
+    else:
+        view = _view_from_filename(filename)
+        view_source = "filename" if view else "unknown"
+
+    manual = phase_source == "manual" or view_source == "manual"
+    return phase, phase_source, view, view_source, manual
+
+
+def _selection_override_from_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
+    item: dict[str, Any] = {
+        "phase": candidate.get("phase"),
+        "view": candidate.get("view"),
+        "phase_source": candidate.get("phase_source"),
+        "view_source": candidate.get("view_source"),
+        "angle_confidence": candidate.get("angle_confidence"),
+        "selection_score": candidate.get("selection_score"),
+        "selection_reasons": candidate.get("selection_reasons") or [],
+        "quality_warnings": candidate.get("quality_warnings") or [],
+        "risk_level": candidate.get("risk_level"),
+        "source_case_id": candidate.get("case_id"),
+        "source_filename": candidate.get("filename"),
+        "source_role": candidate.get("source_role"),
+        "selection_source": "source_selection",
+    }
+    if candidate.get("review_verdict"):
+        item["review_verdict"] = candidate.get("review_verdict")
+    if candidate.get("body_part"):
+        item["body_part"] = candidate.get("body_part")
+    if candidate.get("treatment_area"):
+        item["treatment_area"] = candidate.get("treatment_area")
+    if candidate.get("render_feedback"):
+        item["render_feedback"] = candidate.get("render_feedback")
+    if candidate.get("source_group_lock"):
+        item["source_group_lock"] = candidate.get("source_group_lock")
+    if candidate.get("selection_metadata_source"):
+        item["selection_metadata_source"] = candidate.get("selection_metadata_source")
+    transform = candidate.get("manual_transform")
+    if isinstance(transform, dict):
+        item["transform"] = transform
+    return item
+
+
+def _selection_plan_candidate(candidate: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not candidate:
+        return None
+    return {
+        "case_id": candidate.get("case_id"),
+        "source_role": candidate.get("source_role"),
+        "filename": candidate.get("filename"),
+        "render_filename": candidate.get("render_filename"),
+        "phase": candidate.get("phase"),
+        "phase_source": candidate.get("phase_source"),
+        "view": candidate.get("view"),
+        "view_source": candidate.get("view_source"),
+        "review_verdict": candidate.get("review_verdict"),
+        "angle_confidence": candidate.get("angle_confidence"),
+        "selection_score": candidate.get("selection_score"),
+        "selection_reasons": candidate.get("selection_reasons") or [],
+        "quality_warnings": candidate.get("quality_warnings") or [],
+        "risk_level": candidate.get("risk_level"),
+        "render_feedback": candidate.get("render_feedback"),
+        "source_group_lock": candidate.get("source_group_lock"),
+        "selection_metadata_source": candidate.get("selection_metadata_source"),
+        "pose": candidate.get("pose"),
+        "direction": candidate.get("direction"),
+    }
+
+
+def _build_render_selection_context(
+    conn: sqlite3.Connection,
+    rows: list[dict[str, Any]],
+    render_names: dict[tuple[int, str], str] | None = None,
+) -> dict[str, Any]:
+    slots: dict[str, dict[str, Any]] = {
+        view: {"before_candidates": [], "after_candidates": []}
+        for view in ("front", "oblique", "side")
+    }
+    overrides_by_render_name: dict[str, dict[str, Any]] = {}
+    render_names = render_names or {}
+    primary_case_id = int(rows[0]["id"]) if rows else 0
+    render_feedback = source_selection.render_feedback_from_history(conn, primary_case_id) if primary_case_id else None
+    primary_render_metadata = _skill_metadata_by_file(str(rows[0].get("skill_image_metadata_json") or "")) if rows else {}
+    selection_controls = source_selection.selection_controls_from_meta(
+        _parse_case_meta(str(rows[0].get("meta_json") or "")) if rows else {}
+    )
+    locked_slots = selection_controls.get("locked_slots") if isinstance(selection_controls.get("locked_slots"), dict) else {}
+    for index, source_row in enumerate(rows):
+        case_id = int(source_row["id"])
+        role = str(source_row.get("role") or ("primary" if index == 0 else "bound"))
+        case_dir = str(source_row.get("abs_path") or "")
+        case_title = Path(case_dir).name or f"case {case_id}"
+        meta_json = str(source_row.get("meta_json") or "")
+        meta = _parse_case_meta(meta_json)
+        raw_files = [str(item) for item in (meta.get("image_files") or []) if item]
+        existing_files = [
+            str(item)
+            for item in source_images.existing_source_image_files(case_dir, raw_files)["existing"]
+            if source_images.is_source_image_file(str(item))
+        ]
+        metadata_by_file = _skill_metadata_by_file(str(source_row.get("skill_image_metadata_json") or ""))
+        review_states = _image_review_states(meta_json)
+        manual_overrides = _fetch_case_image_overrides(conn, case_id)
+        for filename in existing_files:
+            render_filename = render_names.get((case_id, filename), filename)
+            state = _state_for_filename(review_states, filename) or {}
+            if bool(state.get("render_excluded") or state.get("verdict") == "excluded"):
+                overrides_by_render_name[render_filename] = {"render_excluded": True, "review_verdict": "excluded"}
+                continue
+            metadata = metadata_by_file.get(filename) or metadata_by_file.get(Path(filename).name)
+            fallback_metadata = (
+                primary_render_metadata.get(render_filename)
+                or primary_render_metadata.get(Path(render_filename).name)
+                or primary_render_metadata.get(filename)
+                or primary_render_metadata.get(Path(filename).name)
+            )
+            metadata = _selection_metadata_with_fallback(metadata, fallback_metadata)
+            manual_override = manual_overrides.get(filename) or manual_overrides.get(Path(filename).name)
+            phase, phase_source, view, view_source, manual = _selection_phase_view(
+                filename,
+                case_title,
+                manual_override,
+                metadata,
+            )
+            if phase not in {"before", "after"} or view not in {"front", "oblique", "side"}:
+                continue
+            candidate: dict[str, Any] = {
+                "case_id": case_id,
+                "source_role": role,
+                "filename": filename,
+                "render_filename": render_filename,
+                "phase": phase,
+                "phase_source": phase_source,
+                "view": view,
+                "view_source": view_source,
+                "manual": manual,
+                "review_verdict": state.get("verdict"),
+                "body_part": state.get("body_part"),
+                "treatment_area": state.get("treatment_area"),
+                "angle_confidence": (metadata or {}).get("angle_confidence") if isinstance(metadata, dict) else None,
+                "rejection_reason": (metadata or {}).get("rejection_reason") if isinstance(metadata, dict) else None,
+                "issues": [str(issue) for issue in ((metadata or {}).get("issues") or [])] if isinstance(metadata, dict) else [],
+                "pose": (metadata or {}).get("pose") if isinstance(metadata, dict) else None,
+                "direction": (metadata or {}).get("direction") if isinstance(metadata, dict) else None,
+                "sharpness_score": (metadata or {}).get("sharpness_score") if isinstance(metadata, dict) else None,
+                "selection_metadata_source": (metadata or {}).get("selection_metadata_source") if isinstance(metadata, dict) else None,
+            }
+            if isinstance(manual_override, dict) and isinstance(manual_override.get("transform"), dict):
+                candidate["manual_transform"] = manual_override["transform"]
+            candidate.update(source_selection.candidate_quality(candidate, role))
+            if candidate.get("selection_metadata_source") == "primary_render_history":
+                reasons = [str(item) for item in (candidate.get("selection_reasons") or []) if item]
+                if "复用最近渲染姿态画像" not in reasons:
+                    candidate["selection_reasons"] = [*reasons, "复用最近渲染姿态画像"][:6]
+            source_selection.apply_render_feedback(candidate, render_feedback)
+            slots[str(view)][f"{phase}_candidates"].append(candidate)
+            overrides_by_render_name[render_filename] = _selection_override_from_candidate(candidate)
+
+    plan_slots: dict[str, dict[str, Any]] = {}
+    dropped_slots: list[dict[str, Any]] = []
+    selected_candidates: list[dict[str, Any]] = []
+    for view, slot in slots.items():
+        slot["before_candidates"].sort(key=source_selection.candidate_rank)
+        slot["after_candidates"].sort(key=source_selection.candidate_rank)
+        before, after, pair_quality = source_selection.select_best_pair(
+            view,
+            slot["before_candidates"],
+            slot["after_candidates"],
+            lock=locked_slots.get(view) if isinstance(locked_slots, dict) else None,
+        )
+        if before:
+            selected_candidates.append(before)
+        if after:
+            selected_candidates.append(after)
+        if before or after:
+            plan_slots[view] = {
+                "before": _selection_plan_candidate(before),
+                "after": _selection_plan_candidate(after),
+                "pair_quality": pair_quality,
+                "before_candidate_count": len(slot["before_candidates"]),
+                "after_candidate_count": len(slot["after_candidates"]),
+            }
+        elif isinstance(pair_quality, dict) and pair_quality.get("render_slot_status") == "dropped":
+            dropped_slots.append(
+                {
+                    "view": view,
+                    "label": {"front": "正面", "oblique": "45°", "side": "侧面"}.get(view, view),
+                    "reason": pair_quality.get("drop_reason"),
+                    "pair_quality": pair_quality,
+                    "before_candidate_count": len(slot["before_candidates"]),
+                    "after_candidate_count": len(slot["after_candidates"]),
+                }
+            )
+    for candidate in selected_candidates:
+        render_filename = str(candidate.get("render_filename") or "")
+        if render_filename:
+            overrides_by_render_name[render_filename] = _selection_override_from_candidate(candidate)
+    missing_slots = []
+    dropped_views = {str(item.get("view") or "") for item in dropped_slots if isinstance(item, dict)}
+    for view in ("front", "oblique", "side"):
+        if view in dropped_views:
+            continue
+        slot = plan_slots.get(view) or {}
+        missing = [
+            *([] if isinstance(slot.get("before"), dict) else ["before"]),
+            *([] if isinstance(slot.get("after"), dict) else ["after"]),
+        ]
+        if missing:
+            missing_slots.append({"view": view, "missing": missing})
+    renderable_slots = [
+        view
+        for view in ("front", "oblique", "side")
+        if isinstance((plan_slots.get(view) or {}).get("before"), dict)
+        and isinstance((plan_slots.get(view) or {}).get("after"), dict)
+    ]
+    return {
+        "plan": {
+            "version": 1,
+            "policy": "source_selection_v1",
+            "feedback_source_job_id": (render_feedback or {}).get("source_job_id") if isinstance(render_feedback, dict) else None,
+            "feedback_applied": bool(
+                isinstance(render_feedback, dict)
+                and (render_feedback.get("candidate_penalties") or render_feedback.get("pair_penalties"))
+            ),
+            "selection_controls": selection_controls,
+            "accepted_warnings": selection_controls.get("accepted_warnings") or [],
+            "required_slots": ["front", "oblique", "side"],
+            "missing_slots": missing_slots,
+            "dropped_slots": dropped_slots,
+            "renderable_slots": renderable_slots,
+            "effective_template_hint": (
+                "tri-compare"
+                if len(renderable_slots) >= 3
+                else "bi-compare"
+                if "front" in renderable_slots and len(renderable_slots) >= 2
+                else "single-compare"
+                if "front" in renderable_slots
+                else None
+            ),
+            "selected_count": len(selected_candidates),
+            "slots": plan_slots,
+            "source_provenance": [
+                {
+                    "case_id": candidate.get("case_id"),
+                    "source_role": candidate.get("source_role"),
+                    "filename": candidate.get("filename"),
+                    "render_filename": candidate.get("render_filename"),
+                    "phase": candidate.get("phase"),
+                    "view": candidate.get("view"),
+                    "render_feedback": candidate.get("render_feedback"),
+                    "selection_metadata_source": candidate.get("selection_metadata_source"),
+                }
+                for candidate in selected_candidates
+            ],
+            "feedback_summary": render_feedback if isinstance(render_feedback, dict) else None,
+        },
+        "overrides_by_render_name": overrides_by_render_name,
+        "selected_count": len(selected_candidates),
+    }
+
+
+def _apply_inferred_phase_view_overrides(
+    image_files: list[str],
+    manual_overrides: dict[str, dict[str, Any]],
+    metadata_by_file: dict[str, dict[str, Any]],
+) -> int:
+    """Pass deterministic filename/skill labels into the renderer.
+
+    The render skill is conservative and misses some English `front-before.jpg`
+    style names. Queue preflight already knows those labels, so we feed them as
+    ephemeral overrides without writing any manual override rows.
+    """
+    applied = 0
+    for filename in image_files:
+        current = manual_overrides.get(filename) or manual_overrides.get(Path(filename).name)
+        metadata = metadata_by_file.get(filename) or metadata_by_file.get(Path(filename).name)
+        phase, view, _manual = _metadata_phase_view(filename, current, metadata)
+        if phase not in {"before", "after"} or view not in {"front", "oblique", "side"}:
+            continue
+        target = manual_overrides.setdefault(filename, {})
+        before = (target.get("phase"), target.get("view"))
+        target.setdefault("phase", phase)
+        target.setdefault("view", view)
+        if before != (target.get("phase"), target.get("view")):
+            target.setdefault("inferred_from_queue", True)
+            applied += 1
+        elif (
+            target.get("selection_source") == "source_selection"
+            and target.get("phase_source") != "manual"
+            and target.get("view_source") != "manual"
+            and not target.get("inferred_from_queue")
+        ):
+            target["inferred_from_queue"] = True
+            applied += 1
+    return applied
+
+
+def _classification_blocking_preflight(
+    *,
+    case_meta_json: str | None,
+    skill_image_metadata_json: str | None,
+    image_files: list[str],
+    manual_overrides: dict[str, dict[str, Any]],
+    semantic_judge: str,
+) -> dict[str, Any] | None:
+    states = _image_review_states(case_meta_json)
+    metadata_by_file = _skill_metadata_by_file(skill_image_metadata_json)
+    blockers: list[str] = []
+    missing_count = 0
+    low_confidence_count = 0
+    needs_repick_count = 0
+    copied_review_count = 0
+    unresolved_samples: list[str] = []
+    for filename in image_files:
+        state = _state_for_filename(states, filename)
+        verdict = str((state or {}).get("verdict") or "")
+        if bool((state or {}).get("render_excluded") or verdict == "excluded"):
+            continue
+        if verdict in {"usable", "deferred"}:
+            continue
+        if bool((state or {}).get("copied_requires_review")):
+            copied_review_count += 1
+            unresolved_samples.append(filename)
+            continue
+        override = manual_overrides.get(filename) or manual_overrides.get(Path(filename).name)
+        metadata = metadata_by_file.get(filename) or metadata_by_file.get(Path(filename).name)
+        phase, view, manual = _metadata_phase_view(filename, override, metadata)
+        if verdict == "needs_repick":
+            needs_repick_count += 1
+            unresolved_samples.append(filename)
+            continue
+        if phase not in {"before", "after"} or view not in {"front", "oblique", "side"}:
+            missing_count += 1
+            unresolved_samples.append(filename)
+            continue
+        angle_confidence = None
+        if isinstance(metadata, dict) and metadata.get("angle_confidence") is not None:
+            try:
+                angle_confidence = float(metadata.get("angle_confidence"))
+            except (TypeError, ValueError):
+                angle_confidence = None
+        if angle_confidence is not None and angle_confidence < LOW_CONFIDENCE_REVIEW_BELOW and not manual:
+            low_confidence_count += 1
+            unresolved_samples.append(filename)
+    if not any((missing_count, low_confidence_count, needs_repick_count, copied_review_count)):
+        return None
+    pieces = []
+    if missing_count:
+        pieces.append(f"待补充 {missing_count} 张")
+    if low_confidence_count:
+        pieces.append(f"低置信 {low_confidence_count} 张")
+    if needs_repick_count:
+        pieces.append(f"需换片 {needs_repick_count} 张")
+    if copied_review_count:
+        pieces.append(f"补图待确认 {copied_review_count} 张")
+    message = "正式出图已阻断：还有未闭环的照片分类任务（" + "，".join(pieces) + "）。请先到照片分类工作台批量补齐、确认可用或标记不用于出图。"
+    blockers.append(message)
+    for sample in unresolved_samples[:8]:
+        blockers.append(f"未闭环图片：{sample}")
+    return {
+        "output_path": None,
+        "manifest_path": None,
+        "status": "error",
+        "blocking_issue_count": len(blockers),
+        "warning_count": 0,
+        "case_mode": "",
+        "effective_templates": [],
+        "manual_overrides_applied": list(manual_overrides.keys()),
+        "ai_usage": {
+            "semantic_judge_requested": semantic_judge,
+            "semantic_judge_effective": "blocked-classification-preflight",
+            "classification_missing_count": missing_count,
+            "classification_low_confidence_count": low_confidence_count,
+            "classification_needs_repick_count": needs_repick_count,
+            "classification_copied_review_count": copied_review_count,
+            "source_count": len(image_files),
+        },
+        "render_error": message,
+        "blocking_issues": blockers,
+        "warnings": [],
+    }
+
+
+def _source_readiness_preflight(
+    *,
+    semantic_judge: str,
+    source_profile: dict[str, object],
+    allow_only_generated: bool = False,
+) -> dict[str, Any] | None:
+    source_kind = str(source_profile.get("source_kind") or "")
+    if (
+        source_kind != "manual_not_case_source_directory"
+        and (int(source_profile.get("missing_source_count") or 0) > 0 or source_kind == "missing_source_files")
+    ):
+        if allow_only_generated:
+            return None
+        missing_count = int(source_profile.get("missing_source_count") or 0)
+        samples = [str(item) for item in (source_profile.get("missing_source_samples") or []) if item]
+        message = (
+            "正式出图已阻断：源组里有历史图片记录在当前磁盘不可读"
+            f"（缺失 {missing_count} 张）。请恢复源文件、重新扫描目录，或清除失效绑定后再出图。"
+        )
+        blockers = [message]
+        for sample in samples[:6]:
+            blockers.append(f"缺失源文件：{sample}")
+        effective = "blocked-missing-source-files"
+        return {
+            "output_path": None,
+            "manifest_path": None,
+            "status": "error",
+            "blocking_issue_count": len(blockers),
+            "warning_count": 0,
+            "case_mode": "",
+            "effective_templates": [],
+            "manual_overrides_applied": [],
+            "ai_usage": {
+                "semantic_judge_requested": semantic_judge,
+                "semantic_judge_effective": effective,
+                "source_profile": source_profile,
+                "source_count": int(source_profile.get("source_count") or 0),
+                "missing_source_count": missing_count,
+                "missing_source_samples": samples[:8],
+                "generated_artifact_count": int(source_profile.get("generated_artifact_count") or 0),
+                "generated_artifact_samples": source_profile.get("generated_artifact_samples") or [],
+            },
+            "render_error": message,
+            "blocking_issues": blockers,
+            "warnings": [],
+        }
+    if source_kind == "unknown_not_scanned":
+        return None
+    if allow_only_generated and source_kind not in {"generated_output_collection", "manual_not_case_source_directory"}:
+        return None
+    if source_kind == "manual_not_case_source_directory":
+        message = "正式出图已阻断：该案例已人工标记为素材归档/非源照片目录，不进入正式出图。"
+        blockers = [message, "如需要正式出图，请先恢复为待检查，并补充真实术前/术后源照片。"]
+        effective = "blocked-manual-not-source-directory"
+    elif source_kind == "generated_output_collection":
+        generated_count = int(source_profile.get("generated_artifact_count") or 0)
+        samples = [str(item) for item in (source_profile.get("generated_artifact_samples") or []) if item]
+        message = "正式出图已阻断：这更像成品图/海报集合，不是案例源照片目录。请选择包含原始术前/术后照片的案例目录。"
+        blockers = [message, f"已过滤生成图/海报/成品图 {generated_count} 张，不作为源照片参与出图。"]
+        for sample in samples[:6]:
+            blockers.append(f"已过滤生成图：{sample}")
+        effective = "blocked-generated-output-collection"
+    elif source_kind == "empty":
+        message = "正式出图已阻断：没有可用于正式出图的真实源照片。请补充术前/术后原始照片后再出图。"
+        blockers = [message]
+        effective = "blocked-no-source"
+    elif source_kind == "insufficient_source_photos":
+        source_count = int(source_profile.get("source_count") or 0)
+        samples = [str(item) for item in (source_profile.get("source_samples") or []) if item]
+        message = f"正式出图已阻断：真实源照片不足（当前 {source_count} 张），至少需要术前和术后各 1 张。"
+        blockers = [message, *[f"当前源图：{sample}" for sample in samples[:6]]]
+        effective = "blocked-insufficient-source-photos"
+    elif source_kind == "missing_before_after_pair":
+        before_count = int(source_profile.get("before_count") or 0)
+        after_count = int(source_profile.get("after_count") or 0)
+        unlabeled_count = int(source_profile.get("unlabeled_source_count") or 0)
+        message = (
+            "正式出图已阻断：真实源照片目录缺少术前/术后配对"
+            f"（术前 {before_count} 张，术后 {after_count} 张，未标注 {unlabeled_count} 张）。"
+            "请先补齐阶段分类或补充缺失阶段照片。"
+        )
+        blockers = [message]
+        for sample in [str(item) for item in (source_profile.get("source_samples") or []) if item][:6]:
+            blockers.append(f"待配对源图：{sample}")
+        effective = "blocked-missing-before-after-pair"
+    else:
+        return None
+    return {
+        "output_path": None,
+        "manifest_path": None,
+        "status": "error",
+        "blocking_issue_count": len(blockers),
+        "warning_count": 0,
+        "case_mode": "",
+        "effective_templates": [],
+        "manual_overrides_applied": [],
+        "ai_usage": {
+            "semantic_judge_requested": semantic_judge,
+            "semantic_judge_effective": effective,
+            "source_profile": source_profile,
+            "source_count": int(source_profile.get("source_count") or 0),
+            "generated_artifact_count": int(source_profile.get("generated_artifact_count") or 0),
+            "generated_artifact_samples": source_profile.get("generated_artifact_samples") or [],
+        },
+        "render_error": message,
+        "blocking_issues": blockers,
+        "warnings": [],
+    }
+
+
+def _tri_slot_preflight(
+    *,
+    template: str,
+    semantic_judge: str,
+    source_profile: dict[str, object],
+    selection_plan: dict[str, Any],
+) -> dict[str, Any] | None:
+    if template != "tri-compare":
+        return None
+    slots = selection_plan.get("slots") if isinstance(selection_plan, dict) else {}
+    if not isinstance(slots, dict):
+        slots = {}
+    dropped_slots = selection_plan.get("dropped_slots") if isinstance(selection_plan, dict) else []
+    if not isinstance(dropped_slots, list):
+        dropped_slots = []
+    dropped_by_view = {
+        str(item.get("view") or ""): item
+        for item in dropped_slots
+        if isinstance(item, dict) and item.get("view")
+    }
+    renderable_slots = [
+        view
+        for view in ("front", "oblique", "side")
+        if isinstance((slots.get(view) or {}).get("before"), dict)
+        and isinstance((slots.get(view) or {}).get("after"), dict)
+    ]
+    missing: list[dict[str, Any]] = []
+    for view, label in (("front", "正面"), ("oblique", "45°"), ("side", "侧面")):
+        slot = slots.get(view)
+        before = slot.get("before") if isinstance(slot, dict) else None
+        after = slot.get("after") if isinstance(slot, dict) else None
+        missing_roles = [
+            *([] if isinstance(before, dict) else ["before"]),
+            *([] if isinstance(after, dict) else ["after"]),
+        ]
+        if missing_roles:
+            if view in dropped_by_view and "front" in renderable_slots and len(renderable_slots) >= 2:
+                continue
+            missing.append({"view": view, "label": label, "missing": missing_roles})
+    if not missing:
+        if "front" in renderable_slots and len(renderable_slots) >= 2:
+            return None
+        if dropped_by_view:
+            missing.append(
+                {
+                    "view": "renderable_slots",
+                    "label": "可对比联",
+                    "missing": ["before", "after"],
+                }
+            )
+        else:
+            return None
+    if missing == [{"view": "renderable_slots", "label": "可对比联", "missing": ["before", "after"]}]:
+        message = "正式出图已阻断：低价值槽位移除后不足双联，请先补齐至少正面加一个可对比角度。"
+        blockers = [message]
+        return {
+            "output_path": None,
+            "manifest_path": None,
+            "status": "error",
+            "blocking_issue_count": len(blockers),
+            "warning_count": 0,
+            "case_mode": "",
+            "effective_templates": [],
+            "manual_overrides_applied": [],
+            "ai_usage": {
+                "semantic_judge_requested": semantic_judge,
+                "semantic_judge_effective": "blocked-source-group-slot-preflight",
+                "source_profile": source_profile,
+                "render_selection_policy": selection_plan.get("policy") if isinstance(selection_plan, dict) else None,
+                "render_selection_slot_count": len(slots),
+                "required_slots": ["front", "oblique", "side"],
+                "missing_slots": missing,
+                "dropped_slots": dropped_slots,
+            },
+            "render_error": message,
+            "blocking_issues": blockers,
+            "warnings": [],
+            "render_selection_audit": {
+                "policy": selection_plan.get("policy") if isinstance(selection_plan, dict) else None,
+                "hard_blockers": [
+                    {
+                        "code": "insufficient_renderable_slots_after_downgrade",
+                        "severity": "block",
+                        "message": message,
+                        "dropped_slots": dropped_slots,
+                        "recommended_action": "补齐至少正面加一个可对比角度后再正式出图",
+                    }
+                ],
+                "selection_plan": selection_plan,
+            },
+        }
+    if not missing:
+        return None
+    slot_text = "；".join(
+        f"{item['label']}缺{'/'.join('术前' if role == 'before' else '术后' for role in item['missing'])}"
+        for item in missing
+    )
+    message = (
+        "正式出图已阻断：三联正式出图槽位未配齐"
+        f"（{slot_text}）。请先在源组预检或照片分类工作台补齐正面、45°、侧面术前术后配对。"
+    )
+    blockers = [message]
+    for item in missing:
+        blockers.append(
+            f"缺槽位：{item['label']} {','.join('术前' if role == 'before' else '术后' for role in item['missing'])}"
+        )
+    return {
+        "output_path": None,
+        "manifest_path": None,
+        "status": "error",
+        "blocking_issue_count": len(blockers),
+        "warning_count": 0,
+        "case_mode": "",
+        "effective_templates": [],
+        "manual_overrides_applied": [],
+        "ai_usage": {
+            "semantic_judge_requested": semantic_judge,
+            "semantic_judge_effective": "blocked-source-group-slot-preflight",
+            "source_profile": source_profile,
+            "render_selection_policy": selection_plan.get("policy") if isinstance(selection_plan, dict) else None,
+            "render_selection_slot_count": len(slots),
+            "required_slots": ["front", "oblique", "side"],
+            "missing_slots": missing,
+            "dropped_slots": dropped_slots,
+        },
+        "render_error": message,
+        "blocking_issues": blockers,
+        "warnings": [],
+        "render_selection_audit": {
+            "policy": selection_plan.get("policy") if isinstance(selection_plan, dict) else None,
+            "hard_blockers": [
+                {
+                    "code": "missing_render_slots",
+                    "severity": "block",
+                    "message": message,
+                    "slots": missing,
+                    "recommended_action": "补齐三联槽位后再正式出图",
+                }
+            ],
+            "selection_plan": selection_plan,
+        },
+    }
+
+
+def _has_phase_pair(
+    image_files: list[str],
+    manual_overrides: dict[str, dict[str, Any]],
+) -> bool:
+    has_before = any(
+        str(item.get("phase") or "").lower() == "before"
+        for item in manual_overrides.values()
+        if isinstance(item, dict) and not item.get("render_excluded")
+    )
+    has_after = any(
+        str(item.get("phase") or "").lower() == "after"
+        for item in manual_overrides.values()
+        if isinstance(item, dict) and not item.get("render_excluded")
+    )
+    if has_before and has_after:
+        return True
+
+    for name in image_files:
+        lowered = name.lower()
+        if any(token.lower() in lowered for token in BEFORE_TOKENS):
+            has_before = True
+        if any(token.lower() in lowered for token in AFTER_TOKENS):
+            has_after = True
+        if has_before and has_after:
+            return True
+    return False
+
+
+def _semantic_auto_preflight(
+    *,
+    semantic_judge: str,
+    source_count: int,
+    image_files: list[str],
+    manual_overrides: dict[str, dict[str, Any]],
+) -> tuple[str, dict[str, Any] | None]:
+    """Protect large unlabeled cases from spending minutes on per-image VLM.
+
+    `semantic_judge=auto` is useful when only a handful of candidates need a
+    visual tie-breaker. On large unlabeled cases the current skill screens every
+    image serially, so a case like 88 (35 sources) exceeds the 180s render
+    timeout before it can write a manifest. The queue knows the source count and
+    manual overrides, so it can fail early with an actionable blocked state.
+    """
+    if semantic_judge != "auto" or source_count <= SEMANTIC_AUTO_SOURCE_LIMIT:
+        return semantic_judge, None
+
+    if _has_phase_pair(image_files, manual_overrides):
+        # A usable before/after pair already exists through filenames or manual
+        # overrides. Let the normal renderer pair those deterministic labels
+        # and skip expensive per-image VLM screening for the rest of the set.
+        return "off", None
+
+    message = (
+        f"视觉补判需要处理 {source_count} 张源图，已超过自动出图上限 "
+        f"{SEMANTIC_AUTO_SOURCE_LIMIT} 张；请先在“人工整理与出图”中拖入术前/术后照片，"
+        "或把无用图片移入废弃区后再重试。"
+    )
+    result = {
+        "output_path": None,
+        "manifest_path": None,
+        "status": "error",
+        "blocking_issue_count": 1,
+        "warning_count": 0,
+        "case_mode": "",
+        "effective_templates": [],
+        "manual_overrides_applied": list(manual_overrides.keys()),
+        "ai_usage": {
+            "semantic_judge_requested": semantic_judge,
+            "semantic_judge_effective": "blocked-preflight",
+            "semantic_auto_source_limit": SEMANTIC_AUTO_SOURCE_LIMIT,
+            "source_count": source_count,
+        },
+        "render_error": message,
+        "blocking_issues": [message],
+        "warnings": [],
+    }
+    return semantic_judge, result
+
+
+def _render_case_metadata(manifest_path: str | None) -> dict[str, Any] | None:
+    if not manifest_path:
+        return None
+    path = Path(manifest_path)
+    if not path.is_file():
+        return None
+    try:
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, TypeError, ValueError):
+        return None
+    if not isinstance(manifest, dict):
+        return None
+    groups = manifest.get("groups") or []
+    if not isinstance(groups, list):
+        groups = []
+    pose_max, sharp_min = skill_bridge._extract_geometric_aggregates(groups)
+    return {
+        "skill_image_metadata_json": json.dumps(
+            skill_bridge._extract_per_image_metadata(groups),
+            ensure_ascii=False,
+        ),
+        "skill_blocking_detail_json": json.dumps(
+            [str(x) for x in (manifest.get("blocking_issues") or [])],
+            ensure_ascii=False,
+        ),
+        "skill_warnings_json": json.dumps(
+            [str(x) for x in (manifest.get("warnings") or [])],
+            ensure_ascii=False,
+        ),
+        "pose_delta_max": pose_max,
+        "sharp_ratio_min": sharp_min,
+        "meta_extras": {
+            "source": "skill_v3",
+            "skill_template": (manifest.get("effective_templates") or [None])[0],
+            "skill_case_mode": manifest.get("case_mode"),
+            "skill_status": manifest.get("status"),
+            "skill_warning_count": manifest.get("warning_count"),
+            "skill_blocking_issue_count": manifest.get("blocking_issue_count"),
+            "skill_upgraded_at": manifest.get("created_at"),
+            "render_synced_at": _now_iso(),
+        },
+    }
 
 
 class _Subscriber:
@@ -118,17 +1231,25 @@ class RenderQueue:
             raise ValueError("brand required")
         with db.connect() as conn:
             row = conn.execute(
-                "SELECT id FROM cases WHERE id = ?", (case_id,)
+                "SELECT id FROM cases WHERE id = ? AND trashed_at IS NULL", (case_id,)
             ).fetchone()
             if not row:
                 raise ValueError(f"case {case_id} not found")
             cur = conn.execute(
                 """
                 INSERT INTO render_jobs
-                    (case_id, brand, template, status, batch_id, enqueued_at, semantic_judge)
-                VALUES (?, ?, ?, 'queued', ?, ?, ?)
+                    (case_id, brand, template, status, batch_id, enqueued_at, semantic_judge, meta_json)
+                VALUES (?, ?, ?, 'queued', ?, ?, ?, ?)
                 """,
-                (case_id, brand, template, batch_id, _now_iso(), semantic_judge),
+                (
+                    case_id,
+                    brand,
+                    template,
+                    batch_id,
+                    _now_iso(),
+                    semantic_judge,
+                    json.dumps(stress.tag_payload({"enqueue_source": "render_queue"}), ensure_ascii=False),
+                ),
             )
             job_id = cur.lastrowid or 0
         self._publish(
@@ -208,7 +1329,10 @@ class RenderQueue:
         with db.connect() as conn:
             row = conn.execute(
                 """
-                SELECT j.*, c.abs_path AS case_dir
+                SELECT j.*, c.abs_path AS case_dir, c.meta_json AS case_meta_json
+                     , c.skill_image_metadata_json AS skill_image_metadata_json
+                     , c.tags_json AS case_tags_json
+                     , c.manual_blocking_issues_json AS case_manual_blocking_issues_json
                 FROM render_jobs j
                 JOIN cases c ON c.id = j.case_id
                 WHERE j.id = ?
@@ -230,15 +1354,107 @@ class RenderQueue:
             case_id = row["case_id"]
             batch_id = row["batch_id"]
 
-            # Stage B: pull manual phase/view overrides for this case
-            override_rows = conn.execute(
-                "SELECT filename, manual_phase, manual_view FROM case_image_overrides WHERE case_id = ?",
-                (case_id,),
-            ).fetchall()
-            manual_overrides: dict[str, dict[str, str | None]] = {
-                r["filename"]: {"phase": r["manual_phase"], "view": r["manual_view"]}
-                for r in override_rows
+            # Stage B: pull manual phase/view overrides for this case.
+            manual_overrides: dict[str, dict[str, Any]] = _fetch_case_image_overrides(conn, int(case_id))
+            raw_meta_image_files = [
+                str(item)
+                for item in ((_parse_case_meta(row["case_meta_json"]).get("image_files") or []))
+                if item
+            ]
+            generated_artifact_files = [
+                filename for filename in raw_meta_image_files if not source_images.is_source_image_file(filename)
+            ]
+            source_count, image_files = _case_source_info(row["case_meta_json"], case_dir)
+            source_profile = _case_source_profile(row["case_meta_json"], case_dir)
+            binding_ids = _source_binding_case_ids(row["case_meta_json"])
+            bound_source_rows: list[dict[str, Any]] = []
+            if binding_ids:
+                placeholders = ",".join("?" * len(binding_ids))
+                fetched = conn.execute(
+                    f"SELECT id, abs_path, meta_json, skill_image_metadata_json FROM cases WHERE trashed_at IS NULL AND id IN ({placeholders})",
+                    binding_ids,
+                ).fetchall()
+                bound_source_rows = [
+                    {
+                        "id": int(item["id"]),
+                        "abs_path": item["abs_path"],
+                        "meta_json": item["meta_json"],
+                        "skill_image_metadata_json": item["skill_image_metadata_json"],
+                        "role": "bound",
+                    }
+                    for item in fetched
+                ]
+            render_case_dir = case_dir
+            bound_staging_files: list[str] = []
+            bound_render_names: dict[tuple[int, str], str] = {}
+            primary_source_row = {
+                "id": int(case_id),
+                "abs_path": case_dir,
+                "meta_json": row["case_meta_json"],
+                "skill_image_metadata_json": row["skill_image_metadata_json"],
+                "role": "primary",
             }
+            if bound_source_rows:
+                source_profile = _merged_bound_profile([primary_source_row, *bound_source_rows])
+                source_profile["bound_case_ids"] = [int(item["id"]) for item in bound_source_rows]
+                staging_dir, bound_staging_files, bound_render_names = _build_bound_source_staging(
+                    job_id,
+                    [primary_source_row, *bound_source_rows],
+                    case_dir,
+                )
+                if bound_staging_files:
+                    render_case_dir = str(staging_dir)
+                    image_files = bound_staging_files
+                    source_count = len(bound_staging_files)
+            if source_images.case_marked_not_source(
+                _json_list(row["case_tags_json"]),
+                _json_list(row["case_manual_blocking_issues_json"]),
+            ):
+                source_profile = {
+                    **source_profile,
+                    "source_kind": "manual_not_case_source_directory",
+                    "manual_not_source": True,
+                }
+            source_filter = source_images.source_filter_summary(raw_meta_image_files)
+            selection_context = _build_render_selection_context(
+                conn,
+                [primary_source_row, *bound_source_rows],
+                bound_render_names,
+            )
+            render_selection_plan = selection_context["plan"]
+            for filename, selection_override in selection_context["overrides_by_render_name"].items():
+                target = manual_overrides.setdefault(filename, {})
+                for key, value in selection_override.items():
+                    if value is not None:
+                        target.setdefault(key, value)
+            excluded_files = _render_excluded_files(row["case_meta_json"])
+            review_states = _image_review_states(row["case_meta_json"])
+            for filename, state in review_states.items():
+                if not isinstance(state, dict):
+                    continue
+                item = manual_overrides.setdefault(filename, {})
+                verdict = state.get("verdict")
+                if verdict:
+                    item["review_verdict"] = verdict
+                    item["selection_review_verdict"] = verdict
+                if state.get("body_part"):
+                    item["body_part"] = state.get("body_part")
+                if state.get("treatment_area"):
+                    item["treatment_area"] = state.get("treatment_area")
+                if state.get("render_excluded") or verdict == "excluded":
+                    item["render_excluded"] = True
+            if excluded_files:
+                for filename in excluded_files:
+                    item = manual_overrides.setdefault(filename, {})
+                    item["render_excluded"] = True
+                    item["review_verdict"] = "excluded"
+                image_files = [filename for filename in image_files if filename not in excluded_files]
+                source_count = len(image_files)
+            for filename in generated_artifact_files:
+                item = manual_overrides.setdefault(filename, {})
+                item["render_excluded"] = True
+                item["review_verdict"] = "excluded"
+                item["selection_review_verdict"] = "excluded_generated_artifact"
 
         self._publish(
             {
@@ -250,14 +1466,106 @@ class RenderQueue:
             }
         )
 
+        requested_semantic_judge = semantic_judge
+        no_source_preflight = _source_readiness_preflight(
+            semantic_judge=semantic_judge,
+            source_profile=source_profile,
+            allow_only_generated=True,
+        )
+        if no_source_preflight is not None:
+            self._finish_result(
+                job_id,
+                case_id=case_id,
+                batch_id=batch_id,
+                brand=brand,
+                template=template,
+                result=no_source_preflight,
+            )
+            return
+        classification_preflight = _classification_blocking_preflight(
+            case_meta_json=row["case_meta_json"],
+            skill_image_metadata_json=row["skill_image_metadata_json"],
+            image_files=image_files,
+            manual_overrides=manual_overrides,
+            semantic_judge=semantic_judge,
+        )
+        if classification_preflight is not None:
+            ai_usage = dict(classification_preflight.get("ai_usage") or {})
+            ai_usage["generated_artifact_count"] = int(source_filter.get("generated_artifact_count") or 0)
+            ai_usage["generated_artifact_samples"] = source_filter.get("generated_artifact_samples") or []
+            classification_preflight["ai_usage"] = ai_usage
+            self._finish_result(
+                job_id,
+                case_id=case_id,
+                batch_id=batch_id,
+                brand=brand,
+                template=template,
+                result=classification_preflight,
+            )
+            return
+        source_readiness_preflight = _source_readiness_preflight(
+            semantic_judge=semantic_judge,
+            source_profile=source_profile,
+        )
+        if source_readiness_preflight is not None:
+            self._finish_result(
+                job_id,
+                case_id=case_id,
+                batch_id=batch_id,
+                brand=brand,
+                template=template,
+                result=source_readiness_preflight,
+            )
+            return
+        slot_preflight = _tri_slot_preflight(
+            template=template,
+            semantic_judge=semantic_judge,
+            source_profile=source_profile,
+            selection_plan=render_selection_plan,
+        )
+        if slot_preflight is not None:
+            self._finish_result(
+                job_id,
+                case_id=case_id,
+                batch_id=batch_id,
+                brand=brand,
+                template=template,
+                result=slot_preflight,
+            )
+            return
+        metadata_by_file = _skill_metadata_by_file(row["skill_image_metadata_json"])
+        inferred_override_count = _apply_inferred_phase_view_overrides(image_files, manual_overrides, metadata_by_file)
+        semantic_judge, preflight_result = _semantic_auto_preflight(
+            semantic_judge=semantic_judge,
+            source_count=source_count,
+            image_files=image_files,
+            manual_overrides=manual_overrides,
+        )
+        if preflight_result is not None:
+            ai_usage = dict(preflight_result.get("ai_usage") or {})
+            ai_usage["generated_artifact_count"] = int(source_filter.get("generated_artifact_count") or 0)
+            ai_usage["generated_artifact_samples"] = source_filter.get("generated_artifact_samples") or []
+            ai_usage["inferred_override_count"] = inferred_override_count
+            preflight_result["ai_usage"] = ai_usage
+            self._finish_result(
+                job_id,
+                case_id=case_id,
+                batch_id=batch_id,
+                brand=brand,
+                template=template,
+                result=preflight_result,
+            )
+            return
+
         # 2. Run the heavy subprocess.
         try:
             result = render_executor.run_render(
-                case_dir,
+                render_case_dir,
                 brand=brand,
                 template=template,
                 semantic_judge=semantic_judge,
                 manual_overrides=manual_overrides,
+                selection_plan=render_selection_plan,
             )
         except FileNotFoundError as e:
             self._mark_failed(job_id, f"missing: {e}")
@@ -268,39 +1576,152 @@ class RenderQueue:
         except RuntimeError as e:
             self._mark_failed(job_id, f"render failed: {e}")
             return
+        ai_usage = dict(result.get("ai_usage") or {})
+        ai_usage.setdefault("semantic_judge_requested", requested_semantic_judge)
+        ai_usage.setdefault("semantic_judge_effective", semantic_judge)
+        ai_usage.setdefault("semantic_auto_source_limit", SEMANTIC_AUTO_SOURCE_LIMIT)
+        ai_usage.setdefault("source_count", source_count)
+        ai_usage.setdefault("source_profile", source_profile)
+        ai_usage.setdefault("generated_artifact_count", int(source_filter.get("generated_artifact_count") or 0))
+        ai_usage.setdefault("generated_artifact_samples", source_filter.get("generated_artifact_samples") or [])
+        ai_usage.setdefault("inferred_override_count", inferred_override_count)
+        ai_usage.setdefault("render_selection_policy", render_selection_plan.get("policy"))
+        ai_usage.setdefault("render_selection_slot_count", len(render_selection_plan.get("slots") or {}))
+        if bound_source_rows:
+            ai_usage.setdefault("bound_source_case_ids", [int(item["id"]) for item in bound_source_rows])
+            ai_usage.setdefault("bound_source_staging_dir", render_case_dir)
+            ai_usage.setdefault("bound_source_staging_count", len(bound_staging_files))
+        ai_usage.setdefault(
+            "render_excluded_count",
+            sum(1 for item in manual_overrides.values() if isinstance(item, dict) and item.get("render_excluded")),
+        )
+        result["ai_usage"] = ai_usage
 
-        # 3. Persist done state + audit + broadcast.
+        self._finish_result(
+            job_id,
+            case_id=case_id,
+            batch_id=batch_id,
+            brand=brand,
+            template=template,
+            result=result,
+        )
+
+    def _finish_result(
+        self,
+        job_id: int,
+        *,
+        case_id: int,
+        batch_id: str | None,
+        brand: str,
+        template: str,
+        result: dict[str, Any],
+    ) -> None:
+        # 3. Persist artifact state + quality audit + broadcast. A skill
+        # manifest with status=error can still produce a visible board; that
+        # must be reviewed as `done_with_issues`, not silently treated as clean.
+        quality = render_quality.evaluate_render_result(result)
+        final_status = quality["quality_status"]
+        render_error = str(result.get("render_error") or "").strip()
         with db.connect() as conn:
             conn.execute(
                 """
                 UPDATE render_jobs
-                SET status = 'done',
+                SET status = ?,
                     finished_at = ?,
                     output_path = ?,
                     manifest_path = ?,
+                    error_message = ?,
                     meta_json = ?
                 WHERE id = ?
                 """,
                 (
+                    final_status,
                     _now_iso(),
                     result.get("output_path"),
                     result.get("manifest_path"),
-                    json.dumps(
-                        {
-                            k: result.get(k)
-                            for k in (
-                                "status",
-                                "blocking_issue_count",
-                                "warning_count",
-                                "case_mode",
-                                "effective_templates",
-                            )
-                        },
-                        ensure_ascii=False,
-                    ),
+                    render_error if final_status == "blocked" and render_error else None,
+	                    json.dumps(
+	                        stress.tag_payload(
+	                            {
+	                                "run_id": stress.stress_run_id() or result.get("run_id"),
+	                                "code_version": _code_version_summary(),
+	                                "source_manifest_hash": _source_manifest_hash(result),
+	                                "quality_summary": {
+	                                    "quality_status": quality.get("quality_status"),
+	                                    "quality_score": quality.get("quality_score"),
+	                                    "can_publish": quality.get("can_publish"),
+	                                    "actionable_warning_count": (
+	                                        (quality.get("metrics") or {}).get("actionable_warning_count")
+	                                        if isinstance(quality.get("metrics"), dict)
+	                                        else None
+	                                    ),
+	                                },
+	                                **{
+	                                    k: result.get(k)
+	                                    for k in (
+	                                        "status",
+	                                        "blocking_issue_count",
+	                                        "warning_count",
+	                                        "case_mode",
+	                                        "effective_templates",
+	                                        "ai_usage",
+	                                        "render_error",
+	                                        "blocking_issues",
+	                                        "warnings",
+	                                        "composition_alerts",
+	                                        "selection_quality",
+	                                        "render_selection_audit",
+	                                        "render_selection_plan",
+	                                        "render_selection_source_provenance",
+	                                        "render_selection_missing_slots",
+	                                        "render_selection_dropped_slots",
+	                                        "warning_layers",
+	                                        "warning_display_layers",
+	                                        "warning_audit",
+	                                        "warning_layer_counts",
+	                                    )
+	                                },
+	                            }
+	                        ),
+	                        ensure_ascii=False,
+	                    ),
                     job_id,
                 ),
             )
+            render_quality.persist_render_quality(conn, job_id, quality)
+            case_meta = _render_case_metadata(result.get("manifest_path"))
+            if case_meta:
+                case_row = conn.execute("SELECT meta_json FROM cases WHERE id = ?", (case_id,)).fetchone()
+                current_meta: dict[str, Any] = {}
+                if case_row and case_row["meta_json"]:
+                    try:
+                        parsed_meta = json.loads(case_row["meta_json"])
+                        if isinstance(parsed_meta, dict):
+                            current_meta = parsed_meta
+                    except (TypeError, ValueError):
+                        current_meta = {}
+                current_meta.update(case_meta["meta_extras"])
+                conn.execute(
+                    """
+                    UPDATE cases
+                    SET skill_image_metadata_json = ?,
+                        skill_blocking_detail_json = ?,
+                        skill_warnings_json = ?,
+                        pose_delta_max = ?,
+                        sharp_ratio_min = ?,
+                        meta_json = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        case_meta["skill_image_metadata_json"],
+                        case_meta["skill_blocking_detail_json"],
+                        case_meta["skill_warnings_json"],
+                        case_meta["pose_delta_max"],
+                        case_meta["sharp_ratio_min"],
+                        json.dumps(current_meta, ensure_ascii=False),
+                        case_id,
+                    ),
+                )
             audit.record_revision(
                 conn,
                 case_id,
@@ -311,6 +1732,8 @@ class RenderQueue:
                     "render_job_id": job_id,
                     "brand": brand,
                     "template": template,
+                    "quality_status": final_status,
+                    "render_selection_audit": result.get("render_selection_audit"),
                 },
                 source_route=f"/api/cases/{case_id}/render",
                 actor="render",
@@ -322,15 +1745,17 @@ class RenderQueue:
                 "job_id": job_id,
                 "case_id": case_id,
                 "batch_id": batch_id,
-                "status": "done",
+                "status": final_status,
                 "output_path": result.get("output_path"),
                 "manifest_path": result.get("manifest_path"),
+                "error_message": render_error if final_status == "blocked" and render_error else None,
                 "summary": {
                     "status": result.get("status"),
                     "blocking_issue_count": result.get("blocking_issue_count"),
                     "warning_count": result.get("warning_count"),
                     "case_mode": result.get("case_mode"),
                     "effective_templates": result.get("effective_templates"),
+                    "quality": quality,
                 },
             }
         )
@@ -348,7 +1773,7 @@ class RenderQueue:
                     error_message = ?
                 WHERE id = ?
                 """,
-                (_now_iso(), message[:1000], job_id),
+                (_now_iso(), message[:4000], job_id),
             )
         self._publish(
             {
@@ -357,7 +1782,7 @@ class RenderQueue:
                 "case_id": row["case_id"] if row else None,
                 "batch_id": row["batch_id"] if row else None,
                 "status": "failed",
-                "error_message": message[:500],
+                "error_message": message[:1000],
             }
         )
 
@@ -410,7 +1835,7 @@ class RenderQueue:
                     """
                     UPDATE render_jobs
                     SET status = 'undone'
-                    WHERE id = ? AND status = 'done'
+                    WHERE id = ? AND status IN ('done', 'done_with_issues', 'blocked')
                     """,
                     (job_id,),
                 )

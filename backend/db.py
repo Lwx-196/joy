@@ -1,11 +1,17 @@
 """SQLite connection + schema initialization."""
 from __future__ import annotations
 
+import os
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
 
-DB_PATH = Path(__file__).resolve().parent.parent / "case-workbench.db"
+DB_PATH = Path(
+    os.environ.get(
+        "CASE_WORKBENCH_DB_PATH",
+        str(Path(__file__).resolve().parent.parent / "case-workbench.db"),
+    )
+).expanduser().resolve()
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS scans (
@@ -32,7 +38,10 @@ CREATE TABLE IF NOT EXISTS cases (
   labeled_count         INTEGER,
   meta_json             TEXT,
   last_modified         TIMESTAMP NOT NULL,
-  indexed_at            TIMESTAMP NOT NULL
+  indexed_at            TIMESTAMP NOT NULL,
+  original_abs_path     TEXT,
+  trashed_at            TIMESTAMP,
+  trash_reason          TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_cases_customer ON cases(customer_id);
@@ -70,7 +79,7 @@ CREATE INDEX IF NOT EXISTS idx_revisions_case ON case_revisions(case_id, changed
 -- 同一批次共享 batch_id；单 case 任务 batch_id=NULL。
 -- output_path / manifest_path 在 done 状态时填充，是 final-board.jpg / manifest.final.json 的绝对路径。
 -- error_message 在 failed 状态填充。
--- semantic_judge 默认 'off'：v1.5 真实链路里 off 模式 2-5s/案例，auto 模式 5-30s。
+-- semantic_judge 默认 'auto'：正式自动出图先用视觉补判筛选低置信/未标注图片。
 CREATE TABLE IF NOT EXISTS render_jobs (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
   case_id       INTEGER NOT NULL REFERENCES cases(id),
@@ -84,7 +93,7 @@ CREATE TABLE IF NOT EXISTS render_jobs (
   output_path   TEXT,
   manifest_path TEXT,
   error_message TEXT,
-  semantic_judge TEXT NOT NULL DEFAULT 'off',
+  semantic_judge TEXT NOT NULL DEFAULT 'auto',
   meta_json     TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_render_jobs_case   ON render_jobs(case_id, enqueued_at DESC);
@@ -143,10 +152,131 @@ CREATE TABLE IF NOT EXISTS case_image_overrides (
   filename      TEXT NOT NULL,
   manual_phase  TEXT,
   manual_view   TEXT,
+  manual_transform_json TEXT,
   updated_at    TIMESTAMP NOT NULL,
   PRIMARY KEY (case_id, filename)
 );
 CREATE INDEX IF NOT EXISTS idx_image_overrides_case ON case_image_overrides(case_id);
+
+-- 分类重构：真实案例边界。一个 group 可以关联一个或多个旧 cases 行，
+-- 例如历史扫描中被拆开的「术前/术后」子目录。
+CREATE TABLE IF NOT EXISTS case_groups (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  group_key       TEXT NOT NULL UNIQUE,
+  primary_case_id INTEGER REFERENCES cases(id),
+  customer_raw    TEXT,
+  title           TEXT NOT NULL,
+  root_path       TEXT NOT NULL,
+  case_ids_json   TEXT NOT NULL DEFAULT '[]',
+  status          TEXT NOT NULL DEFAULT 'auto',
+  diagnosis_json  TEXT NOT NULL DEFAULT '{}',
+  created_at      TIMESTAMP NOT NULL,
+  updated_at      TIMESTAMP NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_case_groups_primary_case ON case_groups(primary_case_id);
+CREATE INDEX IF NOT EXISTS idx_case_groups_status ON case_groups(status);
+
+-- 图片级观察结果。默认来自规则/本地 skill 结构化输出；低置信度时未来可追加 VLM 来源。
+CREATE TABLE IF NOT EXISTS image_observations (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  group_id       INTEGER NOT NULL REFERENCES case_groups(id) ON DELETE CASCADE,
+  case_id        INTEGER REFERENCES cases(id) ON DELETE SET NULL,
+  image_path     TEXT NOT NULL,
+  phase          TEXT NOT NULL DEFAULT 'unknown',
+  body_part      TEXT NOT NULL DEFAULT 'unknown',
+  view           TEXT NOT NULL DEFAULT 'unknown',
+  quality_json   TEXT NOT NULL DEFAULT '{}',
+  confidence     REAL NOT NULL DEFAULT 0,
+  source         TEXT NOT NULL DEFAULT 'rules',
+  reasons_json   TEXT NOT NULL DEFAULT '[]',
+  created_at     TIMESTAMP NOT NULL,
+  updated_at     TIMESTAMP NOT NULL,
+  UNIQUE(group_id, image_path)
+);
+CREATE INDEX IF NOT EXISTS idx_image_observations_group ON image_observations(group_id);
+CREATE INDEX IF NOT EXISTS idx_image_observations_case ON image_observations(case_id);
+CREATE INDEX IF NOT EXISTS idx_image_observations_confidence ON image_observations(confidence);
+
+-- 术前/术后候选配对与模板推荐。
+CREATE TABLE IF NOT EXISTS pair_candidates (
+  id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+  group_id           INTEGER NOT NULL REFERENCES case_groups(id) ON DELETE CASCADE,
+  slot               TEXT NOT NULL,
+  before_image_path  TEXT,
+  after_image_path   TEXT,
+  score              REAL NOT NULL DEFAULT 0,
+  metrics_json       TEXT NOT NULL DEFAULT '{}',
+  status             TEXT NOT NULL DEFAULT 'missing_pair',
+  template_hint      TEXT,
+  created_at         TIMESTAMP NOT NULL,
+  updated_at         TIMESTAMP NOT NULL,
+  UNIQUE(group_id, slot)
+);
+CREATE INDEX IF NOT EXISTS idx_pair_candidates_group ON pair_candidates(group_id);
+CREATE INDEX IF NOT EXISTS idx_pair_candidates_status ON pair_candidates(status);
+
+-- 出图质量结果。render_jobs.status 表达任务生命周期；这里表达产物质量与发布资格。
+CREATE TABLE IF NOT EXISTS render_quality (
+  id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+  render_job_id         INTEGER NOT NULL UNIQUE REFERENCES render_jobs(id) ON DELETE CASCADE,
+  quality_status        TEXT NOT NULL,
+  quality_score         REAL NOT NULL DEFAULT 0,
+  can_publish           INTEGER NOT NULL DEFAULT 0,
+  artifact_mode         TEXT NOT NULL DEFAULT 'real_layout',
+  manifest_status       TEXT,
+  blocking_count        INTEGER NOT NULL DEFAULT 0,
+  warning_count         INTEGER NOT NULL DEFAULT 0,
+  metrics_json          TEXT NOT NULL DEFAULT '{}',
+  review_verdict        TEXT,
+  reviewer              TEXT,
+  review_note           TEXT,
+  reviewed_at           TIMESTAMP,
+  created_at            TIMESTAMP NOT NULL,
+  updated_at            TIMESTAMP NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_render_quality_status ON render_quality(quality_status);
+
+-- AI 运行审计：默认只记录结构化摘要，不要求上传真实图像。
+CREATE TABLE IF NOT EXISTS ai_runs (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  subject_kind    TEXT NOT NULL,
+  subject_id      INTEGER NOT NULL,
+  model_role      TEXT NOT NULL,
+  provider        TEXT,
+  model_name      TEXT,
+  input_summary_json TEXT NOT NULL DEFAULT '{}',
+  output_json     TEXT NOT NULL DEFAULT '{}',
+  status          TEXT NOT NULL,
+  error_message   TEXT,
+  started_at      TIMESTAMP NOT NULL,
+  finished_at     TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_ai_runs_subject ON ai_runs(subject_kind, subject_id);
+
+-- 术后 AI 增强/模拟任务，与真实 render_jobs 隔离。
+CREATE TABLE IF NOT EXISTS simulation_jobs (
+  id                INTEGER PRIMARY KEY AUTOINCREMENT,
+  group_id          INTEGER REFERENCES case_groups(id) ON DELETE SET NULL,
+  case_id           INTEGER REFERENCES cases(id) ON DELETE SET NULL,
+  status            TEXT NOT NULL,
+  focus_targets_json TEXT NOT NULL DEFAULT '[]',
+  policy_json       TEXT NOT NULL DEFAULT '{}',
+  model_plan_json   TEXT NOT NULL DEFAULT '{}',
+  input_refs_json   TEXT NOT NULL DEFAULT '[]',
+  output_refs_json  TEXT NOT NULL DEFAULT '[]',
+  watermarked       INTEGER NOT NULL DEFAULT 1,
+  audit_json        TEXT NOT NULL DEFAULT '{}',
+  error_message     TEXT,
+  review_status     TEXT,
+  reviewer          TEXT,
+  review_note       TEXT,
+  reviewed_at       TIMESTAMP,
+  can_publish       INTEGER NOT NULL DEFAULT 0,
+  created_at        TIMESTAMP NOT NULL,
+  updated_at        TIMESTAMP NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_simulation_jobs_group ON simulation_jobs(group_id);
+CREATE INDEX IF NOT EXISTS idx_simulation_jobs_status ON simulation_jobs(status);
 """
 
 
@@ -170,6 +300,24 @@ MANUAL_COLUMNS = [
     ("skill_warnings_json", "TEXT"),
 ]
 
+SIMULATION_JOB_COLUMNS = [
+    ("review_status", "TEXT"),
+    ("reviewer", "TEXT"),
+    ("review_note", "TEXT"),
+    ("reviewed_at", "TIMESTAMP"),
+    ("can_publish", "INTEGER NOT NULL DEFAULT 0"),
+]
+
+CASE_TRASH_COLUMNS = [
+    ("original_abs_path", "TEXT"),
+    ("trashed_at", "TIMESTAMP"),
+    ("trash_reason", "TEXT"),
+]
+
+IMAGE_OVERRIDE_COLUMNS = [
+    ("manual_transform_json", "TEXT"),
+]
+
 
 def _ensure_manual_columns(conn) -> None:
     existing = {row[1] for row in conn.execute("PRAGMA table_info(cases)").fetchall()}
@@ -178,11 +326,36 @@ def _ensure_manual_columns(conn) -> None:
             conn.execute(f"ALTER TABLE cases ADD COLUMN {col} {kind}")
 
 
+def _ensure_simulation_job_columns(conn) -> None:
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(simulation_jobs)").fetchall()}
+    for col, kind in SIMULATION_JOB_COLUMNS:
+        if col not in existing:
+            conn.execute(f"ALTER TABLE simulation_jobs ADD COLUMN {col} {kind}")
+
+
+def _ensure_case_trash_columns(conn) -> None:
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(cases)").fetchall()}
+    for col, kind in CASE_TRASH_COLUMNS:
+        if col not in existing:
+            conn.execute(f"ALTER TABLE cases ADD COLUMN {col} {kind}")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_cases_trashed ON cases(trashed_at)")
+
+
+def _ensure_image_override_columns(conn) -> None:
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(case_image_overrides)").fetchall()}
+    for col, kind in IMAGE_OVERRIDE_COLUMNS:
+        if col not in existing:
+            conn.execute(f"ALTER TABLE case_image_overrides ADD COLUMN {col} {kind}")
+
+
 def init_schema() -> None:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     with connect() as conn:
         conn.executescript(SCHEMA)
+        _ensure_image_override_columns(conn)
         _ensure_manual_columns(conn)
+        _ensure_simulation_job_columns(conn)
+        _ensure_case_trash_columns(conn)
 
 
 @contextmanager

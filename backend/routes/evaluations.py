@@ -84,9 +84,9 @@ def _validate_subject_exists(
         ).fetchone()
         if not row:
             raise HTTPException(404, f"render job {subject_id} not found")
-        if row["status"] != "done":
+        if row["status"] not in {"done", "done_with_issues"}:
             raise HTTPException(
-                400, f"can only evaluate done render jobs (got {row['status']})"
+                400, f"can only evaluate completed render jobs (got {row['status']})"
             )
 
 
@@ -255,7 +255,7 @@ def list_pending(
                 FROM render_jobs j
                 JOIN cases c ON c.id = j.case_id
                 LEFT JOIN customers cust ON cust.id = c.customer_id
-                WHERE j.status = 'done'
+                WHERE j.status IN ('done', 'done_with_issues')
                   {brand_filter}
                   AND NOT EXISTS (
                       SELECT 1 FROM evaluations e
@@ -308,7 +308,7 @@ def list_pending(
             count_row = conn.execute(
                 f"""
                 SELECT COUNT(*) AS n FROM render_jobs j
-                WHERE j.status = 'done'
+                WHERE j.status IN ('done', 'done_with_issues')
                   {count_brand}
                   AND NOT EXISTS (
                       SELECT 1 FROM evaluations e

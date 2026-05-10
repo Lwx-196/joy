@@ -21,6 +21,8 @@ import sqlite3
 from datetime import datetime, timezone
 from typing import Any
 
+from . import stress
+
 # Columns the audit layer treats as user-mutable. If a future PATCH grows the
 # surface area, add the column name here and the snapshot logic will pick it up.
 TRACKED_COLUMNS: tuple[str, ...] = (
@@ -79,6 +81,8 @@ def record_revision(
 ) -> int:
     """Insert one revision row. Returns the revision id."""
     now = datetime.now(timezone.utc).isoformat()
+    before = stress.tag_payload(before)
+    after = stress.tag_payload(after)
     cur = conn.execute(
         """
         INSERT INTO case_revisions

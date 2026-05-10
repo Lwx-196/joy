@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from . import customer_resolver
+from . import customer_resolver, source_images
 
 # Directory roots to scan
 DEFAULT_ROOTS = [
@@ -29,11 +29,18 @@ DEFAULT_ROOTS = [
 ]
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".heic", ".webp", ".bmp"}
-SKIP_DIR_NAMES = {".case-layout-classify", ".case-layout-pick", ".case-layout-organize", ".case-layout-render"}
-SKIP_DIR_PREFIXES = (".case-layout-", "_download-inbox", ".cache", ".DS_Store")
+SKIP_DIR_NAMES = {
+    ".case-layout-classify",
+    ".case-layout-pick",
+    ".case-layout-organize",
+    ".case-layout-render",
+    ".case-workbench-trash",
+}
+SKIP_DIR_PREFIXES = (".case-layout-", ".case-workbench-", "_download-inbox", ".cache", ".DS_Store")
 
 BODY_KEYWORDS = ["颈纹", "直角肩", "瘦肩", "身体", "颈部", "肩颈", "后背", "手背"]
 LABELED_TOKENS = ("术前", "术后", "before", "after", "治疗前", "治疗后")
+STAGE_DIR_TOKENS = (*LABELED_TOKENS, "术中", "pre", "post")
 FRAGMENT_RE = re.compile(r"^frame_\d+", re.IGNORECASE)
 DATE_TAIL_RE = re.compile(r"\d{4}[\.\-/]\d{1,2}[\.\-/]\d{1,2}.*$")
 
@@ -49,7 +56,11 @@ def _iter_image_files(case_dir: Path) -> list[str]:
     files: list[str] = []
     try:
         for entry in case_dir.iterdir():
-            if entry.is_file() and entry.suffix.lower() in IMAGE_EXTS:
+            if (
+                entry.is_file()
+                and entry.suffix.lower() in IMAGE_EXTS
+                and source_images.is_source_image_file(entry.name)
+            ):
                 files.append(entry.name)
     except (OSError, PermissionError):
         return []
@@ -62,36 +73,105 @@ def _should_skip_dir(name: str) -> bool:
     return any(name.startswith(p) for p in SKIP_DIR_PREFIXES)
 
 
+def _is_stage_dir_name(name: str) -> bool:
+    lowered = name.lower()
+    return any(tok.lower() in lowered for tok in STAGE_DIR_TOKENS)
+
+
+def _iter_case_image_files(case_dir: Path) -> list[str]:
+    """Return source image paths relative to `case_dir`.
+
+    Direct-image cases keep the old behaviour (`["术前.jpg"]`). Directories with
+    immediate stage subdirectories (`术前/`, `术后/`, `before/`, `after/`) are
+    treated as one case boundary, so files are returned as relative paths such
+    as `术前/a.jpg`. Generated `.case-layout-*` trees are pruned.
+    """
+    direct = _iter_image_files(case_dir)
+    out: list[str] = list(direct)
+    try:
+        stage_dirs = [
+            entry
+            for entry in case_dir.iterdir()
+            if entry.is_dir() and not _should_skip_dir(entry.name) and _is_stage_dir_name(entry.name)
+        ]
+    except (OSError, PermissionError):
+        return sorted(out)
+
+    for stage_dir in stage_dirs:
+        for current_dir, subdirs, files in os.walk(stage_dir, followlinks=False):
+            subdirs[:] = [d for d in subdirs if not _should_skip_dir(d)]
+            current_path = Path(current_dir)
+            for filename in files:
+                if Path(filename).suffix.lower() not in IMAGE_EXTS:
+                    continue
+                try:
+                    rel = current_path.joinpath(filename).relative_to(case_dir)
+                except ValueError:
+                    continue
+                if not source_images.is_source_image_file(str(rel)):
+                    continue
+                out.append(str(rel))
+    return sorted({*out})
+
+
+def _case_mtime(case_dir: Path, image_files: list[str]) -> float:
+    mtimes: list[float] = []
+    try:
+        mtimes.append(case_dir.stat().st_mtime)
+    except OSError:
+        pass
+    for rel in image_files:
+        try:
+            mtimes.append((case_dir / rel).stat().st_mtime)
+        except OSError:
+            continue
+    return max(mtimes) if mtimes else 0
+
+
 def discover_case_dirs(roots: list[Path]) -> list[CandidateCaseDir]:
-    """Find leaf directories that contain images directly."""
+    """Find case directories.
+
+    Old behaviour found only leaf directories with direct images. The revised
+    scanner also promotes a parent directory to a case when its immediate
+    children are stage folders such as `术前/术后`, preventing one clinical case
+    from being split into multiple `non_labeled` rows.
+    """
     candidates: list[CandidateCaseDir] = []
     seen: set[Path] = set()
+    covered_stage_dirs: set[Path] = set()
 
     for root in roots:
         if not root.exists():
             continue
         for current_dir, subdirs, files in os.walk(root, followlinks=False):
             current_path = Path(current_dir)
+            if any(current_path == p or p in current_path.parents for p in covered_stage_dirs):
+                subdirs[:] = []
+                continue
 
             # Prune: skip generated artefacts
             subdirs[:] = [d for d in subdirs if not _should_skip_dir(d)]
 
             # Check direct image files
             direct_images = [f for f in files if Path(f).suffix.lower() in IMAGE_EXTS]
-            if not direct_images:
+            stage_subdirs = [d for d in subdirs if _is_stage_dir_name(d)]
+            image_files = _iter_case_image_files(current_path) if (direct_images or stage_subdirs) else []
+            if not image_files:
                 continue
             if current_path in seen:
                 continue
-            try:
-                mtime = current_path.stat().st_mtime
-            except OSError:
+            mtime = _case_mtime(current_path, image_files)
+            if not mtime:
                 continue
             candidates.append(CandidateCaseDir(
                 abs_path=current_path,
-                image_files=sorted(direct_images),
+                image_files=image_files,
                 last_modified=mtime,
             ))
             seen.add(current_path)
+            for name in stage_subdirs:
+                covered_stage_dirs.add(current_path / name)
+            subdirs[:] = [d for d in subdirs if d not in stage_subdirs]
     return candidates
 
 
@@ -200,12 +280,10 @@ def rescan_one(conn: sqlite3.Connection, case_id: int) -> dict[str, Any]:
     if not case_dir.exists() or not case_dir.is_dir():
         raise ValueError(f"directory missing: {case_dir}")
 
-    # Re-collect image files for this dir only
-    image_files: list[str] = []
-    last_modified = case_dir.stat().st_mtime
-    for entry in case_dir.iterdir():
-        if entry.is_file() and entry.suffix.lower() in IMAGE_EXTS:
-            image_files.append(entry.name)
+    # Re-collect source images for this case boundary. This supports both old
+    # direct-image leaves and grouped stage subdirectories.
+    image_files = _iter_case_image_files(case_dir)
+    last_modified = _case_mtime(case_dir, image_files)
     cand = CandidateCaseDir(
         abs_path=case_dir,
         image_files=sorted(image_files),

@@ -58,6 +58,10 @@ ISSUE_DICT: dict[str, dict[str, str]] = {
         "zh": "图片质量评分偏低",
         "next": "补拍清晰图或剔除该角度",
     },
+    "not_case_source_directory": {
+        "zh": "不是案例源照片目录",
+        "next": "保留为素材归档，不进入正式出图；如需要出图，请绑定或补充真实术前/术后源目录",
+    },
 }
 
 # Codes that are warnings rather than hard blockers (still surface in UI but as "warn").

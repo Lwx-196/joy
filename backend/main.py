@@ -4,9 +4,9 @@ from __future__ import annotations
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from . import db
+from . import db, render_quality
 from .render_queue import RENDER_QUEUE
-from .routes import audit, cases, customers, evaluations, issues, jobs, render, scan, upgrade
+from .routes import audit, case_groups, cases, customers, evaluations, image_workbench, issues, jobs, render, scan, stress, upgrade
 from .upgrade_queue import UPGRADE_QUEUE
 
 app = FastAPI(title="case-workbench", version="0.1.0")
@@ -19,11 +19,16 @@ app.add_middleware(
 )
 
 db.init_schema()
+with db.connect() as _conn:
+    render_quality.backfill_existing_render_quality(_conn)
 RENDER_QUEUE.recover()
 UPGRADE_QUEUE.recover()
 
 app.include_router(scan.router)
+app.include_router(stress.router)
+app.include_router(case_groups.router)
 app.include_router(cases.router)
+app.include_router(image_workbench.router)
 app.include_router(audit.router)
 app.include_router(render.router)
 app.include_router(upgrade.router)
