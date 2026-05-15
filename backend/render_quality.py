@@ -9,8 +9,46 @@ from pathlib import Path
 from typing import Any
 
 
+_TRANSIENT_ERROR_PATTERN = re.compile(
+    r"(?:"
+    # Status-code anchors: HTTP 403, HTTP 429, "403 forbidden", "429 too many", etc.
+    r"\bHTTP[\s_-]*(?:403|429)\b"
+    r"|\b(?:403|429)\s+(?:forbidden|too[\s_-]*many|rate|quota|client[\s_-]*error)"
+    # Explicit quota / rate-limit phrasing
+    r"|quota[\s_-]*(?:exceed|exhaust|limit)"
+    r"|rate[\s_-]*limit"
+    r"|api[\s_-]*error"
+    # Bare "forbidden" only when not embedded in unrelated text
+    r"|^\s*forbidden\b"
+    r")",
+    re.IGNORECASE,
+)
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _split_transient_errors(messages: list[str]) -> tuple[list[str], list[str]]:
+    """Partition messages into (kept, transient) using `_TRANSIENT_ERROR_PATTERN`.
+
+    Transient = upstream API hiccups (HTTP 403/429, quota, rate limit) that say
+    nothing about the render artifact's quality and should not surface as
+    user-facing warnings.
+    """
+    kept: list[str] = []
+    transient: list[str] = []
+    for msg in messages:
+        if msg and _TRANSIENT_ERROR_PATTERN.search(msg):
+            transient.append(msg)
+        else:
+            kept.append(msg)
+    return kept, transient
+
+
+def _column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    return any((r["name"] if isinstance(r, sqlite3.Row) else r[1]) == column for r in rows)
 
 
 def _json_load(raw: str | None, fallback: Any) -> Any:
@@ -224,7 +262,11 @@ def evaluate_render_result(result: dict[str, Any]) -> dict[str, Any]:
     used_ai_padfill = bool(ai_usage.get("used_ai_padfill"))
     render_error = str(result.get("render_error") or "").strip()
     blocking_issues = [str(item) for item in (result.get("blocking_issues") or [])]
-    warning_items = [str(item) for item in (result.get("warnings") or [])]
+    raw_warning_items = [str(item) for item in (result.get("warnings") or [])]
+    # Transient API errors (HTTP 403/429, quota, rate limit) are upstream
+    # hiccups, not artifact-quality signals — pull them out before any
+    # bucketing / display layer / score calculation sees them.
+    warning_items, system_transient_errors = _split_transient_errors(raw_warning_items)
     composition_alerts = _composition_alerts(result.get("composition_alerts"))
     selected_files = _selected_files_from_manifest(result.get("manifest_path"))
 
@@ -282,6 +324,7 @@ def evaluate_render_result(result: dict[str, Any]) -> dict[str, Any]:
             "warning_buckets": warning_buckets,
             "warning_layers": warning_layers or {},
             "warning_display_layers": result.get("warning_display_layers") if isinstance(result.get("warning_display_layers"), dict) else {"selected_actionable": display_warnings},
+            "system_transient_errors": system_transient_errors,
             "actionable_warning_count": actionable_warnings,
             "noise_warning_count": noisy_warnings,
             "audit_warning_count": len(warning_items),
@@ -327,11 +370,24 @@ def persist_render_quality(conn: sqlite3.Connection, job_id: int, quality: dict[
             now,
         ),
     )
+    # Optional column written only when the schema has been migrated.
+    transient = quality.get("metrics", {}).get("system_transient_errors") or []
+    if transient and _column_exists(conn, "render_quality", "system_transient_errors_json"):
+        conn.execute(
+            "UPDATE render_quality SET system_transient_errors_json = ? WHERE render_job_id = ?",
+            (json.dumps(transient, ensure_ascii=False), job_id),
+        )
 
 
 def quality_row_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
     if row is None:
         return None
+    metrics = _json_load(row["metrics_json"], {})
+    try:
+        transient_raw = row["system_transient_errors_json"]
+    except (IndexError, KeyError):
+        transient_raw = None
+    transient = _json_load(transient_raw, []) if transient_raw else metrics.get("system_transient_errors") or []
     return {
         "id": row["id"],
         "render_job_id": row["render_job_id"],
@@ -342,7 +398,8 @@ def quality_row_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
         "manifest_status": row["manifest_status"],
         "blocking_count": row["blocking_count"],
         "warning_count": row["warning_count"],
-        "metrics": _json_load(row["metrics_json"], {}),
+        "metrics": metrics,
+        "system_transient_errors": transient,
         "review_verdict": row["review_verdict"],
         "reviewer": row["reviewer"],
         "review_note": row["review_note"],

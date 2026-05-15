@@ -17,11 +17,13 @@ frontend/**/*.tsbuildinfo
 # Project-root test artifacts (Playwright leaves traces here too)
 test-results/
 stress-results/
+.context/
 
 # Live database (CI uses tests/fixtures/case-workbench.test.db instead)
 case-workbench.db
 case_workbench.db
 cases.db
+*.db.schema.lock
 
 # Backend test artifacts
 backend/.pytest_cache/
@@ -29,6 +31,11 @@ backend/.pytest_cache/
 
 # Local AI simulation artifacts
 case-workbench-ai/
+
+# Delivery render outputs (large JPGs); only manifests + report are tracked
+delivery/body/
+delivery/standard_face/
+delivery/*/
 
 # Editor / OS
 .DS_Store
