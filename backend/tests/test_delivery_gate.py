@@ -200,6 +200,12 @@ def _item(case_id: int = 1, score: float = 95.0, customer: str = "alice") -> Del
     )
 
 
+def _gate_with_memory_conn() -> DeliveryGate:
+    """Build a DeliveryGate against an in-memory SQLite for tests that
+    only exercise the filesystem-side `export` (no DB queries)."""
+    return DeliveryGate(sqlite3.connect(":memory:"))
+
+
 def test_export_creates_correct_filename_and_path(tmp_path: Path) -> None:
     src = tmp_path / "src.jpg"
     src.write_bytes(b"pretend-jpeg")
@@ -207,7 +213,7 @@ def test_export_creates_correct_filename_and_path(tmp_path: Path) -> None:
     object.__setattr__(item, "source_path", str(src))  # frozen dataclass
 
     out_dir = tmp_path / "delivery"
-    dest = DeliveryGate.export(item, out_dir, dry_run=False)
+    dest = _gate_with_memory_conn().export(item, out_dir, dry_run=False)
 
     expected = out_dir / "alice" / "case_name__score95_bi.jpg"
     assert dest == expected
@@ -222,7 +228,7 @@ def test_export_dry_run_no_copy(tmp_path: Path) -> None:
     object.__setattr__(item, "source_path", str(src))
 
     out_dir = tmp_path / "delivery"
-    dest = DeliveryGate.export(item, out_dir, dry_run=True)
+    dest = _gate_with_memory_conn().export(item, out_dir, dry_run=True)
     assert not dest.exists()
     assert not out_dir.exists()
 

@@ -7,7 +7,10 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import sqlite3
+import sys
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
@@ -23,6 +26,42 @@ from backend.services.delivery_gate import (
 ROOT = Path(__file__).resolve().parent.parent.parent
 DB_PATH = ROOT / "case-workbench.db"
 DEFAULT_OUTPUT = ROOT / "delivery" / "quality_report.md"
+DEFAULT_DRIFT_THRESHOLD = 3
+
+
+@dataclass(frozen=True)
+class BaselineSnapshot:
+    """Frozen snapshot of expected delivery-pool counts at a known point in time.
+
+    Used by `render_report` to detect drift between the requirement-doc state
+    and live DB state. The default (`DEFAULT_BASELINE`) tracks the original
+    formal-delivery-v1 requirement doc (2026-05-15 03:50); override at the CLI
+    with `--baseline-snapshot path.json` when the snapshot itself moves.
+    """
+
+    taken_at: str
+    can_publish_total: int
+    p0_count: int
+    p1_count: int
+    p2_count: int
+    unrendered_total: int
+
+
+DEFAULT_BASELINE = BaselineSnapshot(
+    taken_at="2026-05-15 03:50",
+    can_publish_total=29,
+    p0_count=17,
+    p1_count=5,
+    p2_count=7,
+    unrendered_total=74,
+)
+
+
+def _load_baseline(path: Path | None) -> BaselineSnapshot:
+    if path is None:
+        return DEFAULT_BASELINE
+    data = json.loads(path.read_text(encoding="utf-8"))
+    return BaselineSnapshot(**data)
 
 
 def _connect(db_path: Path) -> sqlite3.Connection:
@@ -108,13 +147,64 @@ def _format_table(items: list[dict]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def render_report(conn: sqlite3.Connection) -> str:
+def _drift_lines(
+    actuals: dict[str, int],
+    baseline: BaselineSnapshot,
+    threshold: int,
+) -> list[str]:
+    """Return the WARNING block lines when any dimension drifts beyond threshold.
+
+    Returns `[]` when every dimension is within +/- threshold.
+    """
+    drifts: list[tuple[str, int, int]] = []
+    pairs = [
+        ("can_publish=1 总数", actuals["total"], baseline.can_publish_total),
+        ("P0", actuals["p0"], baseline.p0_count),
+        ("P1", actuals["p1"], baseline.p1_count),
+        ("P2", actuals["p2"], baseline.p2_count),
+        ("无 render", actuals["unrendered"], baseline.unrendered_total),
+    ]
+    for label, actual, expected in pairs:
+        diff = actual - expected
+        if abs(diff) > threshold:
+            drifts.append((label, actual, diff))
+    if not drifts:
+        return []
+    lines = [
+        "## ⚠️ Baseline Drift\n",
+        f"基线快照（{baseline.taken_at}）已超过 ±{threshold} 案的容差，建议刷新 snapshot：\n\n",
+        "| 维度 | 真实值 | 偏差 |\n|---|---|---|\n",
+    ]
+    for label, actual, diff in drifts:
+        lines.append(f"| {label} | **{actual}** | {diff:+d} |\n")
+    lines.append("\n")
+    return lines
+
+
+def render_report(
+    conn: sqlite3.Connection,
+    baseline: BaselineSnapshot = DEFAULT_BASELINE,
+    drift_threshold: int = DEFAULT_DRIFT_THRESHOLD,
+) -> tuple[str, dict[str, int]]:
+    """Render the markdown report. Returns (report, actuals).
+
+    `actuals` exposes the same dimensions the caller can use to set an exit
+    code (e.g. CI flagging drift); `render_report` itself never raises on
+    drift — it surfaces it in-band via a `## ⚠️ Baseline Drift` section.
+    """
     items = collect_deliverables(conn)
     p0 = _bucket(items, "P0")
     p1 = _bucket(items, "P1")
     p2 = _bucket(items, "P2")
     unrendered = _count_unrendered(conn)
     unrendered_total = sum(unrendered.values())
+    actuals = {
+        "total": len(items),
+        "p0": len(p0),
+        "p1": len(p1),
+        "p2": len(p2),
+        "unrendered": unrendered_total,
+    }
 
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -124,15 +214,22 @@ def render_report(conn: sqlite3.Connection) -> str:
 
     parts.append("## 现状对账\n")
     parts.append(
-        "| 维度 | 需求快照 (2026-05-15 03:50) | 真实 DB 状态 | 偏差 |\n"
+        f"| 维度 | 需求快照 ({baseline.taken_at}) | 真实 DB 状态 | 偏差 |\n"
         "|---|---|---|---|\n"
-        f"| `can_publish=1` 总数 | 29 | **{len(items)}** | {len(items) - 29:+d} |\n"
-        f"| P0 (≥{P0_THRESHOLD:.0f}) | 17 | **{len(p0)}** | {len(p0) - 17:+d} |\n"
-        f"| P1 ({P1_THRESHOLD:.0f}-{P0_THRESHOLD - 0.1:.1f}) | 5 | **{len(p1)}** | {len(p1) - 5:+d} |\n"
-        f"| P2 误锁 (<{P1_THRESHOLD:.0f}) | 7 | **{len(p2)}** | {len(p2) - 7:+d} |\n"
-        f"| 无 render 案例 | 74 | **{unrendered_total}** | {unrendered_total - 74:+d} |\n"
+        f"| `can_publish=1` 总数 | {baseline.can_publish_total} | **{actuals['total']}** | "
+        f"{actuals['total'] - baseline.can_publish_total:+d} |\n"
+        f"| P0 (≥{P0_THRESHOLD:.0f}) | {baseline.p0_count} | **{actuals['p0']}** | "
+        f"{actuals['p0'] - baseline.p0_count:+d} |\n"
+        f"| P1 ({P1_THRESHOLD:.0f}-{P0_THRESHOLD - 0.1:.1f}) | {baseline.p1_count} | "
+        f"**{actuals['p1']}** | {actuals['p1'] - baseline.p1_count:+d} |\n"
+        f"| P2 误锁 (<{P1_THRESHOLD:.0f}) | {baseline.p2_count} | **{actuals['p2']}** | "
+        f"{actuals['p2'] - baseline.p2_count:+d} |\n"
+        f"| 无 render 案例 | {baseline.unrendered_total} | **{actuals['unrendered']}** | "
+        f"{actuals['unrendered'] - baseline.unrendered_total:+d} |\n"
     )
     parts.append("\n")
+
+    parts.extend(_drift_lines(actuals, baseline, drift_threshold))
 
     parts.append(f"## 🟢 P0 精品级 (score ≥ {P0_THRESHOLD:.0f}) — {len(p0)} 案\n")
     parts.append(_format_table(p0))
@@ -170,24 +267,52 @@ def render_report(conn: sqlite3.Connection) -> str:
         "| 4 | body 类模板稳定性 | 16 case 暂用 body-dual-compare，待回归 |\n"
         "| 5 | API 额度恢复状态 | 待用户确认 |\n"
     )
-    return "".join(parts)
+    return "".join(parts), actuals
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Generate delivery quality report")
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument("--db", type=Path, default=DB_PATH)
+    parser.add_argument(
+        "--baseline-snapshot",
+        type=Path,
+        default=None,
+        help=(
+            "Path to a JSON file describing the baseline counts to compare DB "
+            "against (fields: taken_at, can_publish_total, p0_count, p1_count, "
+            "p2_count, unrendered_total). Defaults to the embedded "
+            f"DEFAULT_BASELINE ({DEFAULT_BASELINE.taken_at})."
+        ),
+    )
+    parser.add_argument(
+        "--drift-threshold",
+        type=int,
+        default=DEFAULT_DRIFT_THRESHOLD,
+        help=f"Per-dimension absolute drift tolerance (default {DEFAULT_DRIFT_THRESHOLD}).",
+    )
     args = parser.parse_args()
+
+    baseline = _load_baseline(args.baseline_snapshot)
 
     conn = _connect(args.db)
     try:
-        report = render_report(conn)
+        report, actuals = render_report(conn, baseline, args.drift_threshold)
     finally:
         conn.close()
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(report, encoding="utf-8")
     print(f"✅ Report written: {args.output} ({len(report)} chars)")
+
+    drifted = _drift_lines(actuals, baseline, args.drift_threshold)
+    if drifted:
+        # Surface drift on stderr so CI / cron jobs can grep without parsing markdown.
+        print(
+            f"⚠️ Baseline drift detected (threshold ±{args.drift_threshold}); "
+            f"baseline taken_at={baseline.taken_at}; actuals={json.dumps(actuals)}",
+            file=sys.stderr,
+        )
 
 
 if __name__ == "__main__":

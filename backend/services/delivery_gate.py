@@ -201,11 +201,11 @@ class DeliveryGate:
     # Export
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def export(item: DeliverableItem, output_dir: Path, dry_run: bool = False) -> Path:
+    def export(self, item: DeliverableItem, output_dir: Path, dry_run: bool = False) -> Path:
         """Copy the case's final-board.jpg into the customer subdirectory.
 
-        Returns the destination path. In `dry_run` mode no file is touched.
+        Instance method (not staticmethod) for API symmetry with preflight_check /
+        quality_gate / list_deliverables. `dry_run` skips the file copy.
         """
         customer_dir = output_dir / item.customer
         dest_path = customer_dir / item.dest_filename()
