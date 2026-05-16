@@ -27,20 +27,23 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import os
 import re
+import shutil
 import sqlite3
 import subprocess
 import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Callable
 
-from . import _job_pool, audit, db, render_executor, render_quality, skill_bridge, source_images, source_selection, stress
+from . import _job_pool, ai_generation_adapter, audit, db, render_executor, render_quality, skill_bridge, source_images, source_selection, stress
 
 DEFAULT_TEMPLATE = "tri-compare"
 DEFAULT_SEMANTIC_JUDGE = "auto"
+LOGGER = logging.getLogger(__name__)
 
 
 def _env_int(name: str, default: int) -> int:
@@ -223,6 +226,24 @@ def _build_bound_source_staging(
     return staging, linked, render_names
 
 
+def _cleanup_bound_source_staging(job_id: int, staging_dir: Path | None) -> None:
+    if staging_dir is None:
+        return
+    staging = Path(staging_dir)
+    if staging.name != f"job-{job_id}" or staging.parent.name != ".case-workbench-bound-render":
+        LOGGER.warning("skip unsafe bound source staging cleanup: job=%s path=%s", job_id, staging)
+        return
+    if staging.is_symlink():
+        LOGGER.warning("skip symlink bound source staging cleanup: job=%s path=%s", job_id, staging)
+        return
+    try:
+        shutil.rmtree(staging)
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        LOGGER.warning("failed to clean bound source staging: job=%s path=%s error=%s", job_id, staging, exc)
+
+
 def _render_excluded_files(raw_meta: str | None) -> set[str]:
     meta = _parse_case_meta(raw_meta)
     states = meta.get(IMAGE_REVIEW_META_KEY)
@@ -310,7 +331,8 @@ def _selection_metadata_with_fallback(
 
 def _fetch_case_image_overrides(conn: sqlite3.Connection, case_id: int) -> dict[str, dict[str, Any]]:
     rows = conn.execute(
-        "SELECT filename, manual_phase, manual_view, manual_transform_json FROM case_image_overrides WHERE case_id = ?",
+        """SELECT filename, manual_phase, manual_view, manual_transform_json, reason_json, reviewer
+           FROM case_image_overrides WHERE case_id = ?""",
         (case_id,),
     ).fetchall()
     out: dict[str, dict[str, Any]] = {}
@@ -323,6 +345,23 @@ def _fetch_case_image_overrides(conn: sqlite3.Connection, case_id: int) -> dict[
                 transform = None
             if isinstance(transform, dict):
                 item["transform"] = transform
+        if row["reviewer"]:
+            item["reviewer"] = row["reviewer"]
+        reason_json = row["reason_json"]
+        if reason_json:
+            item["reason_json"] = reason_json
+            try:
+                reason_payload = json.loads(reason_json)
+            except (TypeError, ValueError):
+                reason_payload = None
+            if isinstance(reason_payload, dict):
+                reason = str(reason_payload.get("reason") or "").strip()
+                if reason:
+                    item["reason"] = reason
+            else:
+                reason = str(reason_json).strip()
+                if reason:
+                    item["reason"] = reason
         out[str(row["filename"])] = item
     return out
 
@@ -338,11 +377,11 @@ def _phase_from_filename(filename: str) -> str | None:
 
 def _view_from_filename(filename: str) -> str | None:
     lowered = filename.lower()
-    if re.search(r"3/4|34|45|45°|微侧|斜侧|半侧|oblique", filename, re.I):
+    if re.search(r"3/4|34|45|45°|45度|45侧|四分之三|微侧|斜侧|斜面|半侧|oblique", filename, re.I):
         return "oblique"
     if "正面" in filename or "正脸" in filename or "front" in lowered:
         return "front"
-    if "侧面" in filename or "侧脸" in filename or "side" in lowered or "profile" in lowered:
+    if re.search(r"侧面|侧脸|左侧(?!背景)|右侧(?!背景)|左脸|右脸|side|profile", filename, re.I):
         return "side"
     return None
 
@@ -463,6 +502,21 @@ def _selection_plan_candidate(candidate: dict[str, Any] | None) -> dict[str, Any
         "selection_metadata_source": candidate.get("selection_metadata_source"),
         "pose": candidate.get("pose"),
         "direction": candidate.get("direction"),
+        "sharpness_score": candidate.get("sharpness_score"),
+        "brightness": candidate.get("brightness"),
+        "mean_luma": candidate.get("mean_luma"),
+        "luma": candidate.get("luma"),
+        "exposure_score": candidate.get("exposure_score"),
+        "exposure": candidate.get("exposure"),
+        "crop_touches_frame": candidate.get("crop_touches_frame"),
+        "face_crop_touches_frame": candidate.get("face_crop_touches_frame"),
+        "crop_margin": candidate.get("crop_margin"),
+        "face_crop_margin": candidate.get("face_crop_margin"),
+        "identity_similarity": candidate.get("identity_similarity"),
+        "same_person_similarity": candidate.get("same_person_similarity"),
+        "arcface_similarity": candidate.get("arcface_similarity"),
+        "face_count": candidate.get("face_count"),
+        "identity_provider": candidate.get("identity_provider"),
     }
 
 
@@ -542,6 +596,21 @@ def _build_render_selection_context(
                 "pose": (metadata or {}).get("pose") if isinstance(metadata, dict) else None,
                 "direction": (metadata or {}).get("direction") if isinstance(metadata, dict) else None,
                 "sharpness_score": (metadata or {}).get("sharpness_score") if isinstance(metadata, dict) else None,
+                "brightness": (metadata or {}).get("brightness") if isinstance(metadata, dict) else None,
+                "mean_luma": (metadata or {}).get("mean_luma") if isinstance(metadata, dict) else None,
+                "luma": (metadata or {}).get("luma") if isinstance(metadata, dict) else None,
+                "exposure_score": (metadata or {}).get("exposure_score") if isinstance(metadata, dict) else None,
+                "exposure": (metadata or {}).get("exposure") if isinstance(metadata, dict) else None,
+                "crop_touches_frame": (metadata or {}).get("crop_touches_frame") if isinstance(metadata, dict) else None,
+                "face_crop_touches_frame": (metadata or {}).get("face_crop_touches_frame") if isinstance(metadata, dict) else None,
+                "crop_margin": (metadata or {}).get("crop_margin") if isinstance(metadata, dict) else None,
+                "face_crop_margin": (metadata or {}).get("face_crop_margin") if isinstance(metadata, dict) else None,
+                "identity_similarity": (metadata or {}).get("identity_similarity") if isinstance(metadata, dict) else None,
+                "same_person_similarity": (metadata or {}).get("same_person_similarity") if isinstance(metadata, dict) else None,
+                "arcface_similarity": (metadata or {}).get("arcface_similarity") if isinstance(metadata, dict) else None,
+                "identity_embedding": (metadata or {}).get("identity_embedding") if isinstance(metadata, dict) else None,
+                "face_count": (metadata or {}).get("face_count") if isinstance(metadata, dict) else None,
+                "identity_provider": (metadata or {}).get("identity_provider") if isinstance(metadata, dict) else None,
                 "selection_metadata_source": (metadata or {}).get("selection_metadata_source") if isinstance(metadata, dict) else None,
             }
             if isinstance(manual_override, dict) and isinstance(manual_override.get("transform"), dict):
@@ -707,6 +776,7 @@ def _classification_blocking_preflight(
     blockers: list[str] = []
     missing_count = 0
     low_confidence_count = 0
+    untraced_manual_override_count = 0
     needs_repick_count = 0
     copied_review_count = 0
     unresolved_samples: list[str] = []
@@ -738,16 +808,22 @@ def _classification_blocking_preflight(
                 angle_confidence = float(metadata.get("angle_confidence"))
             except (TypeError, ValueError):
                 angle_confidence = None
-        if angle_confidence is not None and angle_confidence < LOW_CONFIDENCE_REVIEW_BELOW and not manual:
-            low_confidence_count += 1
-            unresolved_samples.append(filename)
-    if not any((missing_count, low_confidence_count, needs_repick_count, copied_review_count)):
+        if angle_confidence is not None and angle_confidence < LOW_CONFIDENCE_REVIEW_BELOW:
+            if not manual:
+                low_confidence_count += 1
+                unresolved_samples.append(filename)
+            elif not _manual_override_traceable(override):
+                untraced_manual_override_count += 1
+                unresolved_samples.append(filename)
+    if not any((missing_count, low_confidence_count, untraced_manual_override_count, needs_repick_count, copied_review_count)):
         return None
     pieces = []
     if missing_count:
         pieces.append(f"待补充 {missing_count} 张")
     if low_confidence_count:
         pieces.append(f"低置信 {low_confidence_count} 张")
+    if untraced_manual_override_count:
+        pieces.append(f"人工覆盖缺少原因 {untraced_manual_override_count} 张")
     if needs_repick_count:
         pieces.append(f"需换片 {needs_repick_count} 张")
     if copied_review_count:
@@ -770,6 +846,7 @@ def _classification_blocking_preflight(
             "semantic_judge_effective": "blocked-classification-preflight",
             "classification_missing_count": missing_count,
             "classification_low_confidence_count": low_confidence_count,
+            "classification_untraced_manual_override_count": untraced_manual_override_count,
             "classification_needs_repick_count": needs_repick_count,
             "classification_copied_review_count": copied_review_count,
             "source_count": len(image_files),
@@ -778,6 +855,24 @@ def _classification_blocking_preflight(
         "blocking_issues": blockers,
         "warnings": [],
     }
+
+
+def _manual_override_traceable(override: dict[str, Any] | None) -> bool:
+    if not isinstance(override, dict):
+        return False
+    reviewer = str(override.get("reviewer") or "").strip()
+    reason = str(override.get("reason") or "").strip()
+    if not reason:
+        raw = override.get("reason_json")
+        if isinstance(raw, str) and raw.strip():
+            try:
+                parsed = json.loads(raw)
+            except (TypeError, ValueError):
+                reason = raw.strip()
+            else:
+                if isinstance(parsed, dict):
+                    reason = str(parsed.get("reason") or parsed.get("note") or "").strip()
+    return bool(reviewer and reason)
 
 
 def _source_readiness_preflight(
@@ -1225,10 +1320,19 @@ class RenderQueue:
         template: str = DEFAULT_TEMPLATE,
         semantic_judge: str = DEFAULT_SEMANTIC_JUDGE,
         batch_id: str | None = None,
+        render_mode: str = "ai",
+        best_pair_selection_id: int | None = None,
+        candidates_fingerprint_snapshot: str | None = None,
+        draft_preview: bool = False,
+        model: str | None = None,
+        system_prompt: str | None = None,
+        options: dict[str, Any] | None = None,
     ) -> int:
         """Insert job row + submit to thread pool. Returns job_id."""
         if not brand:
             raise ValueError("brand required")
+        if render_mode not in {"ai", "best-pair"}:
+            raise ValueError("render_mode must be ai or best-pair")
         with db.connect() as conn:
             row = conn.execute(
                 "SELECT id FROM cases WHERE id = ? AND trashed_at IS NULL", (case_id,)
@@ -1238,8 +1342,10 @@ class RenderQueue:
             cur = conn.execute(
                 """
                 INSERT INTO render_jobs
-                    (case_id, brand, template, status, batch_id, enqueued_at, semantic_judge, meta_json)
-                VALUES (?, ?, ?, 'queued', ?, ?, ?, ?)
+                    (case_id, brand, template, status, batch_id, enqueued_at,
+                     semantic_judge, render_mode, best_pair_selection_id,
+                     candidates_fingerprint_snapshot, draft_preview, meta_json)
+                VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     case_id,
@@ -1248,7 +1354,25 @@ class RenderQueue:
                     batch_id,
                     _now_iso(),
                     semantic_judge,
-                    json.dumps(stress.tag_payload({"enqueue_source": "render_queue"}), ensure_ascii=False),
+                    render_mode,
+                    best_pair_selection_id,
+                    candidates_fingerprint_snapshot,
+                    1 if draft_preview else 0,
+                    json.dumps(
+                        stress.tag_payload(
+                            {
+                                "enqueue_source": "render_queue",
+                                "render_mode": render_mode,
+                                "best_pair_selection_id": best_pair_selection_id,
+                                "candidates_fingerprint_snapshot": candidates_fingerprint_snapshot,
+                                "draft_preview": bool(draft_preview),
+                                "model": model,
+                                "system_prompt": system_prompt,
+                                "options": options,
+                            }
+                        ),
+                        ensure_ascii=False,
+                    ),
                 ),
             )
             job_id = cur.lastrowid or 0
@@ -1261,6 +1385,9 @@ class RenderQueue:
                 "brand": brand,
                 "template": template,
                 "status": "queued",
+                "render_mode": render_mode,
+                "best_pair_selection_id": best_pair_selection_id,
+                "draft_preview": bool(draft_preview),
             }
         )
         _job_pool.submit(self._execute_safe, job_id)
@@ -1272,6 +1399,10 @@ class RenderQueue:
         brand: str,
         template: str = DEFAULT_TEMPLATE,
         semantic_judge: str = DEFAULT_SEMANTIC_JUDGE,
+        draft_preview: bool = False,
+        model: str | None = None,
+        system_prompt: str | None = None,
+        options: dict[str, Any] | None = None,
     ) -> tuple[str, list[int]]:
         """Insert N job rows sharing one batch_id. Returns (batch_id, job_ids)."""
         if not case_ids:
@@ -1280,7 +1411,17 @@ class RenderQueue:
         job_ids: list[int] = []
         for case_id in case_ids:
             try:
-                jid = self.enqueue(case_id, brand, template, semantic_judge, batch_id=batch_id)
+                jid = self.enqueue(
+                    case_id,
+                    brand,
+                    template,
+                    semantic_judge,
+                    batch_id=batch_id,
+                    draft_preview=draft_preview,
+                    model=model,
+                    system_prompt=system_prompt,
+                    options=options,
+                )
                 job_ids.append(jid)
             except ValueError:
                 # Skip missing cases but continue the batch.
@@ -1299,7 +1440,14 @@ class RenderQueue:
             if row["status"] != "queued":
                 return False
             conn.execute(
-                "UPDATE render_jobs SET status = 'cancelled', finished_at = ? WHERE id = ?",
+                """
+                UPDATE render_jobs
+                SET status = 'cancelled',
+                    finished_at = ?,
+                    recovery_token = NULL,
+                    recovery_claimed_at = NULL
+                WHERE id = ?
+                """,
                 (_now_iso(), job_id),
             )
         self._publish(
@@ -1325,6 +1473,92 @@ class RenderQueue:
             self._mark_failed(job_id, f"unexpected: {e}")
 
     def _execute_render(self, job_id: int) -> None:
+        bound_staging_dir: Path | None = None
+
+        def remember_bound_staging(path: Path) -> None:
+            nonlocal bound_staging_dir
+            bound_staging_dir = path
+
+        try:
+            self._execute_render_impl(job_id, remember_bound_staging)
+        finally:
+            _cleanup_bound_source_staging(job_id, bound_staging_dir)
+
+    def _automate_md_ai_clinical_enhancements(
+        self,
+        render_case_dir: str,
+        brand: str,
+        case_tags_json: str | None,
+        manual_phase_lookup: dict[str, str] | None = None,
+    ) -> None:
+        """Scan render_case_dir for 'after' images and trigger AI enhancement for md_ai.
+
+        Phase resolution priority:
+          1. manual_phase_lookup[entry.name] — operator override from case_image_overrides
+          2. source_images._phase_from_filename(entry.name) — filename token fallback
+        """
+        if brand not in ("md_ai", "meiji_ai"):
+            return
+
+        tags = []
+        if case_tags_json:
+            try:
+                tags = json.loads(case_tags_json)
+            except (ValueError, TypeError):
+                tags = []
+
+        # Extract focus targets from tags by cross-referencing with anatomical keywords
+        focus_targets = []
+        if isinstance(tags, list):
+            for tag in tags:
+                tag_str = str(tag)
+                for key in ai_generation_adapter.MD_ANATOMICAL_KEYWORDS:
+                    if key in tag_str:
+                        focus_targets.append(key)
+
+        # Deduplicate
+        focus_targets = list(dict.fromkeys(focus_targets))
+
+        # Scan for 'after' images in the staging directory
+        staging_path = Path(render_case_dir)
+        if not staging_path.is_dir():
+            return
+
+        for entry in staging_path.iterdir():
+            if not entry.is_file():
+                continue
+
+            # Phase resolution: manual override wins over filename token.
+            phase: str | None = None
+            if manual_phase_lookup:
+                override = manual_phase_lookup.get(entry.name)
+                if override in ("before", "after"):
+                    phase = override
+            if phase is None:
+                phase = source_images._phase_from_filename(entry.name)
+            if phase == "after":
+                LOGGER.info("Triggering automated MD-AI clinical enhancement for %s", entry.name)
+                try:
+                    # Enhance image (returns path to enhanced file)
+                    enhanced_path = ai_generation_adapter.run_direct_clinical_enhancement(
+                        entry,
+                        brand=brand,
+                        focus_targets=focus_targets
+                    )
+                    if enhanced_path != entry and enhanced_path.is_file():
+                        # Replace original in staging with enhanced version
+                        temp_enhanced = staging_path / f"enhanced_{entry.name}"
+                        shutil.copyfile(enhanced_path, temp_enhanced)
+                        os.replace(temp_enhanced, entry)
+                        LOGGER.info("MD-AI enhancement applied to %s", entry.name)
+                except Exception as exc:
+                    LOGGER.warning("MD-AI enhancement failed for %s: %s", entry.name, exc)
+
+    def _execute_render_impl(
+        self,
+        job_id: int,
+        remember_bound_staging: Callable[[Path], None],
+    ) -> None:
         # 1. Read job row + transition to running (skip if cancelled meanwhile).
         with db.connect() as conn:
             row = conn.execute(
@@ -1343,10 +1577,19 @@ class RenderQueue:
                 return
             if row["status"] != "queued":
                 return  # Already cancelled or being handled elsewhere.
-            conn.execute(
-                "UPDATE render_jobs SET status = 'running', started_at = ? WHERE id = ?",
+            claimed = conn.execute(
+                """
+                UPDATE render_jobs
+                SET status = 'running',
+                    started_at = ?,
+                    recovery_token = NULL,
+                    recovery_claimed_at = NULL
+                WHERE id = ? AND status = 'queued'
+                """,
                 (_now_iso(), job_id),
-            )
+            ).rowcount
+            if claimed != 1:
+                return
             case_dir = row["case_dir"]
             brand = row["brand"]
             template = row["template"]
@@ -1394,7 +1637,9 @@ class RenderQueue:
                 "skill_image_metadata_json": row["skill_image_metadata_json"],
                 "role": "primary",
             }
-            if bound_source_rows:
+            # Always use staging for MD-AI to avoid mutating original source during enhancement
+            use_staging = bool(bound_source_rows or brand in ("md_ai", "meiji_ai"))
+            if use_staging:
                 source_profile = _merged_bound_profile([primary_source_row, *bound_source_rows])
                 source_profile["bound_case_ids"] = [int(item["id"]) for item in bound_source_rows]
                 staging_dir, bound_staging_files, bound_render_names = _build_bound_source_staging(
@@ -1402,6 +1647,7 @@ class RenderQueue:
                     [primary_source_row, *bound_source_rows],
                     case_dir,
                 )
+                remember_bound_staging(staging_dir)
                 if bound_staging_files:
                     render_case_dir = str(staging_dir)
                     image_files = bound_staging_files
@@ -1557,6 +1803,32 @@ class RenderQueue:
             )
             return
 
+        # 1.5. MD-AI clinical enhancement (automation hook)
+        if brand in ("md_ai", "meiji_ai"):
+            # Translate operator manual_phase overrides (keyed by original filename
+            # in the primary case dir) into staging link-names so the enhancement
+            # scanner respects user-corrected phase labels.
+            #
+            # NOTE: _fetch_case_image_overrides normalizes the column ``manual_phase``
+            # into the dict key ``phase``. The SQL column is ``manual_phase`` but
+            # the in-memory representation drops the prefix — see line ~340.
+            manual_phase_lookup: dict[str, str] = {}
+            for (mapped_case_id, original_filename), link_name in bound_render_names.items():
+                if int(mapped_case_id) != int(case_id):
+                    # _fetch_case_image_overrides only loaded current case; bound
+                    # source overrides are out of scope for this hot-fix.
+                    continue
+                override_entry = manual_overrides.get(original_filename) or {}
+                manual_phase = override_entry.get("phase")
+                if isinstance(manual_phase, str) and manual_phase in ("before", "after"):
+                    manual_phase_lookup[link_name] = manual_phase
+            self._automate_md_ai_clinical_enhancements(
+                render_case_dir=render_case_dir,
+                brand=brand,
+                case_tags_json=row["case_tags_json"],
+                manual_phase_lookup=manual_phase_lookup,
+            )
+
         # 2. Run the heavy subprocess.
         try:
             result = render_executor.run_render(
@@ -1622,7 +1894,26 @@ class RenderQueue:
         quality = render_quality.evaluate_render_result(result)
         final_status = quality["quality_status"]
         render_error = str(result.get("render_error") or "").strip()
+        case_meta = _render_case_metadata(result.get("manifest_path"))
         with db.connect() as conn:
+            job_context_row = conn.execute(
+                """SELECT render_mode, best_pair_selection_id, candidates_fingerprint_snapshot, draft_preview
+                   FROM render_jobs WHERE id = ?""",
+                (job_id,),
+            ).fetchone()
+            job_context = {
+                "render_mode": job_context_row["render_mode"] if job_context_row else None,
+                "best_pair_selection_id": job_context_row["best_pair_selection_id"] if job_context_row else None,
+                "candidates_fingerprint_snapshot": job_context_row["candidates_fingerprint_snapshot"] if job_context_row else None,
+                "draft_preview": bool(job_context_row["draft_preview"]) if job_context_row and "draft_preview" in job_context_row.keys() else False,
+            }
+            if job_context["draft_preview"]:
+                quality["can_publish"] = False
+                quality["artifact_mode"] = "draft_preview"
+                metrics = quality.get("metrics") if isinstance(quality.get("metrics"), dict) else {}
+                metrics["draft_preview"] = True
+                metrics.setdefault("action_suggestions", [])
+                quality["metrics"] = metrics
             conn.execute(
                 """
                 UPDATE render_jobs
@@ -1642,11 +1933,12 @@ class RenderQueue:
                     render_error if final_status == "blocked" and render_error else None,
 	                    json.dumps(
 	                        stress.tag_payload(
-	                            {
-	                                "run_id": stress.stress_run_id() or result.get("run_id"),
-	                                "code_version": _code_version_summary(),
-	                                "source_manifest_hash": _source_manifest_hash(result),
-	                                "quality_summary": {
+		                            {
+		                                "run_id": stress.stress_run_id() or result.get("run_id"),
+		                                "code_version": _code_version_summary(),
+		                                "source_manifest_hash": _source_manifest_hash(result),
+		                                **job_context,
+		                                "quality_summary": {
 	                                    "quality_status": quality.get("quality_status"),
 	                                    "quality_score": quality.get("quality_score"),
 	                                    "can_publish": quality.get("can_publish"),
@@ -1689,7 +1981,6 @@ class RenderQueue:
                 ),
             )
             render_quality.persist_render_quality(conn, job_id, quality)
-            case_meta = _render_case_metadata(result.get("manifest_path"))
             if case_meta:
                 case_row = conn.execute("SELECT meta_json FROM cases WHERE id = ?", (case_id,)).fetchone()
                 current_meta: dict[str, Any] = {}
@@ -1722,22 +2013,27 @@ class RenderQueue:
                         case_id,
                     ),
                 )
-            audit.record_revision(
-                conn,
-                case_id,
-                op="render",
-                before={"render_output_path": None},
-                after={
-                    "render_output_path": result.get("output_path"),
-                    "render_job_id": job_id,
-                    "brand": brand,
-                    "template": template,
-                    "quality_status": final_status,
-                    "render_selection_audit": result.get("render_selection_audit"),
-                },
-                source_route=f"/api/cases/{case_id}/render",
-                actor="render",
-            )
+
+        try:
+            with db.connect() as conn:
+                audit.record_revision(
+                    conn,
+                    case_id,
+                    op="render",
+                    before={"render_output_path": None},
+                    after={
+                        "render_output_path": result.get("output_path"),
+                        "render_job_id": job_id,
+                        "brand": brand,
+                        "template": template,
+                        "quality_status": final_status,
+                        "render_selection_audit": result.get("render_selection_audit"),
+                    },
+                    source_route=f"/api/cases/{case_id}/render",
+                    actor="render",
+                )
+        except sqlite3.Error as exc:
+            LOGGER.warning("render audit revision failed for job %s: %s", job_id, exc)
 
         self._publish(
             {
@@ -1890,17 +2186,45 @@ class RenderQueue:
 
         Called from main.py module top-level after init_schema.
         """
+        token = f"render-recover:{os.getpid()}:{uuid.uuid4().hex}"
         with db.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             running_to_queued = conn.execute(
                 """
                 UPDATE render_jobs
-                SET status = 'queued', started_at = NULL
+                SET status = 'queued',
+                    started_at = NULL,
+                    recovery_token = NULL,
+                    recovery_claimed_at = NULL
                 WHERE status = 'running'
                 """
             ).rowcount
             queued_rows: list[sqlite3.Row] = conn.execute(
-                "SELECT id FROM render_jobs WHERE status = 'queued' ORDER BY enqueued_at"
+                """
+                SELECT id
+                FROM render_jobs
+                WHERE status = 'queued'
+                  AND recovery_token IS NULL
+                ORDER BY enqueued_at
+                """
             ).fetchall()
+            if queued_rows:
+                placeholders = ",".join("?" for _ in queued_rows)
+                conn.execute(
+                    f"""
+                    UPDATE render_jobs
+                    SET recovery_token = ?,
+                        recovery_claimed_at = ?
+                    WHERE id IN ({placeholders})
+                      AND status = 'queued'
+                      AND recovery_token IS NULL
+                    """,
+                    (token, _now_iso(), *[r["id"] for r in queued_rows]),
+                )
+                queued_rows = conn.execute(
+                    "SELECT id FROM render_jobs WHERE recovery_token = ? ORDER BY enqueued_at",
+                    (token,),
+                ).fetchall()
         for r in queued_rows:
             _job_pool.submit(self._execute_safe, r["id"])
         return {"requeued_running": running_to_queued, "resubmitted_queued": len(queued_rows)}
