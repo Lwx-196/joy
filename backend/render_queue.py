@@ -1543,7 +1543,7 @@ class RenderQueue:
                     enhanced_path = ai_generation_adapter.run_direct_clinical_enhancement(
                         entry,
                         brand=brand,
-                        focus_targets=focus_targets
+                        focus_targets=focus_targets,
                     )
                     if enhanced_path != entry and enhanced_path.is_file():
                         # Replace original in staging with enhanced version
@@ -1551,8 +1551,29 @@ class RenderQueue:
                         shutil.copyfile(enhanced_path, temp_enhanced)
                         os.replace(temp_enhanced, entry)
                         LOGGER.info("MD-AI enhancement applied to %s", entry.name)
+                    elif enhanced_path == entry:
+                        # The adapter swallows subprocess failures (returncode != 0,
+                        # empty stdout, TimeoutExpired, parse errors) and returns
+                        # the input path. From here we cannot distinguish silent
+                        # failure from a legitimate no-op success. Surface the
+                        # ambiguity so bulk runs can be audited via grep.
+                        LOGGER.warning(
+                            "MD-AI enhancement returned original path for %s "
+                            "(silent adapter swallow — either failure or no-op)",
+                            entry.name,
+                        )
+                    else:
+                        # Adapter claimed a non-original path but it doesn't exist
+                        # on disk — broken contract from the node script.
+                        LOGGER.warning(
+                            "MD-AI enhancement reported %s but file is missing",
+                            enhanced_path,
+                        )
                 except Exception as exc:
-                    LOGGER.warning("MD-AI enhancement failed for %s: %s", entry.name, exc)
+                    LOGGER.warning(
+                        "MD-AI enhancement raised %s for %s: %s",
+                        type(exc).__name__, entry.name, exc,
+                    )
 
     def _execute_render_impl(
         self,

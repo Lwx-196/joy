@@ -177,6 +177,99 @@ def test_empty_manual_phase_lookup_falls_back_to_filename(
     assert capture_enhancement_calls[0]["focus_targets"] == []
 
 
+# --- Observability: silent adapter swallow is logged loudly ---
+
+
+def test_silent_adapter_swallow_emits_warning(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The adapter's silent-failure return (enhanced_path == input) must log a warning.
+
+    Without this guard, bulk runs of 74+ unrendered cases would have no
+    audit trail when AI calls fail — the failure looks identical to a
+    no-op success because run_direct_clinical_enhancement returns the
+    same path in both cases.
+    """
+    import logging
+
+    staging = _make_staging(tmp_path, ["术后-A.jpg"])
+    queue = render_queue.RenderQueue()
+
+    def _silent_swallow(image_path, brand, focus_targets=None):
+        return image_path  # mimic adapter's swallow path
+
+    import pytest as _pt  # alias to avoid shadowing
+    monkeypatch = _pt.MonkeyPatch()
+    try:
+        monkeypatch.setattr(
+            ai_generation_adapter,
+            "run_direct_clinical_enhancement",
+            _silent_swallow,
+        )
+        with caplog.at_level(logging.WARNING, logger="backend.render_queue"):
+            queue._automate_md_ai_clinical_enhancements(
+                render_case_dir=str(staging),
+                brand="md_ai",
+                case_tags_json=None,
+                manual_phase_lookup=None,
+            )
+    finally:
+        monkeypatch.undo()
+
+    warnings = [
+        rec.message for rec in caplog.records
+        if rec.levelno == logging.WARNING
+        and "MD-AI enhancement returned original path" in rec.message
+    ]
+    assert len(warnings) == 1, (
+        f"expected one 'returned original path' warning, got: "
+        f"{[rec.message for rec in caplog.records]}"
+    )
+    assert "术后-A.jpg" in warnings[0]
+
+
+def test_missing_enhanced_file_emits_warning(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """When adapter claims a non-original path that doesn't exist, log loudly."""
+    import logging
+
+    staging = _make_staging(tmp_path, ["术后-A.jpg"])
+    queue = render_queue.RenderQueue()
+    bogus_path = tmp_path / "nonexistent" / "vanished.jpg"
+
+    def _broken_contract(image_path, brand, focus_targets=None):
+        return bogus_path  # non-original but missing on disk
+
+    import pytest as _pt
+    monkeypatch = _pt.MonkeyPatch()
+    try:
+        monkeypatch.setattr(
+            ai_generation_adapter,
+            "run_direct_clinical_enhancement",
+            _broken_contract,
+        )
+        with caplog.at_level(logging.WARNING, logger="backend.render_queue"):
+            queue._automate_md_ai_clinical_enhancements(
+                render_case_dir=str(staging),
+                brand="md_ai",
+                case_tags_json=None,
+                manual_phase_lookup=None,
+            )
+    finally:
+        monkeypatch.undo()
+
+    warnings = [
+        rec.message for rec in caplog.records
+        if rec.levelno == logging.WARNING
+        and "file is missing" in rec.message
+    ]
+    assert len(warnings) == 1
+    assert "vanished.jpg" in warnings[0]
+
+
 # --- Integration: full _execute_render flow translates manual_phase to staging ----
 
 
