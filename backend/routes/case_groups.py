@@ -14,6 +14,7 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from .. import case_grouping, db
+from ..models import GroupSimulateAfterResponse
 from ..render_queue import RENDER_QUEUE
 from .render import ALLOWED_BRANDS, ALLOWED_SEMANTIC, DEFAULT_BRAND, DEFAULT_SEMANTIC, DEFAULT_TEMPLATE
 
@@ -115,8 +116,8 @@ def render_group(group_id: int, payload: GroupRenderPayload) -> dict[str, Any]:
     return {"job_id": job_id, "case_id": row["primary_case_id"], "group_id": group_id}
 
 
-@router.post("/api/case-groups/{group_id}/simulate-after")
-def simulate_after(group_id: int, payload: SimulateAfterPayload) -> dict[str, Any]:
+@router.post("/api/case-groups/{group_id}/simulate-after", response_model=GroupSimulateAfterResponse)
+def simulate_after(group_id: int, payload: SimulateAfterPayload) -> GroupSimulateAfterResponse:
     focus_targets = [x.strip() for x in payload.focus_targets if x.strip()]
     if not focus_targets:
         raise HTTPException(400, "focus_targets is required for after-image simulation")
@@ -185,12 +186,12 @@ def simulate_after(group_id: int, payload: SimulateAfterPayload) -> dict[str, An
                 now,
             ),
         )
-    return {
-        "simulation_job_id": job_id,
-        "group_id": group_id,
-        "case_id": group["primary_case_id"],
-        "status": status,
-        "focus_targets": focus_targets,
-        "policy": policy,
-        "error_message": error_message,
-    }
+    return GroupSimulateAfterResponse(
+        simulation_job_id=job_id,
+        group_id=group_id,
+        case_id=group["primary_case_id"],
+        status=status,
+        focus_targets=focus_targets,
+        policy=policy,
+        error_message=error_message,
+    )

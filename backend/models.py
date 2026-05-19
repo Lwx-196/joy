@@ -222,6 +222,16 @@ class SimulateAfterResponse(BaseModel):
     error_message: str | None = None
 
 
+class GroupSimulateAfterResponse(BaseModel):
+    simulation_job_id: int
+    group_id: int
+    case_id: int
+    status: str
+    focus_targets: list[str]
+    policy: dict[str, Any]
+    error_message: str | None = None
+
+
 class PsImageModelOption(BaseModel):
     value: str
     label: str
