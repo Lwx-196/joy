@@ -17,6 +17,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+try:
+    from pillow_heif import register_heif_opener as _register_heif_opener
+    _register_heif_opener()
+    _HEIF_AVAILABLE = True
+except ImportError:
+    _HEIF_AVAILABLE = False
+
 OPENAI_PROVIDERS = {"openai", "openai_responses", "openai-compatible", "openai_compatible", "flashapi"}
 GEMINI_PROVIDERS = {"gemini", "gemini_generate_content"}
 VERTEX_PROVIDERS = {"vertex", "vertex-ai", "vertex_generate_content_adc", "google-vertex"}

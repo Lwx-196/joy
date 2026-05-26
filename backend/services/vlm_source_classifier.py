@@ -187,11 +187,27 @@ def classify_batch(
     *,
     concurrency: int = 3,
     timeout: float = 30.0,
-) -> list[ClassificationResult]:
+    return_exceptions: bool = False,
+) -> list[ClassificationResult] | list[ClassificationResult | BaseException]:
     paths = [Path(path) for path in image_paths]
     requests = [VLMRequest(prompt=CLASSIFICATION_PROMPT, images=[path], timeout=timeout, purpose="classifier") for path in paths]
-    responses = provider.call_vision_batch(requests, concurrency=max(1, int(concurrency or 1)))
-    return [_parse_result(path, response) for path, response in zip(paths, responses)]
+    responses = provider.call_vision_batch(
+        requests,
+        concurrency=max(1, int(concurrency or 1)),
+        return_exceptions=return_exceptions,
+    )
+    results: list[ClassificationResult | BaseException] = []
+    for path, response in zip(paths, responses):
+        if return_exceptions and isinstance(response, BaseException):
+            results.append(response)
+            continue
+        try:
+            results.append(_parse_result(path, response))
+        except (ValueError, TypeError, AttributeError) as exc:
+            if not return_exceptions:
+                raise
+            results.append(exc)
+    return results
 
 
 def _has_manual_override(conn: sqlite3.Connection, case_id: int | None, image_path: str) -> bool:
@@ -396,7 +412,13 @@ def run_classification(
         return report
     paths = [item.image_abs_path for item in queue]
     try:
-        results = classify_batch(paths, provider, concurrency=concurrency, timeout=timeout)
+        results = classify_batch(
+            paths,
+            provider,
+            concurrency=concurrency,
+            timeout=timeout,
+            return_exceptions=True,
+        )
     except (VLMRequestError, ValueError, OSError) as exc:
         report["run_status"] = "blocked_vlm_classification_failed"
         report["error_count"] = len(queue)
@@ -405,8 +427,17 @@ def run_classification(
 
     classified = 0
     skipped = 0
+    errors: list[dict[str, Any]] = []
     previews: list[dict[str, Any]] = []
     for item, result in zip(queue, results):
+        if isinstance(result, BaseException):
+            errors.append({
+                "observation_id": item.observation_id,
+                "case_id": item.case_id,
+                "image_path": item.image_path,
+                "reason": f"{type(result).__name__}: {result}",
+            })
+            continue
         try:
             if resolved_mode == "apply":
                 updated = apply_classification_result(conn, item, result)
@@ -428,8 +459,12 @@ def run_classification(
                 })
                 _record_usage(conn, item, result, status="live_no_apply")
         except (sqlite3.Error, ValueError) as exc:
-            report.setdefault("errors", []).append({"observation_id": item.observation_id, "reason": str(exc)})
-            report["error_count"] += 1
+            errors.append({
+                "observation_id": item.observation_id,
+                "case_id": item.case_id,
+                "image_path": item.image_path,
+                "reason": str(exc),
+            })
             _record_usage(conn, item, result, status="error", error_detail=str(exc))
             continue
         if updated:
@@ -438,6 +473,9 @@ def run_classification(
             skipped += 1
     report["classified_count"] = classified
     report["skipped_count"] = skipped
+    report["error_count"] = len(errors)
+    if errors:
+        report["errors"] = errors
     if resolved_mode == "live-no-apply":
         report["previews"] = previews
         would_apply_count = sum(1 for p in previews if p["would_apply"])

@@ -120,11 +120,24 @@ class FakeProvider:
             usage_raw={"input_tokens": 11, "output_tokens": 5},
         )
 
-    def call_vision_batch(self, items: list[Any], *, concurrency: int = 3):
-        return [
-            self.call_vision(item.prompt, item.images, timeout=item.timeout, purpose=getattr(item, "purpose", None))
-            for item in items
-        ]
+    def call_vision_batch(
+        self,
+        items: list[Any],
+        *,
+        concurrency: int = 3,
+        return_exceptions: bool = False,
+    ):
+        results: list[Any] = []
+        for item in items:
+            try:
+                results.append(
+                    self.call_vision(item.prompt, item.images, timeout=item.timeout, purpose=getattr(item, "purpose", None))
+                )
+            except BaseException as exc:
+                if not return_exceptions:
+                    raise
+                results.append(exc)
+        return results
 
 
 def test_classify_image_normalizes_schema_and_prompt(tmp_path: Path) -> None:
@@ -256,6 +269,99 @@ def test_run_classification_invalid_mode_raises(temp_db: Path, tmp_path: Path) -
     with db.connect() as conn:
         with _pytest.raises(ValueError, match="invalid mode"):
             run_classification(conn, provider=None, case_id=126, mode="ship-it-yolo")
+
+
+class _PartialFailureProvider(FakeProvider):
+    """Raises on images whose filename contains ``fail`` (e.g. a HEIC stand-in)."""
+
+    def call_vision(
+        self,
+        prompt: str,
+        images: list[Path],
+        *,
+        timeout: float = 30.0,
+        purpose: str | None = None,
+    ):
+        if any("fail" in str(p) for p in images):
+            raise ValueError("simulated HEIC decode failure")
+        return super().call_vision(prompt, images, timeout=timeout, purpose=purpose)
+
+
+def test_classify_batch_returns_exceptions_per_item(tmp_path: Path) -> None:
+    """PLAN P1 task #7: 单 image 失败不应 abort 整批，return_exceptions=True 模式下保留位置。"""
+    from backend.services.vlm_source_classifier import classify_batch
+
+    good_path = tmp_path / "good.png"
+    bad_path = tmp_path / "fail-heic.png"
+    _write_tiny_png(good_path)
+    _write_tiny_png(bad_path)
+    provider = _PartialFailureProvider()
+
+    results = classify_batch([good_path, bad_path], provider, return_exceptions=True)
+
+    assert len(results) == 2
+    assert results[0].phase == "after"
+    assert isinstance(results[1], BaseException)
+    assert "HEIC" in str(results[1])
+
+
+def test_run_classification_apply_continues_on_partial_failures(
+    temp_db: Path, tmp_path: Path
+) -> None:
+    """PLAN P1 task #7: HEIC 等单图失败不再让整批 abort（90 分钟 0 写入的根因修复）。"""
+    from backend import db
+    from backend.services.vlm_source_classifier import run_classification
+
+    good_path = tmp_path / "good.png"
+    bad_path = tmp_path / "fail-heic.png"
+    _write_tiny_png(good_path)
+    _write_tiny_png(bad_path)
+    with db.connect() as conn:
+        good_obs_id = _seed_observation(
+            conn, root_path=str(tmp_path), image_path="good.png"
+        )
+        bad_obs_id = _seed_observation(
+            conn, root_path=str(tmp_path), image_path="fail-heic.png"
+        )
+        report = run_classification(
+            conn,
+            provider=_PartialFailureProvider(),
+            case_id=126,
+            mode="apply",
+        )
+        good_row = conn.execute(
+            "SELECT source FROM image_observations WHERE id = ?",
+            (good_obs_id,),
+        ).fetchone()
+        bad_row = conn.execute(
+            "SELECT source FROM image_observations WHERE id = ?",
+            (bad_obs_id,),
+        ).fetchone()
+
+    assert report["run_status"] == "completed_vlm_classification"
+    assert report["classified_count"] == 1
+    assert report["error_count"] == 1
+    assert len(report["errors"]) == 1
+    assert report["errors"][0]["image_path"] == "fail-heic.png"
+    assert "ValueError" in report["errors"][0]["reason"]
+    assert good_row["source"] == "vlm_classifier"
+    assert bad_row["source"] != "vlm_classifier"
+
+
+def test_vlm_provider_registers_heif_opener_when_available() -> None:
+    """PLAN P1 task #8: pillow-heif 装好时 PIL 应能识别 .heic 扩展名。"""
+    import importlib
+
+    from backend.services import vlm_provider as _vlm_provider
+
+    importlib.reload(_vlm_provider)
+    if not _vlm_provider._HEIF_AVAILABLE:
+        import pytest as _pytest
+
+        _pytest.skip("pillow-heif not installed in this env")
+    from PIL import Image
+
+    assert ".heic" in Image.registered_extensions()
 
 
 def test_classify_images_api_dry_run(client, tmp_path: Path) -> None:
