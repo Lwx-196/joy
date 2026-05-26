@@ -177,7 +177,7 @@ def _parse_result(image_path: Path, response: VLMResponse) -> ClassificationResu
 
 def classify_image(image_path: Path, provider: VLMProvider, *, timeout: float = 30.0) -> ClassificationResult:
     path = Path(image_path)
-    response = provider.call_vision(CLASSIFICATION_PROMPT, [path], timeout=timeout)
+    response = provider.call_vision(CLASSIFICATION_PROMPT, [path], timeout=timeout, purpose="classifier")
     return _parse_result(path, response)
 
 

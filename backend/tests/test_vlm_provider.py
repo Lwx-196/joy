@@ -367,3 +367,123 @@ def test_call_vision_can_disable_resize_for_cost_comparison(tmp_path: Path) -> N
     encoded = image_url.split(",", 1)[1]
     encoded_image = Image.open(io.BytesIO(base64.b64decode(encoded)))
     assert encoded_image.size == (1200, 800)
+
+
+def test_configure_classifier_purpose_reads_classifier_env() -> None:
+    from backend.services.vlm_provider import VLMProvider
+
+    config = VLMProvider(
+        env={
+            "VLM_PROVIDER": "vertex",
+            "VLM_MODEL": "vlm-model",
+            "VLM_API_KEY": "vlm-key",
+            "CASE_WORKBENCH_VLM_JUDGE_PROVIDER": "gemini",
+            "CASE_WORKBENCH_VLM_JUDGE_MODEL": "judge-model",
+            "CASE_WORKBENCH_VLM_JUDGE_API_KEY": "judge-key",
+            "CASE_WORKBENCH_VLM_CLASSIFIER_PROVIDER": "gemini",
+            "CASE_WORKBENCH_VLM_CLASSIFIER_MODEL": "classifier-model",
+            "CASE_WORKBENCH_VLM_CLASSIFIER_API_KEY": "classifier-key",
+        }
+    ).configure(purpose="classifier")
+
+    assert config.ready is True
+    assert config.provider == "gemini_generate_content"
+    assert config.model == "classifier-model"
+    assert config.api_key == "classifier-key"
+
+
+def test_configure_judge_purpose_reads_judge_env_and_ignores_classifier() -> None:
+    from backend.services.vlm_provider import VLMProvider
+
+    config = VLMProvider(
+        env={
+            "VLM_PROVIDER": "vertex",
+            "VLM_MODEL": "vlm-model",
+            "VLM_API_KEY": "vlm-key",
+            "CASE_WORKBENCH_VLM_JUDGE_PROVIDER": "gemini",
+            "CASE_WORKBENCH_VLM_JUDGE_MODEL": "judge-model",
+            "CASE_WORKBENCH_VLM_JUDGE_API_KEY": "judge-key",
+            "CASE_WORKBENCH_VLM_CLASSIFIER_PROVIDER": "flashapi",
+            "CASE_WORKBENCH_VLM_CLASSIFIER_MODEL": "classifier-model",
+            "CASE_WORKBENCH_VLM_CLASSIFIER_API_KEY": "classifier-key",
+        }
+    ).configure(purpose="judge")
+
+    assert config.ready is True
+    assert config.provider == "gemini_generate_content"
+    assert config.model == "judge-model"
+    assert config.api_key == "judge-key"
+
+
+def test_configure_no_purpose_preserves_legacy_vlm_priority() -> None:
+    from backend.services.vlm_provider import VLMProvider
+
+    config = VLMProvider(
+        env={
+            "VLM_PROVIDER": "gemini",
+            "VLM_MODEL": "vlm-model",
+            "VLM_API_KEY": "vlm-key",
+            "CASE_WORKBENCH_VLM_JUDGE_PROVIDER": "vertex",
+            "CASE_WORKBENCH_VLM_JUDGE_MODEL": "judge-model",
+            "CASE_WORKBENCH_VLM_CLASSIFIER_PROVIDER": "flashapi",
+            "CASE_WORKBENCH_VLM_CLASSIFIER_MODEL": "classifier-model",
+        }
+    ).configure()
+
+    assert config.ready is True
+    assert config.provider == "gemini_generate_content"
+    assert config.model == "vlm-model"
+    assert config.api_key == "vlm-key"
+
+
+def test_configure_classifier_falls_back_to_judge_then_vlm() -> None:
+    from backend.services.vlm_provider import VLMProvider
+
+    config = VLMProvider(
+        env={
+            "VLM_PROVIDER": "vertex",
+            "VLM_MODEL": "vlm-model",
+            "VLM_API_KEY": "vlm-key",
+            "CASE_WORKBENCH_VLM_JUDGE_PROVIDER": "gemini",
+            "CASE_WORKBENCH_VLM_JUDGE_MODEL": "judge-model",
+            "CASE_WORKBENCH_VLM_JUDGE_API_KEY": "judge-key",
+        }
+    ).configure(purpose="classifier")
+
+    assert config.ready is True
+    assert config.provider == "gemini_generate_content"
+    assert config.model == "judge-model"
+    assert config.api_key == "judge-key"
+
+
+def test_call_vision_batch_passes_request_purpose(tmp_path: Path) -> None:
+    from backend.services.vlm_provider import VLMProvider, VLMRequest
+
+    image = tmp_path / "probe.png"
+    _write_tiny_png(image)
+    captured: list[str] = []
+
+    def post_json(url: str, _headers: dict[str, str], _payload: dict, _timeout: float) -> dict:
+        captured.append(url)
+        return {"candidates": [{"content": {"parts": [{"text": json.dumps({"ok": True})}]}}]}
+
+    provider = VLMProvider(
+        env={
+            "VLM_PROVIDER": "vertex",
+            "VLM_MODEL": "vlm-model",
+            "VLM_API_KEY": "vlm-key",
+            "CASE_WORKBENCH_VLM_CLASSIFIER_PROVIDER": "gemini",
+            "CASE_WORKBENCH_VLM_CLASSIFIER_MODEL": "classifier-model",
+            "CASE_WORKBENCH_VLM_CLASSIFIER_API_KEY": "classifier-key",
+        },
+        post_json=post_json,
+    )
+
+    responses = provider.call_vision_batch(
+        [VLMRequest(prompt="x", images=[image], purpose="classifier")],
+        concurrency=1,
+    )
+
+    assert len(responses) == 1
+    assert len(captured) == 1
+    assert "classifier-model" in captured[0]

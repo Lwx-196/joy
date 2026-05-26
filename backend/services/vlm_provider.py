@@ -213,15 +213,40 @@ def _parse_json_object(text: str) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
-def _openai_responses_endpoint(env: dict[str, str], endpoint: str | None = None) -> str:
+def _resolve_env(env: dict[str, str], purpose: str | None, *base_keys: str) -> str:
+    keys = list(base_keys)
+    if purpose in {"classifier", "judge"}:
+        judge_keys = [k for k in base_keys if "CASE_WORKBENCH_VLM_JUDGE_" in k]
+        other_keys = [k for k in base_keys if "CASE_WORKBENCH_VLM_JUDGE_" not in k]
+        keys = judge_keys + other_keys
+    if purpose == "classifier":
+        classifier_keys = [
+            k.replace("CASE_WORKBENCH_VLM_JUDGE_", "CASE_WORKBENCH_VLM_CLASSIFIER_")
+            for k in base_keys
+            if "CASE_WORKBENCH_VLM_JUDGE_" in k
+        ]
+        keys = classifier_keys + keys
+    for key in keys:
+        value = (env.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _openai_responses_endpoint(
+    env: dict[str, str], endpoint: str | None = None, *, purpose: str | None = None
+) -> str:
     base = (
         endpoint
-        or env.get("VLM_ENDPOINT")
-        or env.get("CASE_WORKBENCH_VLM_JUDGE_ENDPOINT")
-        or env.get("CASE_WORKBENCH_VLM_JUDGE_BASE_URL")
-        or env.get("OPENAI_BASE_URL")
-        or env.get("VISION_API_BASE")
-        or ""
+        or _resolve_env(
+            env,
+            purpose,
+            "VLM_ENDPOINT",
+            "CASE_WORKBENCH_VLM_JUDGE_ENDPOINT",
+            "CASE_WORKBENCH_VLM_JUDGE_BASE_URL",
+            "OPENAI_BASE_URL",
+            "VISION_API_BASE",
+        )
     ).strip().rstrip("/")
     if not base:
         return "https://api.openai.com/v1/responses"
@@ -230,15 +255,20 @@ def _openai_responses_endpoint(env: dict[str, str], endpoint: str | None = None)
     return f"{base}/responses"
 
 
-def _openai_chat_completions_endpoint(env: dict[str, str], endpoint: str | None = None) -> str:
+def _openai_chat_completions_endpoint(
+    env: dict[str, str], endpoint: str | None = None, *, purpose: str | None = None
+) -> str:
     base = (
         endpoint
-        or env.get("VLM_ENDPOINT")
-        or env.get("CASE_WORKBENCH_VLM_JUDGE_ENDPOINT")
-        or env.get("CASE_WORKBENCH_VLM_JUDGE_BASE_URL")
-        or env.get("OPENAI_BASE_URL")
-        or env.get("VISION_API_BASE")
-        or ""
+        or _resolve_env(
+            env,
+            purpose,
+            "VLM_ENDPOINT",
+            "CASE_WORKBENCH_VLM_JUDGE_ENDPOINT",
+            "CASE_WORKBENCH_VLM_JUDGE_BASE_URL",
+            "OPENAI_BASE_URL",
+            "VISION_API_BASE",
+        )
     ).strip().rstrip("/")
     if not base:
         return "https://api.openai.com/v1/chat/completions"
@@ -255,13 +285,16 @@ def _base_looks_like_flashapi(base: str) -> bool:
     return "flashapi" in str(base or "").lower()
 
 
-def _openai_compatible_api_format(env: dict[str, str], endpoint: str) -> str:
-    raw = (
-        env.get("VLM_OPENAI_COMPATIBLE_API")
-        or env.get("CASE_WORKBENCH_VLM_JUDGE_API_FORMAT")
-        or env.get("VISION_API_FORMAT")
-        or ""
-    ).strip().lower()
+def _openai_compatible_api_format(
+    env: dict[str, str], endpoint: str, *, purpose: str | None = None
+) -> str:
+    raw = _resolve_env(
+        env,
+        purpose,
+        "VLM_OPENAI_COMPATIBLE_API",
+        "CASE_WORKBENCH_VLM_JUDGE_API_FORMAT",
+        "VISION_API_FORMAT",
+    ).lower()
     if raw in {"chat", "chat_completions", "chat/completions"}:
         return "chat_completions"
     if raw in {"responses", "responses_api"}:
@@ -271,44 +304,57 @@ def _openai_compatible_api_format(env: dict[str, str], endpoint: str) -> str:
     return "responses"
 
 
-def _openai_compatible_endpoint(env: dict[str, str], endpoint: str | None = None) -> tuple[str, str]:
-    probe_endpoint = endpoint or env.get("VLM_ENDPOINT") or env.get("CASE_WORKBENCH_VLM_JUDGE_ENDPOINT") or env.get("VISION_API_BASE") or ""
-    api_format = _openai_compatible_api_format(env, probe_endpoint)
+def _openai_compatible_endpoint(
+    env: dict[str, str], endpoint: str | None = None, *, purpose: str | None = None
+) -> tuple[str, str]:
+    probe_endpoint = endpoint or _resolve_env(
+        env,
+        purpose,
+        "VLM_ENDPOINT",
+        "CASE_WORKBENCH_VLM_JUDGE_ENDPOINT",
+        "VISION_API_BASE",
+    )
+    api_format = _openai_compatible_api_format(env, probe_endpoint, purpose=purpose)
     if api_format == "chat_completions":
-        return _openai_chat_completions_endpoint(env, endpoint), api_format
-    return _openai_responses_endpoint(env, endpoint), api_format
+        return _openai_chat_completions_endpoint(env, endpoint, purpose=purpose), api_format
+    return _openai_responses_endpoint(env, endpoint, purpose=purpose), api_format
 
 
-def _openai_compatible_api_key(env: dict[str, str], endpoint: str) -> str:
+def _openai_compatible_api_key(
+    env: dict[str, str], endpoint: str, *, purpose: str | None = None
+) -> str:
     if _base_looks_like_tuzi(endpoint):
-        return (
-            env.get("VISION_PRIMARY_API_KEY")
-            or env.get("GEMINI_TUZI_API_KEY")
-            or env.get("TUZI_API_KEY")
-            or env.get("VLM_API_KEY")
-            or env.get("OPENAI_API_KEY")
-            or env.get("CASE_WORKBENCH_VLM_JUDGE_API_KEY")
-            or env.get("VISION_API_KEY")
-            or ""
-        ).strip()
+        return _resolve_env(
+            env,
+            purpose,
+            "VISION_PRIMARY_API_KEY",
+            "GEMINI_TUZI_API_KEY",
+            "TUZI_API_KEY",
+            "VLM_API_KEY",
+            "OPENAI_API_KEY",
+            "CASE_WORKBENCH_VLM_JUDGE_API_KEY",
+            "VISION_API_KEY",
+        )
     if _base_looks_like_flashapi(endpoint):
-        return (
-            env.get("VLM_API_KEY")
-            or env.get("OPENAI_API_KEY")
-            or env.get("CASE_WORKBENCH_VLM_JUDGE_API_KEY")
-            or env.get("VISION_API_KEY")
-            or env.get("FLASHAPI_API_KEY")
-            or env.get("GEMINI_TUZI_API_KEY")
-            or env.get("TUZI_API_KEY")
-            or ""
-        ).strip()
-    return (
-        env.get("VLM_API_KEY")
-        or env.get("OPENAI_API_KEY")
-        or env.get("CASE_WORKBENCH_VLM_JUDGE_API_KEY")
-        or env.get("VISION_API_KEY")
-        or ""
-    ).strip()
+        return _resolve_env(
+            env,
+            purpose,
+            "VLM_API_KEY",
+            "OPENAI_API_KEY",
+            "CASE_WORKBENCH_VLM_JUDGE_API_KEY",
+            "VISION_API_KEY",
+            "FLASHAPI_API_KEY",
+            "GEMINI_TUZI_API_KEY",
+            "TUZI_API_KEY",
+        )
+    return _resolve_env(
+        env,
+        purpose,
+        "VLM_API_KEY",
+        "OPENAI_API_KEY",
+        "CASE_WORKBENCH_VLM_JUDGE_API_KEY",
+        "VISION_API_KEY",
+    )
 
 
 def _estimate_input_tokens(prompt: str, images: list[_PreparedImage]) -> int:
@@ -418,23 +464,39 @@ class VLMProvider:
         provider: str | None = None,
         model: str | None = None,
         endpoint: str | None = None,
+        *,
+        purpose: str | None = None,
     ) -> ProviderConfig:
         env = self.env
         selected_provider = (
             provider
-            or env.get("VLM_PROVIDER")
-            or env.get("CASE_WORKBENCH_VLM_JUDGE_PROVIDER")
-            or env.get("VISION_PROVIDER")
-            or ""
+            or _resolve_env(
+                env,
+                purpose,
+                "VLM_PROVIDER",
+                "CASE_WORKBENCH_VLM_JUDGE_PROVIDER",
+                "VISION_PROVIDER",
+            )
         ).strip().lower()
         selected_model = (
             model
-            or env.get("VLM_MODEL")
-            or env.get("CASE_WORKBENCH_VLM_JUDGE_MODEL")
-            or env.get("VISION_API_MODEL")
-            or ""
+            or _resolve_env(
+                env,
+                purpose,
+                "VLM_MODEL",
+                "CASE_WORKBENCH_VLM_JUDGE_MODEL",
+                "VISION_API_MODEL",
+            )
         ).strip()
-        selected_endpoint = (endpoint or env.get("VLM_ENDPOINT") or env.get("CASE_WORKBENCH_VLM_JUDGE_ENDPOINT") or "").strip()
+        selected_endpoint = (
+            endpoint
+            or _resolve_env(
+                env,
+                purpose,
+                "VLM_ENDPOINT",
+                "CASE_WORKBENCH_VLM_JUDGE_ENDPOINT",
+            )
+        ).strip()
 
         if not selected_provider:
             return ProviderConfig(provider="", model=selected_model, status="blocked_missing_vlm_provider_config")
@@ -498,14 +560,15 @@ class VLMProvider:
             )
 
         if selected_provider in GEMINI_PROVIDERS:
-            api_key = (
-                env.get("VLM_API_KEY")
-                or env.get("CASE_WORKBENCH_VLM_JUDGE_API_KEY")
-                or env.get("GEMINI_API_KEY")
-                or env.get("GOOGLE_API_KEY")
-                or env.get("GOOGLE_GENAI_API_KEY")
-                or ""
-            ).strip()
+            api_key = _resolve_env(
+                env,
+                purpose,
+                "VLM_API_KEY",
+                "CASE_WORKBENCH_VLM_JUDGE_API_KEY",
+                "GEMINI_API_KEY",
+                "GOOGLE_API_KEY",
+                "GOOGLE_GENAI_API_KEY",
+            )
             if not api_key:
                 return ProviderConfig(provider="gemini_generate_content", model=selected_model, status="blocked_missing_gemini_api_key")
             resolved_endpoint = selected_endpoint or f"https://generativelanguage.googleapis.com/v1beta/models/{selected_model}:generateContent"
@@ -518,8 +581,8 @@ class VLMProvider:
                 api_key=api_key,
             )
 
-        resolved_endpoint, api_format = _openai_compatible_endpoint(env, selected_endpoint or None)
-        api_key = _openai_compatible_api_key(env, resolved_endpoint)
+        resolved_endpoint, api_format = _openai_compatible_endpoint(env, selected_endpoint or None, purpose=purpose)
+        api_key = _openai_compatible_api_key(env, resolved_endpoint, purpose=purpose)
         if not api_key:
             return ProviderConfig(provider="openai_responses", model=selected_model, status="blocked_missing_openai_api_key")
         return ProviderConfig(
@@ -538,8 +601,9 @@ class VLMProvider:
         *,
         timeout: float = 30.0,
         max_dimension: int | None = None,
+        purpose: str | None = None,
     ) -> VLMResponse:
-        config = self.configure()
+        config = self.configure(purpose=purpose)
         if not config.ready:
             raise VLMRequestError(config.status)
         image_paths = [Path(path) for path in images]
@@ -589,6 +653,7 @@ class VLMProvider:
                     item.images,
                     timeout=item.timeout,
                     max_dimension=item.max_dimension,
+                    purpose=getattr(item, "purpose", None),
                 ): index
                 for index, item in enumerate(items)
             }
