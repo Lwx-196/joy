@@ -206,6 +206,58 @@ def test_run_classification_real_updates_observation_and_usage_log(temp_db: Path
     assert usage["model"] == "unit_model"
 
 
+def test_run_classification_live_no_apply_records_usage_without_writes(temp_db: Path, tmp_path: Path) -> None:
+    from backend import db
+    from backend.services.vlm_source_classifier import run_classification
+
+    _write_tiny_png(tmp_path / "unknown.png")
+    with db.connect() as conn:
+        observation_id = _seed_observation(conn, root_path=str(tmp_path), image_path="unknown.png")
+        report = run_classification(conn, provider=FakeProvider(), case_id=126, mode="live-no-apply")
+        row = conn.execute("SELECT * FROM image_observations WHERE id = ?", (observation_id,)).fetchone()
+        usage_rows = conn.execute("SELECT * FROM vlm_usage_log WHERE purpose = 'classifier'").fetchall()
+
+    assert report["run_status"] == "completed_vlm_classification_live_no_apply"
+    assert report["mode"] == "live-no-apply"
+    assert report["classified_count"] == 0
+    assert report["would_apply_count"] == 1
+    assert len(report["previews"]) == 1
+    preview = report["previews"][0]
+    assert preview["predicted_phase"] == "after"
+    assert preview["predicted_view"] == "oblique"
+    assert preview["predicted_confidence"] == 0.91
+    assert preview["would_apply"] is True
+    assert row["source"] != "vlm_classifier"
+    assert len(usage_rows) == 1
+    assert usage_rows[0]["status"] == "live_no_apply"
+
+
+def test_run_classification_apply_mode_writes_observations(temp_db: Path, tmp_path: Path) -> None:
+    from backend import db
+    from backend.services.vlm_source_classifier import run_classification
+
+    _write_tiny_png(tmp_path / "unknown.png")
+    with db.connect() as conn:
+        observation_id = _seed_observation(conn, root_path=str(tmp_path), image_path="unknown.png")
+        report = run_classification(conn, provider=FakeProvider(), case_id=126, mode="apply")
+        row = conn.execute("SELECT * FROM image_observations WHERE id = ?", (observation_id,)).fetchone()
+
+    assert report["mode"] == "apply"
+    assert report["run_status"] == "completed_vlm_classification"
+    assert report["classified_count"] == 1
+    assert row["source"] == "vlm_classifier"
+
+
+def test_run_classification_invalid_mode_raises(temp_db: Path, tmp_path: Path) -> None:
+    import pytest as _pytest
+    from backend import db
+    from backend.services.vlm_source_classifier import run_classification
+
+    with db.connect() as conn:
+        with _pytest.raises(ValueError, match="invalid mode"):
+            run_classification(conn, provider=None, case_id=126, mode="ship-it-yolo")
+
+
 def test_classify_images_api_dry_run(client, tmp_path: Path) -> None:
     from backend import db
 
