@@ -379,6 +379,54 @@ def test_classify_images_api_dry_run(client, tmp_path: Path) -> None:
     assert body["candidate_count"] == 1
 
 
+def test_classify_images_api_mode_dry_run(client, tmp_path: Path) -> None:
+    """PLAN P2: API mode='dry-run' 等同于 legacy dry_run=True 入口。"""
+    from backend import db
+
+    _write_tiny_png(tmp_path / "unknown.png")
+    with db.connect() as conn:
+        _seed_observation(conn, root_path=str(tmp_path), image_path="unknown.png")
+
+    response = client.post(
+        "/api/cases/126/classify-images",
+        json={"mode": "dry-run", "max_items": 10},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["run_status"] == "dry_run"
+    assert body["mode"] == "dry-run"
+    assert body["candidate_count"] == 1
+
+
+def test_classify_images_api_mode_invalid_returns_400(client, tmp_path: Path) -> None:
+    """PLAN P2: API 拒绝非三态枚举的 mode 值。"""
+    response = client.post(
+        "/api/cases/126/classify-images",
+        json={"mode": "ship-it-yolo"},
+    )
+    assert response.status_code == 400
+    assert "invalid mode" in response.json()["detail"]
+
+
+def test_classify_images_api_legacy_dry_run_false_maps_to_apply(client, tmp_path: Path) -> None:
+    """PLAN P2: 向后兼容 dry_run=False 应映射到 mode=apply。"""
+    from backend import db
+
+    _write_tiny_png(tmp_path / "unknown.png")
+    with db.connect() as conn:
+        _seed_observation(conn, root_path=str(tmp_path), image_path="unknown.png")
+
+    response = client.post(
+        "/api/cases/126/classify-images",
+        json={"dry_run": False, "max_items": 1},
+    )
+    # Provider env may not be configured in test env; either way the resolved
+    # mode should be 'apply' (not legacy dry_run path).
+    assert response.status_code == 200
+    body = response.json()
+    assert body["mode"] == "apply"
+
+
 def test_source_group_uses_vlm_classifier_observation_without_manual_override(client, tmp_path: Path) -> None:
     from backend import db
 
