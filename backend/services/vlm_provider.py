@@ -170,6 +170,17 @@ def _extract_openai_text(response: dict[str, Any]) -> str:
         for content in output.get("content") or []:
             if isinstance(content, dict) and isinstance(content.get("text"), str):
                 chunks.append(content["text"])
+    for choice in response.get("choices") or []:
+        if not isinstance(choice, dict):
+            continue
+        message = choice.get("message") if isinstance(choice.get("message"), dict) else {}
+        content = message.get("content")
+        if isinstance(content, str):
+            chunks.append(content)
+        elif isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict) and isinstance(part.get("text"), str):
+                    chunks.append(part["text"])
     return "\n".join(chunks).strip()
 
 
@@ -219,6 +230,87 @@ def _openai_responses_endpoint(env: dict[str, str], endpoint: str | None = None)
     return f"{base}/responses"
 
 
+def _openai_chat_completions_endpoint(env: dict[str, str], endpoint: str | None = None) -> str:
+    base = (
+        endpoint
+        or env.get("VLM_ENDPOINT")
+        or env.get("CASE_WORKBENCH_VLM_JUDGE_ENDPOINT")
+        or env.get("CASE_WORKBENCH_VLM_JUDGE_BASE_URL")
+        or env.get("OPENAI_BASE_URL")
+        or env.get("VISION_API_BASE")
+        or ""
+    ).strip().rstrip("/")
+    if not base:
+        return "https://api.openai.com/v1/chat/completions"
+    if base.endswith("/chat/completions"):
+        return base
+    return f"{base}/chat/completions"
+
+
+def _base_looks_like_tuzi(base: str) -> bool:
+    return "tu-zi" in str(base or "").lower() or "tuzi" in str(base or "").lower()
+
+
+def _base_looks_like_flashapi(base: str) -> bool:
+    return "flashapi" in str(base or "").lower()
+
+
+def _openai_compatible_api_format(env: dict[str, str], endpoint: str) -> str:
+    raw = (
+        env.get("VLM_OPENAI_COMPATIBLE_API")
+        or env.get("CASE_WORKBENCH_VLM_JUDGE_API_FORMAT")
+        or env.get("VISION_API_FORMAT")
+        or ""
+    ).strip().lower()
+    if raw in {"chat", "chat_completions", "chat/completions"}:
+        return "chat_completions"
+    if raw in {"responses", "responses_api"}:
+        return "responses"
+    if str(endpoint or "").rstrip("/").endswith("/chat/completions") or _base_looks_like_tuzi(endpoint):
+        return "chat_completions"
+    return "responses"
+
+
+def _openai_compatible_endpoint(env: dict[str, str], endpoint: str | None = None) -> tuple[str, str]:
+    probe_endpoint = endpoint or env.get("VLM_ENDPOINT") or env.get("CASE_WORKBENCH_VLM_JUDGE_ENDPOINT") or env.get("VISION_API_BASE") or ""
+    api_format = _openai_compatible_api_format(env, probe_endpoint)
+    if api_format == "chat_completions":
+        return _openai_chat_completions_endpoint(env, endpoint), api_format
+    return _openai_responses_endpoint(env, endpoint), api_format
+
+
+def _openai_compatible_api_key(env: dict[str, str], endpoint: str) -> str:
+    if _base_looks_like_tuzi(endpoint):
+        return (
+            env.get("VISION_PRIMARY_API_KEY")
+            or env.get("GEMINI_TUZI_API_KEY")
+            or env.get("TUZI_API_KEY")
+            or env.get("VLM_API_KEY")
+            or env.get("OPENAI_API_KEY")
+            or env.get("CASE_WORKBENCH_VLM_JUDGE_API_KEY")
+            or env.get("VISION_API_KEY")
+            or ""
+        ).strip()
+    if _base_looks_like_flashapi(endpoint):
+        return (
+            env.get("VLM_API_KEY")
+            or env.get("OPENAI_API_KEY")
+            or env.get("CASE_WORKBENCH_VLM_JUDGE_API_KEY")
+            or env.get("VISION_API_KEY")
+            or env.get("FLASHAPI_API_KEY")
+            or env.get("GEMINI_TUZI_API_KEY")
+            or env.get("TUZI_API_KEY")
+            or ""
+        ).strip()
+    return (
+        env.get("VLM_API_KEY")
+        or env.get("OPENAI_API_KEY")
+        or env.get("CASE_WORKBENCH_VLM_JUDGE_API_KEY")
+        or env.get("VISION_API_KEY")
+        or ""
+    ).strip()
+
+
 def _estimate_input_tokens(prompt: str, images: list[_PreparedImage]) -> int:
     byte_count = len(prompt.encode("utf-8"))
     byte_count += sum(len(image.data) for image in images)
@@ -256,8 +348,15 @@ def _prepare_image(path: Path, *, max_dimension: int) -> _PreparedImage:
             output = io.BytesIO()
             if original_format == "PNG":
                 save_image = resized
-                save_image.save(output, format="PNG", optimize=True)
-                mime = "image/png"
+                if save_image.mode in {"RGBA", "LA"}:
+                    background = Image.new("RGB", save_image.size, (255, 255, 255))
+                    alpha = save_image.getchannel("A")
+                    background.paste(save_image.convert("RGB"), mask=alpha)
+                    save_image = background
+                elif save_image.mode not in {"RGB", "L"}:
+                    save_image = save_image.convert("RGB")
+                save_image.save(output, format="JPEG", quality=60, optimize=True)
+                mime = "image/jpeg"
             elif original_format == "WEBP":
                 save_image = resized.convert("RGB") if resized.mode not in {"RGB", "L"} else resized
                 save_image.save(output, format="WEBP", quality=85, method=6)
@@ -419,19 +518,14 @@ class VLMProvider:
                 api_key=api_key,
             )
 
-        api_key = (
-            env.get("VLM_API_KEY")
-            or env.get("OPENAI_API_KEY")
-            or env.get("CASE_WORKBENCH_VLM_JUDGE_API_KEY")
-            or env.get("VISION_API_KEY")
-            or ""
-        ).strip()
+        resolved_endpoint, api_format = _openai_compatible_endpoint(env, selected_endpoint or None)
+        api_key = _openai_compatible_api_key(env, resolved_endpoint)
         if not api_key:
             return ProviderConfig(provider="openai_responses", model=selected_model, status="blocked_missing_openai_api_key")
         return ProviderConfig(
-            provider="openai_responses",
+            provider="openai_chat_completions" if api_format == "chat_completions" else "openai_responses",
             model=selected_model,
-            endpoint=_openai_responses_endpoint(env, selected_endpoint or None),
+            endpoint=resolved_endpoint,
             ready=True,
             status="ready",
             api_key=api_key,
@@ -577,6 +671,15 @@ class VLMProvider:
             parts = [{"text": prompt}]
             parts.extend({"inline_data": _inline_data(image)} for image in images)
             return {"contents": [{"role": "user", "parts": parts}], "generationConfig": {"temperature": 0, "responseMimeType": "application/json"}}
+        if config.provider == "openai_chat_completions":
+            content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
+            content.extend({"type": "image_url", "image_url": {"url": _data_url(image)}} for image in images)
+            return {
+                "model": config.model,
+                "messages": [{"role": "user", "content": content}],
+                "max_tokens": 800,
+                "stream": False,
+            }
         content: list[dict[str, Any]] = [{"type": "input_text", "text": prompt}]
         content.extend({"type": "input_image", "image_url": _data_url(image)} for image in images)
         return {

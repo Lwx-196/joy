@@ -44,7 +44,7 @@ def test_provider_prefers_new_vlm_env_and_normalizes_vertex() -> None:
     assert "publishers/google/models/gemini-2.5-flash:generateContent" in config.endpoint
 
 
-def test_provider_reuses_legacy_flashapi_as_openai_responses() -> None:
+def test_provider_reuses_legacy_tuzi_flashapi_as_chat_completions() -> None:
     from backend.services.vlm_provider import VLMProvider
 
     config = VLMProvider(
@@ -57,10 +57,59 @@ def test_provider_reuses_legacy_flashapi_as_openai_responses() -> None:
     ).configure()
 
     assert config.ready is True
-    assert config.provider == "openai_responses"
+    assert config.provider == "openai_chat_completions"
     assert config.model == "gpt-5.4-mini"
-    assert config.endpoint == "https://api.tu-zi.com/v1/responses"
+    assert config.endpoint == "https://api.tu-zi.com/v1/chat/completions"
     assert config.api_key == "vision-key"
+
+
+def test_provider_prefers_tuzi_key_for_tuzi_openai_compatible_base() -> None:
+    from backend.services.vlm_provider import VLMProvider
+
+    config = VLMProvider(
+        env={
+            "VISION_PROVIDER": "flashapi",
+            "VISION_API_BASE": "https://api.tu-zi.com/v1",
+            "VISION_API_KEY": "wrong-vision-key",
+            "GEMINI_TUZI_API_KEY": "tuzi-key",
+            "VISION_API_MODEL": "gpt-5.4-mini",
+        }
+    ).configure()
+
+    assert config.ready is True
+    assert config.provider == "openai_chat_completions"
+    assert config.model == "gpt-5.4-mini"
+    assert config.endpoint == "https://api.tu-zi.com/v1/chat/completions"
+    assert config.api_key == "tuzi-key"
+
+
+def test_call_vision_uses_tuzi_chat_completions_payload(tmp_path: Path) -> None:
+    from backend.services.vlm_provider import VLMProvider
+
+    image = tmp_path / "probe.png"
+    _write_tiny_png(image)
+    calls: list[dict] = []
+
+    def post_json(url: str, headers: dict[str, str], payload: dict, timeout: float) -> dict:
+        calls.append({"url": url, "headers": headers, "payload": payload, "timeout": timeout})
+        return {"choices": [{"message": {"content": json.dumps({"winner_role": "baseline"})}}]}
+
+    response = VLMProvider(
+        env={
+            "VISION_PROVIDER": "flashapi",
+            "VISION_API_BASE": "https://api.tu-zi.com/v1",
+            "GEMINI_TUZI_API_KEY": "tuzi-key",
+            "VISION_API_MODEL": "gpt-5.4-mini",
+        },
+        post_json=post_json,
+    ).call_vision("return strict json", [image], timeout=9)
+
+    assert response.provider == "openai_chat_completions"
+    assert response.parsed == {"winner_role": "baseline"}
+    assert calls[0]["url"] == "https://api.tu-zi.com/v1/chat/completions"
+    assert calls[0]["headers"]["Authorization"] == "Bearer tuzi-key"
+    assert calls[0]["payload"]["messages"][0]["content"][0]["type"] == "text"
+    assert calls[0]["payload"]["messages"][0]["content"][1]["type"] == "image_url"
 
 
 def test_call_vision_retries_transient_errors_and_parses_json(tmp_path: Path) -> None:
