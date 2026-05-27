@@ -56,6 +56,7 @@ from ..models import (
     SourceDirectoryBindRequest,
 )
 from ..services import vlm_source_classifier
+from ..services.promotion_manifest_loader import should_promote
 from ..services.vlm_provider import VLMProvider
 
 # Stage B: 单张图 phase / view 手动覆盖允许的取值。
@@ -1626,8 +1627,23 @@ def _trash_case_directory(
     return str(dest)
 
 
-def _simulation_policy(focus_regions: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+def _simulation_policy(
+    focus_regions: list[dict[str, Any]] | None = None,
+    *,
+    case_id: int | None = None,
+) -> dict[str, Any]:
+    """Build the simulation policy block written to `simulation_jobs.policy_json`.
+
+    Plan §P2.3 runtime guard: when `case_id` is supplied and the active
+    promotion manifest grayscale state covers it (see
+    `services.promotion_manifest_loader.should_promote`), we flip
+    `mix_with_real_case` / `can_publish_default` to True so downstream
+    delivery gates can treat the case as production-eligible.  Default
+    (no `case_id` or shadow/rolled_back/missing manifest) preserves the
+    legacy candidate-only behavior for backward compatibility.
+    """
     has_regions = bool(focus_regions)
+    promoted = bool(case_id is not None and should_promote(int(case_id)))
     return {
         "artifact_mode": "ai_after_simulation",
         "focus_scope": "region-locked-light" if has_regions else "whole-image-light",
@@ -1635,8 +1651,8 @@ def _simulation_policy(focus_regions: list[dict[str, Any]] | None = None) -> dic
         "target_input_requirement": "focus_regions_optional",
         "non_target_policy": "preserve-no-global-retouch" if has_regions else "whole-image-light-retouch",
         "watermark_required": True,
-        "mix_with_real_case": False,
-        "can_publish_default": False,
+        "mix_with_real_case": promoted,
+        "can_publish_default": promoted,
     }
 
 
@@ -1710,7 +1726,7 @@ def _insert_simulation_job(
             case_id,
             status,
             json.dumps(focus_targets, ensure_ascii=False),
-            json.dumps(_simulation_policy(focus_regions), ensure_ascii=False),
+            json.dumps(_simulation_policy(focus_regions, case_id=case_id), ensure_ascii=False),
             json.dumps(
                 {
                     "provider": provider,
@@ -5860,6 +5876,7 @@ def simulate_case_after(case_id: int, payload: SimulateAfterRequest) -> Simulate
             note=payload.note,
             style_reference_image_paths=style_reference_paths,
             brand=payload.brand,
+            case_id=case_id,
         )
         status = str(result["status"])
         output_refs = result["output_refs"]
@@ -5946,7 +5963,7 @@ def simulate_case_after(case_id: int, payload: SimulateAfterRequest) -> Simulate
             "focus_regions": focus_regions,
             "input_refs": input_refs,
             "output_refs": output_refs,
-            "policy": _simulation_policy(focus_regions),
+            "policy": _simulation_policy(focus_regions, case_id=case_id),
             "note": payload.note,
             "failure": failure_block,
         }
