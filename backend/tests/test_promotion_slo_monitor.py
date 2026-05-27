@@ -21,6 +21,7 @@ from backend.services.promotion_slo_monitor import (
     RECOMMENDATION_INSUFFICIENT_DATA,
     RECOMMENDATION_MONITORING_PAUSED,
     RECOMMENDATION_ROLLBACK,
+    RECOMMENDATION_STOP_LOSS_HALT,
     SLOReport,
     evaluate_window,
     load_default_thresholds,
@@ -1016,7 +1017,8 @@ def test_w42_paused_state_stale_exceeds_7d_emits_violation_and_rollback(
 ) -> None:
     """Sidecar with paused_since older than PAUSED_STALE_DAYS days → next
     eval emits `monitoring_paused_stale` violation, escalates recommendation
-    to `rollback`, within_slo=False. This is the stop-loss release gate."""
+    to ``stop_loss_halt`` (K-5: NOT ``rollback`` — manifest stays as-is, only
+    audit alert), within_slo=False. This is the stop-loss release gate."""
     sidecar = tmp_path / "paused_state.json"
     eight_days_ago = (
         datetime.now(timezone.utc) - timedelta(days=PAUSED_STALE_DAYS + 1)
@@ -1046,7 +1048,9 @@ def test_w42_paused_state_stale_exceeds_7d_emits_violation_and_rollback(
             paused_state_path=sidecar,
         )
 
-    assert report.recommendation == RECOMMENDATION_ROLLBACK
+    # K-5: stale paused window now escalates to STOP_LOSS_HALT (audit
+    # alert) rather than ROLLBACK (real manifest mutation).
+    assert report.recommendation == RECOMMENDATION_STOP_LOSS_HALT
     assert report.within_slo is False
     dims = {v["dimension"] for v in report.violations}
     assert "monitoring_paused_stale" in dims
@@ -1261,3 +1265,566 @@ def test_w42_paused_state_corrupt_sidecar_is_repaired(
     assert payload["promotion_state_at_pause"] == "p50"
     # paused_since rewritten to a parseable timestamp
     datetime.fromisoformat(payload["paused_since"])
+
+
+# ---------------------------------------------------------------------------
+# Wave 4 hardening — K-1..K-8 (single hardening commit)
+# ---------------------------------------------------------------------------
+
+
+# K-1 — sidecar concurrency lock --------------------------------------------
+
+
+def test_w42_paused_state_lock_prevents_concurrent_overwrite(
+    temp_db: Path,
+    tmp_path: Path,
+) -> None:
+    """K-1: with two evaluators racing to land a fresh paused anchor,
+    `_paused_state_lock` must serialize the writes so the winner's
+    paused_since is preserved (not overwritten by a later starter that
+    arrives slightly after) and the loser observes 'lock_contention'
+    in its notes path.
+
+    We can't easily fork real processes inside pytest, so we simulate the
+    contention by holding the lock manually and then invoking
+    `_evaluate_paused_state` — the inner call must observe contention
+    and bail without writing.
+    """
+    import fcntl as _fcntl
+    import os as _os
+
+    from backend.services import promotion_slo_monitor as psm
+
+    sidecar = tmp_path / "paused_state.json"
+    lock_path = tmp_path / "paused_state.json.lock"
+
+    # Pre-hold the lock by opening a separate fd and acquiring LOCK_EX.
+    holder_fd = _os.open(str(lock_path), _os.O_RDWR | _os.O_CREAT, 0o644)
+    _fcntl.flock(holder_fd, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+
+    try:
+        violation, notes = psm._evaluate_paused_state(
+            promotion_state="p10",
+            sample_size=5,
+            min_sample=30,
+            paused_state_path=sidecar,
+        )
+    finally:
+        _fcntl.flock(holder_fd, _fcntl.LOCK_UN)
+        _os.close(holder_fd)
+
+    # Loser must not have written the sidecar (lock holder owns the write).
+    assert not sidecar.exists(), (
+        "loser must NOT write sidecar — contention should be silent + no-op"
+    )
+    assert violation is None
+    assert notes == "paused_state_lock_contention"
+
+
+def test_w42_paused_state_lock_failure_does_not_break_eval(
+    temp_db: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """K-1: even if lock acquisition raises BlockingIOError (someone else
+    has it), evaluate_window must still return a valid SLOReport.
+    The lock skipping path is logged but never crashes the SLO loop —
+    that would defeat the entire monitoring purpose.
+    """
+    import fcntl as _fcntl
+
+    sidecar = tmp_path / "paused_state.json"
+
+    def _always_blocking(fd, op):
+        if op & _fcntl.LOCK_NB:
+            raise BlockingIOError("simulated contention")
+
+    monkeypatch.setattr(_fcntl, "flock", _always_blocking)
+
+    with db.connect() as conn:
+        for _ in range(5):
+            _insert_simulation_job(conn, status="done")
+        conn.commit()
+        report = evaluate_window(
+            window_hours=48,
+            conn=conn,
+            promotion_state="p10",
+            paused_state_path=sidecar,
+        )
+
+    # SLO loop must produce a report despite lock contention.
+    assert isinstance(report, SLOReport)
+    assert report.recommendation == RECOMMENDATION_MONITORING_PAUSED
+
+
+def test_w42_paused_state_write_uses_unique_tmp_filename(
+    temp_db: Path,
+    tmp_path: Path,
+) -> None:
+    """K-1: tmp filename must embed pid+uuid so concurrent writes don't
+    collide on the canonical `.tmp` name (which the pre-K-1 code used)."""
+    from backend.services import promotion_slo_monitor as psm
+
+    sidecar = tmp_path / "paused_state.json"
+    psm._write_paused_state(
+        {"schema_version": 1, "paused_since": "2026-01-01T00:00:00+00:00"},
+        sidecar,
+    )
+    assert sidecar.exists()
+    # No fixed `.tmp` left over (write succeeded; tmp was renamed).
+    leftover = list(tmp_path.glob("*.tmp"))
+    assert leftover == [], (
+        f"K-1: tmp must be renamed atomically, not orphaned; got {leftover!r}"
+    )
+
+
+# K-2 — _merge_thresholds fallback guard ------------------------------------
+
+
+def test_w41_prod_merge_thresholds_no_fallback_when_unsafe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """K-2: production mode + on-disk thresholds rejected (W4-1 placeholder)
+    + user override has NO baseline_provenance → must re-raise the original
+    ValueError. Pre-K-2 ANY user override would trigger code-default
+    fallback, silently bypassing W4-1."""
+    from backend.services import promotion_slo_monitor as psm
+
+    monkeypatch.delenv("SLO_TEST_MODE", raising=False)
+    # Point file path at a placeholder-provenance file so load fails.
+    p = _write_thresholds_file(
+        tmp_path / "placeholder.json",
+        {
+            "measured_at": datetime.now(timezone.utc).isoformat(),
+            "window_hours": 24,
+            "sample_size": 0,
+            "computed_by": "manual_seed",
+            "computed_at_main_sha": "abc1234",
+        },
+    )
+    monkeypatch.setattr(psm, "_DEFAULT_THRESHOLDS_FILE", p)
+
+    # Flat override (no provenance) — must NOT trigger fallback.
+    with pytest.raises(ValueError, match=r"placeholder"):
+        psm._merge_thresholds({"comfyui_failure_rate_max": 0.99})
+
+    # Structured override missing provenance — also must NOT fallback.
+    with pytest.raises(ValueError, match=r"placeholder"):
+        psm._merge_thresholds({"thresholds": {"comfyui_failure_rate_max": 0.99}})
+
+
+def test_w41_test_mode_merge_thresholds_allows_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """K-2: in test mode the W4-1 file rejection is logged (not raised),
+    so _merge_thresholds returns the code defaults + flat overlay
+    correctly. This is the developer / CI escape hatch."""
+    from backend.services import promotion_slo_monitor as psm
+
+    monkeypatch.setenv("SLO_TEST_MODE", "1")
+    config = psm._merge_thresholds({"comfyui_failure_rate_max": 0.42})
+    assert config["thresholds"]["comfyui_failure_rate_max"] == 0.42
+
+
+def test_w41_prod_merge_thresholds_allows_fallback_with_valid_provenance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """K-2: prod mode + user override with valid calibrate_cli provenance
+    must allow fallback (caller is taking explicit responsibility for the
+    measured baseline). This is the calibrate CLI's sanity-load path."""
+    from backend.services import promotion_slo_monitor as psm
+
+    monkeypatch.delenv("SLO_TEST_MODE", raising=False)
+    p = _write_thresholds_file(
+        tmp_path / "placeholder.json",
+        {
+            "measured_at": datetime.now(timezone.utc).isoformat(),
+            "window_hours": 24,
+            "sample_size": 0,
+            "computed_by": "manual_seed",
+            "computed_at_main_sha": "abc1234",
+        },
+    )
+    monkeypatch.setattr(psm, "_DEFAULT_THRESHOLDS_FILE", p)
+
+    config = psm._merge_thresholds(
+        {
+            "thresholds": {"comfyui_failure_rate_max": 0.07},
+            "baseline_provenance": {
+                "measured_at": datetime.now(timezone.utc).isoformat(),
+                "window_hours": 48,
+                "sample_size": 200,
+                "computed_by": "calibrate_cli",
+                "computed_at_main_sha": "xyz9876",
+            },
+        }
+    )
+    assert config["thresholds"]["comfyui_failure_rate_max"] == 0.07
+
+
+# K-3 — SLO_TEST_MODE whitelist ----------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "raw_value,expected",
+    [
+        # Truthy literals (whitelist)
+        ("1", True),
+        ("true", True),
+        ("True", True),
+        ("TRUE", True),
+        ("yes", True),
+        ("Yes", True),
+        ("YES", True),
+        # Falsy / non-truthy (production mode)
+        ("", False),
+        ("0", False),
+        ("false", False),
+        ("False", False),
+        ("production", False),
+        ("off", False),
+        ("disable", False),
+        ("2", False),
+        ("on", False),
+        ("  ", False),
+        ("y", False),  # not in whitelist (yes vs y)
+        ("YeS", False),  # case must match whitelist exactly
+    ],
+)
+def test_w41_k3_is_test_mode_whitelist(
+    monkeypatch: pytest.MonkeyPatch, raw_value: str, expected: bool
+) -> None:
+    """K-3: strict allowlist — only canonical truthy literals enable
+    test-mode. Any other value (incl. 'production', 'off', '2', 'on', 'y',
+    'YeS') is treated as production."""
+    from backend.services import promotion_slo_monitor as psm
+
+    monkeypatch.setenv("SLO_TEST_MODE", raw_value)
+    assert psm._is_test_mode() is expected, (
+        f"K-3: SLO_TEST_MODE={raw_value!r} should be {expected!r}"
+    )
+
+
+def test_w41_k3_prod_path_full_stack_rejects_placeholder(
+    temp_db: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """K-3 integration: with SLO_TEST_MODE unset and a real on-disk
+    thresholds JSON containing placeholder provenance, evaluate_window
+    must raise ValueError citing calibrate_slo_baseline. This is the
+    full-stack production-path coverage that conftest's session-wide
+    setdefault otherwise hides."""
+    from backend.services import promotion_slo_monitor as psm
+
+    monkeypatch.delenv("SLO_TEST_MODE", raising=False)
+
+    p = _write_thresholds_file(
+        tmp_path / "placeholder.json",
+        {
+            "measured_at": datetime.now(timezone.utc).isoformat(),
+            "window_hours": 24,
+            "sample_size": 0,
+            "computed_by": "manual_seed",
+            "computed_at_main_sha": "abc1234",
+        },
+    )
+    monkeypatch.setattr(psm, "_DEFAULT_THRESHOLDS_FILE", p)
+
+    with db.connect() as conn:
+        for _ in range(40):
+            _insert_simulation_job(conn, status="done")
+        conn.commit()
+        with pytest.raises(ValueError, match=r"calibrate_slo_baseline"):
+            evaluate_window(window_hours=48, conn=conn)
+
+
+def test_w41_k3_prod_path_full_stack_accepts_calibrated(
+    temp_db: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """K-3 integration counterpoint: prod mode + calibrate_cli provenance
+    must produce a valid SLOReport (no raise, no baseline_unmeasured)."""
+    from backend.services import promotion_slo_monitor as psm
+
+    monkeypatch.delenv("SLO_TEST_MODE", raising=False)
+    p = _write_thresholds_file(
+        tmp_path / "calibrated.json",
+        {
+            "measured_at": datetime.now(timezone.utc).isoformat(),
+            "window_hours": 24,
+            "sample_size": 200,
+            "computed_by": "calibrate_cli",
+            "computed_at_main_sha": "xyz9876",
+        },
+    )
+    monkeypatch.setattr(psm, "_DEFAULT_THRESHOLDS_FILE", p)
+
+    with db.connect() as conn:
+        for _ in range(40):
+            _insert_simulation_job(conn, status="done")
+        conn.commit()
+        report = evaluate_window(window_hours=48, conn=conn)
+
+    assert isinstance(report, SLOReport)
+    dims = {v["dimension"] for v in report.violations}
+    assert "baseline_unmeasured" not in dims
+    assert report.recommendation == "continue"
+
+
+# K-4 — producer allowlist + baseline_undersampled --------------------------
+
+
+def test_k4_validate_rejects_unknown_computed_by(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """K-4: producer allowlist — `computed_by='ops_seed'` (not in
+    placeholder set, not in legitimate set) must be rejected in prod
+    mode. Pre-K-4 it would silently load."""
+    monkeypatch.delenv("SLO_TEST_MODE", raising=False)
+    p = _write_thresholds_file(
+        tmp_path / "unknown_producer.json",
+        {
+            "measured_at": datetime.now(timezone.utc).isoformat(),
+            "window_hours": 24,
+            "sample_size": 500,  # plenty of samples; not a placeholder
+            "computed_by": "ops_seed",  # unknown producer
+            "computed_at_main_sha": "abc1234",
+        },
+    )
+    with pytest.raises(ValueError, match=r"unknown computed_by"):
+        load_default_thresholds(p)
+
+
+def test_k4_validate_accepts_calibrate_cli(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """K-4 boundary: the canonical legitimate producer must still load
+    cleanly (no false-positive rejection on the happy path)."""
+    monkeypatch.delenv("SLO_TEST_MODE", raising=False)
+    p = _write_thresholds_file(
+        tmp_path / "legit.json",
+        {
+            "measured_at": datetime.now(timezone.utc).isoformat(),
+            "window_hours": 24,
+            "sample_size": 500,
+            "computed_by": "calibrate_cli",
+            "computed_at_main_sha": "abc1234",
+        },
+    )
+    config = load_default_thresholds(p)
+    assert config["baseline_provenance"]["computed_by"] == "calibrate_cli"
+
+
+def test_k4_evaluate_window_emits_baseline_undersampled(
+    temp_db: Path,
+) -> None:
+    """K-4: legitimate (calibrate_cli) provenance but sample_size below
+    minimum_sample_size → `baseline_undersampled` violation surfaces. This
+    is parallel to baseline_unmeasured but distinct cause (calibration
+    actually ran, just on too few rows)."""
+    with db.connect() as conn:
+        for _ in range(40):
+            _insert_simulation_job(conn, status="done")
+        conn.commit()
+        report = evaluate_window(
+            window_hours=48,
+            conn=conn,
+            thresholds={
+                "thresholds": {},
+                "baseline_provenance": {
+                    "measured_at": datetime.now(timezone.utc).isoformat(),
+                    "window_hours": 24,
+                    "sample_size": 5,  # below default min_sample=30
+                    "computed_by": "calibrate_cli",
+                    "computed_at_main_sha": "wave4-test",
+                },
+            },
+        )
+
+    dims = {v["dimension"] for v in report.violations}
+    assert "baseline_undersampled" in dims, (
+        f"expected baseline_undersampled, got {report.violations!r}"
+    )
+    bu = next(
+        v for v in report.violations if v["dimension"] == "baseline_undersampled"
+    )
+    assert bu["context"]["sample_size"] == 5
+    assert bu["context"]["minimum_sample_size"] == DEFAULT_MINIMUM_SAMPLE_SIZE
+
+
+def test_k4_evaluate_window_no_undersampled_with_adequate_sample(
+    temp_db: Path,
+) -> None:
+    """K-4: when calibration sample meets/exceeds min_sample, the
+    undersampled violation must NOT fire (true negative case)."""
+    with db.connect() as conn:
+        for _ in range(40):
+            _insert_simulation_job(conn, status="done")
+        conn.commit()
+        report = evaluate_window(
+            window_hours=48,
+            conn=conn,
+            thresholds=_measured_thresholds_override(),
+        )
+
+    dims = {v["dimension"] for v in report.violations}
+    assert "baseline_undersampled" not in dims
+
+
+# K-5 — RECOMMENDATION_STOP_LOSS_HALT semantics -----------------------------
+
+
+def test_k5_stale_escalation_uses_stop_loss_halt(
+    temp_db: Path,
+    tmp_path: Path,
+) -> None:
+    """K-5: paused window > stale_days under same state → recommendation
+    is STOP_LOSS_HALT (NOT ROLLBACK). within_slo=False for actionability,
+    but the applier must NOT mutate the manifest on this token."""
+    sidecar = tmp_path / "paused_state.json"
+    nine_days_ago = (
+        datetime.now(timezone.utc) - timedelta(days=PAUSED_STALE_DAYS + 2)
+    ).isoformat()
+    sidecar.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "paused_since": nine_days_ago,
+                "promotion_state_at_pause": "p25",
+                "last_sample_size": 4,
+                "minimum_sample_size": 30,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with db.connect() as conn:
+        for _ in range(4):
+            _insert_simulation_job(conn, status="done")
+        conn.commit()
+        report = evaluate_window(
+            window_hours=48,
+            conn=conn,
+            promotion_state="p25",
+            paused_state_path=sidecar,
+        )
+
+    assert report.recommendation == RECOMMENDATION_STOP_LOSS_HALT
+    assert report.within_slo is False
+    # The monitoring_paused_stale violation still surfaces (operator visibility).
+    dims = {v["dimension"] for v in report.violations}
+    assert "monitoring_paused_stale" in dims
+
+
+# K-6 — _load_paused_state tri-state ----------------------------------------
+
+
+def test_k6_paused_state_missing_returns_missing_status(
+    tmp_path: Path,
+) -> None:
+    """K-6: nonexistent file → ('missing') status, not 'unreadable'."""
+    from backend.services import promotion_slo_monitor as psm
+
+    payload, status = psm._load_paused_state(tmp_path / "does_not_exist.json")
+    assert payload is None
+    assert status == psm.PAUSED_STATE_STATUS_MISSING
+
+
+def test_k6_paused_state_corrupt_returns_corrupt_status(
+    tmp_path: Path,
+) -> None:
+    """K-6: half-written JSON → ('corrupt') status; caller writes fresh."""
+    from backend.services import promotion_slo_monitor as psm
+
+    sidecar = tmp_path / "paused_state.json"
+    sidecar.write_text("{not valid json", encoding="utf-8")
+    payload, status = psm._load_paused_state(sidecar)
+    assert payload is None
+    assert status == psm.PAUSED_STATE_STATUS_CORRUPT
+
+
+def test_k6_paused_state_non_dict_root_returns_corrupt(
+    tmp_path: Path,
+) -> None:
+    """K-6: valid JSON but root is array, not object → corrupt (we expect
+    a dict payload schema)."""
+    from backend.services import promotion_slo_monitor as psm
+
+    sidecar = tmp_path / "paused_state.json"
+    sidecar.write_text(json.dumps([1, 2, 3]), encoding="utf-8")
+    payload, status = psm._load_paused_state(sidecar)
+    assert payload is None
+    assert status == psm.PAUSED_STATE_STATUS_CORRUPT
+
+
+def test_k6_paused_state_oserror_returns_unreadable_status(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """K-6: OSError on read → ('unreadable'); does NOT collapse to
+    ('missing'). Pre-K-6 a permission flip would silently reset the
+    stop-loss clock by being treated as 'first paused episode'."""
+    from backend.services import promotion_slo_monitor as psm
+
+    sidecar = tmp_path / "paused_state.json"
+    sidecar.write_text("{}", encoding="utf-8")  # exists, but read will fail
+
+    def _raise_oserror(self, *args, **kwargs):
+        raise OSError("simulated permission denied")
+
+    monkeypatch.setattr(Path, "read_text", _raise_oserror)
+    payload, status = psm._load_paused_state(sidecar)
+    assert payload is None
+    assert status == psm.PAUSED_STATE_STATUS_UNREADABLE
+
+
+def test_k6_evaluate_window_unreadable_sidecar_emits_violation(
+    temp_db: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """K-6 integration: when sidecar is unreadable during evaluate_window,
+    the loop must emit a `paused_state_unreadable` violation rather than
+    silently resetting the stop-loss clock to now."""
+    from backend.services import promotion_slo_monitor as psm
+
+    sidecar = tmp_path / "paused_state.json"
+    sidecar.write_text("{}", encoding="utf-8")
+
+    original_read_text = Path.read_text
+
+    def _selective_oserror(self, *args, **kwargs):
+        # Only fail on sidecar reads; allow other Path.read_text to proceed
+        # (e.g. thresholds JSON reads in load_default_thresholds).
+        if str(self) == str(sidecar):
+            raise OSError("simulated permission denied")
+        return original_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", _selective_oserror)
+
+    with db.connect() as conn:
+        for _ in range(4):
+            _insert_simulation_job(conn, status="done")
+        conn.commit()
+        report = evaluate_window(
+            window_hours=48,
+            conn=conn,
+            promotion_state="p10",
+            paused_state_path=sidecar,
+        )
+
+    dims = {v["dimension"] for v in report.violations}
+    assert "paused_state_unreadable" in dims, (
+        f"K-6: expected paused_state_unreadable violation, got "
+        f"{report.violations!r}"
+    )
+    # Conservative: surface as stop-loss halt (audit alert) rather than
+    # silently green-lighting.
+    assert report.recommendation == RECOMMENDATION_STOP_LOSS_HALT

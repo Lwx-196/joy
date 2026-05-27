@@ -54,6 +54,7 @@ from .promotion_slo_monitor import (
     RECOMMENDATION_INSUFFICIENT_DATA as REC_INSUFFICIENT,
     RECOMMENDATION_MONITORING_PAUSED as REC_MONITORING_PAUSED,
     RECOMMENDATION_ROLLBACK as REC_ROLLBACK,
+    RECOMMENDATION_STOP_LOSS_HALT as REC_STOP_LOSS_HALT,
 )
 
 logger = logging.getLogger(__name__)
@@ -72,6 +73,9 @@ ENDPOINT = "promotion_rollback_applier.apply"
 AUDIT_OUTCOME_STARTED = "rollback_started"
 AUDIT_OUTCOME_COMPLETED = "rollback_completed"
 AUDIT_OUTCOME_ABORTED = "rollback_aborted"
+# K-5: stop-loss alert is an audit-only event (no manifest mutation). Distinct
+# token so on-call can filter it apart from real rollbacks.
+AUDIT_OUTCOME_STOP_LOSS_HALT_ALERT = "stop_loss_halt_alert"
 
 # Manifest field-name constants (Wave 3 P0.5 H-2 — semantic split between
 # `rollback_baseline` = prior-approved-healthy version (revert target,
@@ -106,6 +110,9 @@ REASON_NO_MANIFEST = "no_manifest"
 REASON_APPLIED = "rollback_applied"
 REASON_DRY_RUN = "dry_run"
 REASON_CONCURRENT_APPLY = "concurrent_apply_in_progress"
+# K-5: stop-loss alert — audit row written, manifest untouched, operator
+# review required.
+REASON_STOP_LOSS_HALT_ALERT = "stop_loss_halt_alert"
 
 
 # ---------------------------------------------------------------------------
@@ -327,6 +334,20 @@ def apply_rollback_decision(
             recommendation=rec,
             dry_run=dry_run,
             warning="insufficient sample for SLO eval — preserving current state",
+        )
+    if rec == REC_STOP_LOSS_HALT:
+        # K-5: stop-loss alert — write an audit row tagged
+        # ``stop_loss_halt_alert`` but do NOT touch the manifest. The
+        # semantics are "灰度流量 > 7d 不足，operator review required"
+        # rather than a true SLO violation. Manifest stays as-is so the
+        # operator decides next step (rollback / extend window / promote
+        # off the stuck bucket). Dry-run respects the audit-write rule too.
+        return _handle_stop_loss_halt(
+            decision=dec,
+            target_path=target_path,
+            dry_run=dry_run,
+            conn=conn,
+            request_id=req_id,
         )
     if rec != REC_ROLLBACK:
         # Unknown recommendation — fail-closed (don't touch the file).
@@ -661,6 +682,94 @@ def _apply_with_lock_and_audit(
                 logger.warning("audit conn close failed (non-fatal)", exc_info=True)
 
 
+def _handle_stop_loss_halt(
+    *,
+    decision: dict[str, Any],
+    target_path: Path,
+    dry_run: bool,
+    conn: sqlite3.Connection | None,
+    request_id: str,
+) -> dict[str, Any]:
+    """K-5: stop-loss alert path. Writes an ``ops_audit_log`` row with
+    outcome ``stop_loss_halt_alert``, preserves the manifest unchanged.
+
+    Dry-run still writes no audit row (mirrors ``rec=rollback`` dry_run
+    convention) — caller gets ``applied=False`` + ``would_apply=True`` so
+    they can preview the alert.
+    """
+    rec = REC_STOP_LOSS_HALT
+    violation_reason = _summarize_violations(decision.get("violations"))
+    audit_payload: dict[str, Any] = {
+        "decision_recommendation": rec,
+        "violations": decision.get("violations"),
+        "sample_size": decision.get("sample_size"),
+        "window_hours": decision.get("window_hours"),
+        "evidence_excerpt": _evidence_excerpt(decision.get("evidence")),
+        "notes": (
+            "灰度流量长时间不足（paused window > 7d），无法判定 SLO；"
+            "operator review required — manifest unchanged"
+        ),
+    }
+    response_payload: dict[str, Any] = {
+        "phase": AUDIT_OUTCOME_STOP_LOSS_HALT_ALERT,
+        "manifest_path": str(target_path),
+        "violations_summary": violation_reason,
+    }
+
+    if dry_run:
+        return _result(
+            applied=False,
+            reason=REASON_STOP_LOSS_HALT_ALERT,
+            recommendation=rec,
+            dry_run=True,
+            would_apply=True,
+            warning=(
+                "stop-loss halt alert (灰度流量长时间不足); operator review "
+                "required — manifest will NOT be mutated"
+            ),
+            plan=audit_payload,
+            manifest_path=target_path,
+            request_id=request_id,
+        )
+
+    owns_conn = False
+    if conn is None:
+        from .. import db as _db
+
+        conn = _db.get_conn()
+        owns_conn = True
+    try:
+        audit_id = _insert_audit_row(
+            conn=conn,
+            request_id=request_id,
+            reason=violation_reason or "stop_loss_halt alert",
+            payload=audit_payload,
+            response=response_payload,
+            outcome=AUDIT_OUTCOME_STOP_LOSS_HALT_ALERT,
+            http_status=200,
+        )
+    finally:
+        if owns_conn:
+            try:
+                conn.close()
+            except sqlite3.Error:  # pragma: no cover
+                logger.warning("audit conn close failed (non-fatal)", exc_info=True)
+
+    return _result(
+        applied=False,
+        reason=REASON_STOP_LOSS_HALT_ALERT,
+        recommendation=rec,
+        dry_run=False,
+        warning=(
+            "stop-loss halt alert (灰度流量长时间不足); operator review "
+            "required — manifest NOT mutated"
+        ),
+        audit_log_id=audit_id,
+        request_id=request_id,
+        manifest_path=target_path,
+    )
+
+
 def _evidence_excerpt(evidence: Any) -> dict[str, Any]:
     """Trim the SLO evidence dict to a compact subset suitable for audit log
     storage (full evidence can be megabytes of status breakdown). We keep
@@ -689,6 +798,7 @@ __all__ = [
     "AUDIT_OUTCOME_STARTED",
     "AUDIT_OUTCOME_COMPLETED",
     "AUDIT_OUTCOME_ABORTED",
+    "AUDIT_OUTCOME_STOP_LOSS_HALT_ALERT",
     "ROLLBACK_BASELINE_KEY",
     "ROLLBACK_FORENSICS_KEY",
     "FAILED_SNAPSHOT_KEY",
@@ -697,6 +807,7 @@ __all__ = [
     "REC_CONTINUE",
     "REC_INSUFFICIENT",
     "REC_MONITORING_PAUSED",
+    "REC_STOP_LOSS_HALT",
     "REASON_NO_ROLLBACK_NEEDED",
     "REASON_INSUFFICIENT_DATA",
     "REASON_MONITORING_PAUSED",
@@ -706,4 +817,5 @@ __all__ = [
     "REASON_APPLIED",
     "REASON_DRY_RUN",
     "REASON_CONCURRENT_APPLY",
+    "REASON_STOP_LOSS_HALT_ALERT",
 ]

@@ -38,6 +38,7 @@ from backend.services.promotion_slo_monitor import (
     RECOMMENDATION_INSUFFICIENT_DATA,
     RECOMMENDATION_MONITORING_PAUSED,
     RECOMMENDATION_ROLLBACK,
+    RECOMMENDATION_STOP_LOSS_HALT,
     SLOReport,
     evaluate_window,
     load_default_thresholds,
@@ -46,6 +47,11 @@ from backend.services.promotion_slo_monitor import (
 EXIT_OK = 0
 EXIT_ROLLBACK = 1
 EXIT_USAGE_ERROR = 2
+# K-5 / K-7: stop-loss halt is operator-actionable but NOT a rollback signal.
+# Cron `||` chains should not auto-trigger rollback_runner.sh on this exit.
+# Use a distinct non-zero exit code so launchd / monitoring can route it
+# separately.
+EXIT_STOP_LOSS_HALT = 3
 
 
 def _format_within_slo(report: SLOReport) -> str:
@@ -56,6 +62,40 @@ def _format_within_slo(report: SLOReport) -> str:
     if report.within_slo is None:
         return f"**N/A (monitoring_paused)** — note: {report.notes or 'small sample'}"
     return f"**{report.within_slo}**"
+
+
+def _render_violation_row(v: dict) -> str:
+    """K-7: schema-adaptive single-violation renderer.
+
+    Pre-K-7 the renderer hard-coded ``v['actual']`` and ``v['threshold']``,
+    which crashed on Wave 4 violations that name those fields differently
+    (or omit them entirely):
+
+      * ``monitoring_paused_stale`` uses ``actual_days`` / ``threshold_days``
+      * ``baseline_unmeasured``     has no actual/threshold (categorical)
+      * ``baseline_undersampled``   (K-4 new) has ``sample_size`` /
+        ``minimum_sample_size`` in context
+      * ``paused_state_unreadable`` (K-6 new) has ``actual=None`` (synthetic)
+
+    Post-K-7: probe multiple field-name aliases, fall back to "N/A" placeholder
+    rather than KeyError-ing the whole markdown render. Comparator defaults to
+    "≤" for back-compat with legacy violation shapes.
+    """
+    dimension = v.get("dimension", "unknown")
+    actual = v.get("actual")
+    if actual is None:
+        actual = v.get("actual_days", "N/A")
+    threshold = v.get("threshold")
+    if threshold is None:
+        threshold = v.get("threshold_days", "N/A")
+    comparator = v.get("comparator", "≤")
+    ctx = v.get("context") or {}
+    hint = ctx.get("hint") if isinstance(ctx, dict) else None
+    suffix = f" — hint: {hint}" if hint else ""
+    return (
+        f"- **{dimension}** — actual={actual} threshold={threshold} "
+        f"({comparator}){suffix}"
+    )
 
 
 def _format_markdown(report: SLOReport) -> str:
@@ -81,19 +121,24 @@ def _format_markdown(report: SLOReport) -> str:
         lines.append("")
         lines.append("## Violations")
         for v in report.violations:
-            lines.append(
-                f"- **{v['dimension']}** — actual={v['actual']} "
-                f"threshold={v['threshold']} (≤)"
-            )
+            lines.append(_render_violation_row(v))
     return "\n".join(lines) + "\n"
 
 
 def _exit_code_for(report: SLOReport) -> int:
     """Map the SLO monitor's recommendation token to a cron-friendly exit
-    code. The four-token vocabulary collapses to {0, 1} so launchd / cron
-    `||` chains stay simple — only ``rollback`` is the alerting signal."""
+    code. Vocabulary mapping:
+
+        0 ``continue`` / ``insufficient_data`` / ``monitoring_paused``
+        1 ``rollback``          — auto-rollback signal
+        3 ``stop_loss_halt``    — K-5 audit alert (灰度流量长时间不足);
+                                  operator review required; NOT a rollback
+        0 unknown               — defensive (don't trigger spurious rollback)
+    """
     if report.recommendation == RECOMMENDATION_ROLLBACK:
         return EXIT_ROLLBACK
+    if report.recommendation == RECOMMENDATION_STOP_LOSS_HALT:
+        return EXIT_STOP_LOSS_HALT
     if report.recommendation in (
         RECOMMENDATION_CONTINUE,
         RECOMMENDATION_INSUFFICIENT_DATA,
