@@ -2223,7 +2223,11 @@ class RenderQueue:
             # Reclaim orphans: queued rows tagged by a prior recover() whose
             # process died between commit and _job_pool.submit(). Without this,
             # the SELECT below (which requires recovery_token IS NULL) would
-            # skip them forever.
+            # skip them forever. julianday() is used (not lex TEXT compare)
+            # because recovery_claimed_at is written as Python ISO format
+            # ('2026-05-27T02:48:00.612930+00:00') while SQLite's datetime()
+            # emits space-separated format; lex compare on these silently
+            # fails within the same UTC day (T > space).
             conn.execute(
                 """
                 UPDATE render_jobs
@@ -2231,7 +2235,7 @@ class RenderQueue:
                     recovery_claimed_at = NULL
                 WHERE status = 'queued'
                   AND recovery_token IS NOT NULL
-                  AND recovery_claimed_at < datetime('now', '-5 minutes')
+                  AND julianday(recovery_claimed_at) < julianday('now', '-5 minutes')
                 """
             )
             queued_rows: list[sqlite3.Row] = conn.execute(
