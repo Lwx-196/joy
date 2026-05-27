@@ -328,38 +328,128 @@ def _validate_baseline_provenance(provenance: Any) -> dict[str, Any]:
     return dict(provenance)
 
 
-def _validate_paused_stale_days(raw_value: Any) -> int:
-    """Wave 5 followup #1 (eval-M1): validate the optional `paused_stale_days`
-    JSON field. Must be positive int (not bool — Python ``True``/``False`` are
-    technically ``int`` subclasses but operator intent is nonsensical here).
+def _validate_positive_int(
+    raw_value: Any,
+    *,
+    default: int,
+    field_name: str,
+) -> int:
+    """Wave 5 followup #2 (resolves followup-1 I-1): shared validator for the
+    handful of positive-int JSON fields under ``slo_thresholds.json``:
+    ``paused_stale_days`` (Wave 5 #1), ``baseline_stale_days`` (Wave 5 #2,
+    eval-M1 sibling), and ``minimum_sample_size`` (pre-Wave 5, upgraded from
+    bare ``int()`` cast to match the other two for defense-in-depth).
 
-    Production (`SLO_TEST_MODE` unset/0): invalid → ValueError.
-    Test (`SLO_TEST_MODE=1`): invalid → warn + fallback to module default
-    :data:`PAUSED_STALE_DAYS` so legacy fixtures / placeholder JSONs that
-    omit or mis-type the field still load.
+    Contract:
+      * Absent (``None``) → return ``default`` (BC: legacy JSON files that
+        predate any given field still load successfully without ceremony).
+      * ``bool`` → always invalid (``True``/``False`` are technically ``int``
+        subclasses in CPython but operator intent for a count-of-days /
+        sample-size is nonsensical; a JSON literal ``true`` would silently
+        parse as 1, ``false`` as 0 — both anti-patterns the explicit check
+        closes).
+      * Non-int type (string / float / list / dict / …) → invalid.
+      * Value ``<= 0`` → invalid (zero days = fire on first observation,
+        zero sample size = no minimum protection at all; neither matches
+        operator intent).
 
-    Absent key returns the module default (back-compat with pre-Wave5 JSONs
-    that don't carry this field at all).
+    Mode dispatch (mirrors ``_validate_baseline_provenance``):
+      * Production (``SLO_TEST_MODE`` unset / not in
+        :data:`_TEST_MODE_TRUTHY`): invalid → ``ValueError`` (fail-closed).
+      * Test (``SLO_TEST_MODE=1``): invalid → log warning + return
+        ``default`` (escape hatch so legacy fixtures / placeholder JSONs
+        load).
+
+    ``field_name`` is included in error messages + log records so a caller
+    using this helper for multiple fields can grep / regex on the canonical
+    name (e.g. ``paused_stale_days.*must be positive int``).
     """
     if raw_value is None:
-        return PAUSED_STALE_DAYS
-    if isinstance(raw_value, bool) or not isinstance(raw_value, int) or raw_value <= 0:
+        return default
+    # ``bool`` check MUST precede the ``int`` check — Python's ``True``/``False``
+    # satisfy ``isinstance(x, int)`` so a naked int check would silently accept
+    # the bool and produce a paused_stale_days=1 / minimum_sample_size=0 footgun.
+    if isinstance(raw_value, bool):
         msg = (
-            f"invalid paused_stale_days: must be positive int, "
+            f"invalid {field_name}: must be positive int, "
             f"got {raw_value!r} ({type(raw_value).__name__})"
         )
         if _is_test_mode():
-            _logger.warning("%s; falling back to default %d", msg, PAUSED_STALE_DAYS)
-            return PAUSED_STALE_DAYS
+            _logger.warning("%s; falling back to default %d", msg, default)
+            return default
+        raise ValueError(msg)
+    if not isinstance(raw_value, int) or raw_value <= 0:
+        msg = (
+            f"invalid {field_name}: must be positive int, "
+            f"got {raw_value!r} ({type(raw_value).__name__})"
+        )
+        if _is_test_mode():
+            _logger.warning("%s; falling back to default %d", msg, default)
+            return default
         raise ValueError(msg)
     return int(raw_value)
 
 
+def _validate_paused_stale_days(raw_value: Any) -> int:
+    """Wave 5 followup #1 (eval-M1): validate the optional `paused_stale_days`
+    JSON field. Thin wrapper over :func:`_validate_positive_int` preserved for
+    BC / readability (call sites read more naturally as
+    ``_validate_paused_stale_days(...)`` than the generic helper).
+    """
+    return _validate_positive_int(
+        raw_value,
+        default=PAUSED_STALE_DAYS,
+        field_name="paused_stale_days",
+    )
+
+
+def _validate_baseline_stale_days(raw_value: Any) -> int:
+    """Wave 5 followup #2 (eval-M1 sibling): validate the optional
+    ``baseline_stale_days`` JSON field. Same contract as
+    :func:`_validate_paused_stale_days` — thin wrapper over
+    :func:`_validate_positive_int` for readable call sites.
+
+    Promotes ``BASELINE_STALE_DAYS = 60`` from a hard-coded module constant to
+    an operator-tunable JSON field so the "baseline calibration is too old"
+    threshold can be raised / lowered per environment without code edit +
+    redeploy.
+    """
+    return _validate_positive_int(
+        raw_value,
+        default=BASELINE_STALE_DAYS,
+        field_name="baseline_stale_days",
+    )
+
+
+def _validate_minimum_sample_size(raw_value: Any) -> int:
+    """Wave 5 followup #2 (resolves I-1 BC consolidation): the
+    ``minimum_sample_size`` field has existed since Wave 3 but was loaded with
+    a bare ``int()`` cast which silently accepted ``bool`` (``True`` → 1,
+    ``False`` → 0), negatives, and other anti-patterns. This wrapper aligns
+    its validation depth with :data:`PAUSED_STALE_DAYS` /
+    :data:`BASELINE_STALE_DAYS` so the same fail-closed / test-mode-fallback
+    semantics apply across all three positive-int JSON fields.
+
+    BC: the module-level :data:`DEFAULT_MINIMUM_SAMPLE_SIZE` (=30) remains the
+    fallback default for absent / test-mode-rejected values.
+    """
+    return _validate_positive_int(
+        raw_value,
+        default=DEFAULT_MINIMUM_SAMPLE_SIZE,
+        field_name="minimum_sample_size",
+    )
+
+
 def load_default_thresholds(path: Path | None = None) -> dict[str, Any]:
     """Load thresholds JSON. Returns the full structure (thresholds + baseline +
-    baseline_provenance + sample size + window + paused_stale_days). Raises
-    ValueError if file is malformed or `baseline_provenance` is missing/invalid
-    in production mode.
+    baseline_provenance + sample size + window + paused_stale_days +
+    baseline_stale_days). Raises ValueError if file is malformed or
+    `baseline_provenance` is missing/invalid in production mode.
+
+    Wave 5 followup #2: ``baseline_stale_days`` is now JSON-tunable (parallel
+    to ``paused_stale_days`` introduced in followup #1). ``minimum_sample_size``
+    validation depth was upgraded to match (bool / negative / non-int now
+    rejected in prod instead of silently coerced).
     """
     target = Path(path) if path else _DEFAULT_THRESHOLDS_FILE
     if not target.exists():
@@ -371,6 +461,7 @@ def load_default_thresholds(path: Path | None = None) -> dict[str, Any]:
             "minimum_sample_size": DEFAULT_MINIMUM_SAMPLE_SIZE,
             "default_window_hours": DEFAULT_WINDOW_HOURS,
             "paused_stale_days": PAUSED_STALE_DAYS,
+            "baseline_stale_days": BASELINE_STALE_DAYS,
         }
     try:
         raw = json.loads(target.read_text(encoding="utf-8"))
@@ -385,14 +476,17 @@ def load_default_thresholds(path: Path | None = None) -> dict[str, Any]:
         "thresholds": {**_DEFAULT_THRESHOLDS, **dict(raw.get("thresholds") or {})},
         "baseline": {**_DEFAULT_BASELINE, **dict(raw.get("baseline") or {})},
         "baseline_provenance": provenance,
-        "minimum_sample_size": int(
-            raw.get("minimum_sample_size", DEFAULT_MINIMUM_SAMPLE_SIZE)
+        "minimum_sample_size": _validate_minimum_sample_size(
+            raw.get("minimum_sample_size")
         ),
         "default_window_hours": int(
             raw.get("default_window_hours", DEFAULT_WINDOW_HOURS)
         ),
         "paused_stale_days": _validate_paused_stale_days(
             raw.get("paused_stale_days")
+        ),
+        "baseline_stale_days": _validate_baseline_stale_days(
+            raw.get("baseline_stale_days")
         ),
     }
 
@@ -436,7 +530,11 @@ def _check_baseline_stale(
 def _code_default_thresholds() -> dict[str, Any]:
     """Pure code-default thresholds, no file I/O. Used as last-resort fallback
     when on-disk thresholds file is rejected by the W4-1 placeholder gate but
-    callers supply a full override (e.g. tests, ad-hoc CLI sessions)."""
+    callers supply a full override (e.g. tests, ad-hoc CLI sessions).
+
+    Wave 5 followup #2: includes ``baseline_stale_days`` parallel to
+    ``paused_stale_days``.
+    """
     return {
         "thresholds": dict(_DEFAULT_THRESHOLDS),
         "baseline": dict(_DEFAULT_BASELINE),
@@ -444,6 +542,7 @@ def _code_default_thresholds() -> dict[str, Any]:
         "minimum_sample_size": DEFAULT_MINIMUM_SAMPLE_SIZE,
         "default_window_hours": DEFAULT_WINDOW_HOURS,
         "paused_stale_days": PAUSED_STALE_DAYS,
+        "baseline_stale_days": BASELINE_STALE_DAYS,
     }
 
 
@@ -499,9 +598,9 @@ def _merge_thresholds(
     if "thresholds" in user_thresholds or "baseline" in user_thresholds:
         # Full structured override
         overlay_provenance = user_thresholds.get("baseline_provenance")
-        # Wave 5 followup #1: `paused_stale_days` propagation. If the caller
-        # supplied it explicitly, validate (same rules as JSON load) and use
-        # the override; otherwise inherit base. Flat overrides (else branch
+        # Wave 5 followup #1+#2: positive-int field propagation. If the caller
+        # supplied a field explicitly, validate (same rules as JSON load) and
+        # use the override; otherwise inherit base. Flat overrides (else branch
         # below) just `**base` so they inherit automatically.
         if "paused_stale_days" in user_thresholds:
             paused_stale_days = _validate_paused_stale_days(
@@ -511,6 +610,23 @@ def _merge_thresholds(
             paused_stale_days = int(
                 base.get("paused_stale_days", PAUSED_STALE_DAYS)
             )
+        if "baseline_stale_days" in user_thresholds:
+            baseline_stale_days = _validate_baseline_stale_days(
+                user_thresholds.get("baseline_stale_days")
+            )
+        else:
+            baseline_stale_days = int(
+                base.get("baseline_stale_days", BASELINE_STALE_DAYS)
+            )
+        # Wave 5 followup #2: ``minimum_sample_size`` also goes through the
+        # shared validator so a bool / negative override is rejected with the
+        # same fail-closed semantics as the JSON load path.
+        if "minimum_sample_size" in user_thresholds:
+            minimum_sample_size = _validate_minimum_sample_size(
+                user_thresholds.get("minimum_sample_size")
+            )
+        else:
+            minimum_sample_size = int(base["minimum_sample_size"])
         return {
             "thresholds": {
                 **base["thresholds"],
@@ -525,17 +641,16 @@ def _merge_thresholds(
                 if isinstance(overlay_provenance, dict)
                 else dict(base.get("baseline_provenance") or {})
             ),
-            "minimum_sample_size": int(
-                user_thresholds.get("minimum_sample_size", base["minimum_sample_size"])
-            ),
+            "minimum_sample_size": minimum_sample_size,
             "default_window_hours": int(
                 user_thresholds.get("default_window_hours", base["default_window_hours"])
             ),
             "paused_stale_days": paused_stale_days,
+            "baseline_stale_days": baseline_stale_days,
         }
     # Flat override → assumed thresholds-only. ``**base`` propagates
-    # ``paused_stale_days`` automatically (and ``minimum_sample_size`` /
-    # ``default_window_hours`` likewise).
+    # ``paused_stale_days`` / ``baseline_stale_days`` / ``minimum_sample_size``
+    # / ``default_window_hours`` automatically.
     return {
         **base,
         "thresholds": {**base["thresholds"], **dict(user_thresholds)},
@@ -1099,6 +1214,14 @@ def evaluate_window(
     paused_stale_days = int(
         config.get("paused_stale_days", PAUSED_STALE_DAYS)
     )
+    # Wave 5 followup #2 (eval-M1 sibling): configurable baseline-stale window.
+    # Same defensive fallback for cross-version threshold dicts that predate
+    # the field. Read at top so it's available for both the `_check_baseline_stale`
+    # call below AND the evidence echo (so operators can confirm config-driven
+    # override took effect).
+    baseline_stale_days = int(
+        config.get("baseline_stale_days", BASELINE_STALE_DAYS)
+    )
 
     cutoff = _cutoff_iso(window_hours)
 
@@ -1139,7 +1262,11 @@ def evaluate_window(
         + gate_evidence["blocker_count"]
     )
 
-    stale_violation = _check_baseline_stale(provenance)
+    # Wave 5 followup #2: pass operator-tunable stale_days through. Pre-W5#2
+    # the function always used the module constant; now an operator can lower
+    # it (e.g. 30 days to force more frequent recalibration in a noisy env) or
+    # raise it (e.g. 90 days for a stable pipeline).
+    stale_violation = _check_baseline_stale(provenance, stale_days=baseline_stale_days)
 
     evidence = {
         "comfyui_failure": comfyui_evidence,
@@ -1155,6 +1282,9 @@ def evaluate_window(
         # Wave 5 followup #1: surface effective stop-loss window so operators
         # can confirm config-driven override took effect (vs module constant).
         "paused_stale_days": paused_stale_days,
+        # Wave 5 followup #2: parallel evidence echo for the baseline-stale
+        # window so operators can audit both tunables from a single SLO report.
+        "baseline_stale_days": baseline_stale_days,
     }
 
     if sample_size < min_sample:

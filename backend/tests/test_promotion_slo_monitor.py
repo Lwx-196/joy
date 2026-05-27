@@ -2131,13 +2131,20 @@ def test_paused_stale_days_bool_rejected_in_prod(
         load_default_thresholds(bad_json_path)
 
 
-def test_paused_stale_days_missing_falls_back_to_module_default(
+def test_bc_paused_stale_days_missing_falls_back_to_module_default(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Wave 5 #1: BC — a thresholds JSON omitting `paused_stale_days`
     entirely (pre-Wave 5 file) must still load successfully and surface the
-    module default PAUSED_STALE_DAYS=7 (no warning, no raise)."""
+    module default PAUSED_STALE_DAYS=7 (no warning, no raise).
+
+    Wave 5 followup #2 (I-3): renamed with ``_bc_`` prefix so grep /
+    `pytest -k bc_` can isolate the backward-compatibility test set from
+    feature tests. The ``_bc_`` convention applies to any test that asserts
+    "legacy JSON / pre-feature payload still loads and falls back to a
+    sensible default".
+    """
     monkeypatch.delenv("SLO_TEST_MODE", raising=False)
     from backend.services.promotion_slo_monitor import (
         PAUSED_STALE_DAYS,
@@ -2176,3 +2183,582 @@ def test_paused_stale_days_missing_falls_back_to_module_default(
 
     config = load_default_thresholds(legacy_json_path)
     assert config["paused_stale_days"] == PAUSED_STALE_DAYS
+
+
+# ---------------------------------------------------------------------------
+# Wave 5 followup #2 — _validate_positive_int helper unit tests (resolves
+# followup-1 I-1: shared validator for paused_stale_days / baseline_stale_days
+# / minimum_sample_size).
+# ---------------------------------------------------------------------------
+#
+# This helper is module-private (``_validate_positive_int``); the three public
+# wrappers ``_validate_paused_stale_days`` / ``_validate_baseline_stale_days``
+# / ``_validate_minimum_sample_size`` delegate. Unit-testing the helper
+# directly catches regressions across all three callers in one place.
+
+
+def test_validate_positive_int_valid_returns_value() -> None:
+    """Wave 5 #2: valid positive int → returned as-is."""
+    from backend.services.promotion_slo_monitor import _validate_positive_int
+
+    assert _validate_positive_int(7, default=99, field_name="foo") == 7
+    assert _validate_positive_int(1, default=99, field_name="foo") == 1
+    assert _validate_positive_int(1_000_000, default=99, field_name="foo") == 1_000_000
+
+
+def test_validate_positive_int_none_returns_default() -> None:
+    """Wave 5 #2: absent (None) → fallback default (BC for legacy JSONs)."""
+    from backend.services.promotion_slo_monitor import _validate_positive_int
+
+    assert _validate_positive_int(None, default=42, field_name="foo") == 42
+
+
+def test_validate_positive_int_bool_raises_in_prod(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Wave 5 #2: bool is technically int subclass but operator intent is
+    nonsense. Both True and False rejected in prod."""
+    monkeypatch.delenv("SLO_TEST_MODE", raising=False)
+    from backend.services.promotion_slo_monitor import _validate_positive_int
+
+    with pytest.raises(ValueError, match=r"my_field.*must be positive int"):
+        _validate_positive_int(True, default=10, field_name="my_field")
+    with pytest.raises(ValueError, match=r"my_field.*must be positive int"):
+        _validate_positive_int(False, default=10, field_name="my_field")
+
+
+def test_validate_positive_int_negative_raises_in_prod(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Wave 5 #2: negative values rejected in prod (a stop-loss window of -3
+    days is nonsensical)."""
+    monkeypatch.delenv("SLO_TEST_MODE", raising=False)
+    from backend.services.promotion_slo_monitor import _validate_positive_int
+
+    with pytest.raises(ValueError, match=r"some_field.*must be positive int"):
+        _validate_positive_int(-1, default=10, field_name="some_field")
+    with pytest.raises(ValueError, match=r"some_field.*must be positive int"):
+        _validate_positive_int(-1000, default=10, field_name="some_field")
+
+
+def test_validate_positive_int_zero_raises_in_prod(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Wave 5 #2: zero rejected in prod (a stop-loss of 0 days = fire on first
+    observation; a minimum sample of 0 = no minimum protection)."""
+    monkeypatch.delenv("SLO_TEST_MODE", raising=False)
+    from backend.services.promotion_slo_monitor import _validate_positive_int
+
+    with pytest.raises(ValueError, match=r"zero_field.*must be positive int"):
+        _validate_positive_int(0, default=10, field_name="zero_field")
+
+
+def test_validate_positive_int_invalid_test_mode_warns_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Wave 5 #2: SLO_TEST_MODE=1 escape hatch — invalid value → warn + return
+    default (so legacy fixtures keep loading in CI / dev)."""
+    monkeypatch.setenv("SLO_TEST_MODE", "1")
+    import logging as _logging
+
+    from backend.services.promotion_slo_monitor import _validate_positive_int
+
+    with caplog.at_level(_logging.WARNING):
+        result = _validate_positive_int(
+            "not-a-number", default=42, field_name="test_mode_field"
+        )
+
+    assert result == 42
+    assert any(
+        "test_mode_field" in rec.message for rec in caplog.records
+    ), f"expected test_mode_field warning; got {[r.message for r in caplog.records]}"
+
+
+def test_validate_positive_int_float_rejected_in_prod(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Wave 5 #2: float is not int (Python `3.0 != 3` semantically for type
+    purposes — operator intent for a discrete count of days is integer)."""
+    monkeypatch.delenv("SLO_TEST_MODE", raising=False)
+    from backend.services.promotion_slo_monitor import _validate_positive_int
+
+    with pytest.raises(ValueError, match=r"float_field.*must be positive int"):
+        _validate_positive_int(3.5, default=10, field_name="float_field")
+    with pytest.raises(ValueError, match=r"float_field.*must be positive int"):
+        _validate_positive_int(3.0, default=10, field_name="float_field")
+
+
+# ---------------------------------------------------------------------------
+# Wave 5 followup #2 — baseline_stale_days configurable (eval-M1 sibling)
+# ---------------------------------------------------------------------------
+#
+# The Wave 3 ``BASELINE_STALE_DAYS = 60`` module constant required code edit +
+# redeploy to retune. Wave 5 followup #2 promotes it to a top-level JSON field
+# parallel to ``paused_stale_days`` (followup #1). The constant remains the
+# fallback default for back-compat + import-time semantics.
+
+
+def test_baseline_stale_days_default_from_json(tmp_path: Path) -> None:
+    """Wave 5 #2: the checked-in slo_thresholds.json now carries
+    `baseline_stale_days: 60`. load_default_thresholds must surface it on the
+    returned dict so callers see the JSON-driven value (not the module
+    constant) by default."""
+    from backend.services.promotion_slo_monitor import load_default_thresholds
+
+    config = load_default_thresholds()  # default path → on-disk JSON
+    assert "baseline_stale_days" in config
+    assert config["baseline_stale_days"] == 60
+    assert isinstance(config["baseline_stale_days"], int)
+
+
+def test_baseline_stale_days_overridable_via_thresholds_kwarg(
+    temp_db: Path,
+    tmp_path: Path,
+) -> None:
+    """Wave 5 #2: operator can shrink the baseline-stale window to 30 days via
+    the structured `thresholds` kwarg. With a provenance.measured_at 35 days
+    ago + baseline_stale_days=30, the baseline_stale violation must fire; the
+    same fixture under the default 60-day window would not fire.
+    """
+    from backend.services.promotion_slo_monitor import BASELINE_STALE_DAYS
+
+    # Insert enough rows to clear min_sample so we hit the post-paused
+    # evaluation path (where baseline_stale fires).
+    with db.connect() as conn:
+        for _ in range(50):
+            _insert_simulation_job(conn, status="done")
+        conn.commit()
+
+        # 35-day-old baseline measurement
+        thirty_five_days_ago = (
+            datetime.now(timezone.utc) - timedelta(days=35)
+        ).isoformat()
+        override_30d = {
+            "thresholds": {},
+            "baseline_provenance": {
+                "measured_at": thirty_five_days_ago,
+                "window_hours": 24,
+                "sample_size": 100,
+                "computed_by": "calibrate_cli",
+                "computed_at_main_sha": "wave5-followup2-test",
+            },
+            "baseline_stale_days": 30,
+        }
+        report_30d = evaluate_window(
+            window_hours=48,
+            conn=conn,
+            promotion_state="p10",
+            thresholds=override_30d,
+        )
+
+        dims_30d = {v["dimension"] for v in report_30d.violations}
+        assert "baseline_stale" in dims_30d, (
+            f"with baseline_stale_days=30 + measured 35d ago, expected "
+            f"baseline_stale violation; got dims={dims_30d}"
+        )
+        stale_v = next(
+            v for v in report_30d.violations if v["dimension"] == "baseline_stale"
+        )
+        assert stale_v["threshold_days"] == 30, (
+            "violation must echo operator-supplied stale_days, not module "
+            f"default {BASELINE_STALE_DAYS}"
+        )
+
+        # Same fixture, default 60-day window → measured 35d ago is fresh.
+        override_default = {
+            "thresholds": {},
+            "baseline_provenance": {
+                "measured_at": thirty_five_days_ago,
+                "window_hours": 24,
+                "sample_size": 100,
+                "computed_by": "calibrate_cli",
+                "computed_at_main_sha": "wave5-followup2-test",
+            },
+            # ← no baseline_stale_days → falls back to 60
+        }
+        report_default = evaluate_window(
+            window_hours=48,
+            conn=conn,
+            promotion_state="p10",
+            thresholds=override_default,
+        )
+
+    dims_default = {v["dimension"] for v in report_default.violations}
+    assert "baseline_stale" not in dims_default, (
+        f"with default 60d window + measured 35d ago, baseline must NOT be "
+        f"stale; got dims={dims_default}"
+    )
+
+
+def test_baseline_stale_days_evidence_echoes_effective_value(
+    temp_db: Path,
+    tmp_path: Path,
+) -> None:
+    """Wave 5 #2: evaluate_window evidence dict must surface the effective
+    baseline-stale window (mirrors the paused_stale_days evidence echo) so
+    operators inspecting an SLO report can confirm config-driven override
+    actually took effect.
+    """
+    with db.connect() as conn:
+        for _ in range(3):
+            _insert_simulation_job(conn, status="done")
+        conn.commit()
+
+        override = _measured_thresholds_override()
+        override["baseline_stale_days"] = 45
+        report = evaluate_window(
+            window_hours=48,
+            conn=conn,
+            promotion_state="p10",
+            thresholds=override,
+        )
+
+    assert report.evidence.get("baseline_stale_days") == 45, (
+        f"evidence must echo effective baseline_stale_days; got "
+        f"{report.evidence.get('baseline_stale_days')!r}"
+    )
+
+
+def test_baseline_stale_days_invalid_type_raises_in_prod(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Wave 5 #2: production mode (SLO_TEST_MODE unset) must reject a JSON
+    `baseline_stale_days` whose type is wrong (string / float). Closes a
+    footgun where an operator typo (`"sixty"` instead of `60`) would
+    silently revert to a default mid-incident."""
+    monkeypatch.delenv("SLO_TEST_MODE", raising=False)
+    from backend.services.promotion_slo_monitor import load_default_thresholds
+
+    bad_json_path = tmp_path / "slo_thresholds.json"
+    bad_json_path.write_text(
+        json.dumps(
+            {
+                "thresholds": {
+                    "comfyui_failure_rate_max": 0.05,
+                    "vlm_disagreement_rate_max": 0.10,
+                    "vlm_judge_missing_rate_max": 0.10,
+                    "delivery_gate_rejection_rate_multiplier_max": 1.05,
+                    "pre_render_gate_blocker_multiplier_max": 1.10,
+                },
+                "baseline": {
+                    "delivery_gate_rejection_rate": 0.10,
+                    "pre_render_gate_blocker_count": 5,
+                },
+                "baseline_provenance": {
+                    "measured_at": datetime.now(timezone.utc).isoformat(),
+                    "window_hours": 24,
+                    "sample_size": 100,
+                    "computed_by": "calibrate_cli",
+                    "computed_at_main_sha": "wave5-test",
+                },
+                "minimum_sample_size": 30,
+                "default_window_hours": 48,
+                "baseline_stale_days": "sixty",  # ← invalid type
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        ValueError, match=r"baseline_stale_days.*must be positive int"
+    ):
+        load_default_thresholds(bad_json_path)
+
+
+def test_baseline_stale_days_invalid_test_mode_warns_and_fallbacks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Wave 5 #2: test mode (SLO_TEST_MODE=1) must warn but NOT raise on a bad
+    baseline_stale_days; load must fall back to BASELINE_STALE_DAYS=60.
+    Parity with paused_stale_days escape hatch."""
+    monkeypatch.setenv("SLO_TEST_MODE", "1")
+    import logging as _logging
+
+    from backend.services.promotion_slo_monitor import (
+        BASELINE_STALE_DAYS,
+        load_default_thresholds,
+    )
+
+    bad_json_path = tmp_path / "slo_thresholds.json"
+    bad_json_path.write_text(
+        json.dumps(
+            {
+                "thresholds": {},
+                "baseline": {},
+                "baseline_provenance": {
+                    "measured_at": datetime.now(timezone.utc).isoformat(),
+                    "window_hours": 24,
+                    "sample_size": 100,
+                    "computed_by": "calibrate_cli",
+                    "computed_at_main_sha": "wave5-test",
+                },
+                "baseline_stale_days": 45.5,  # ← float (not int)
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with caplog.at_level(_logging.WARNING):
+        config = load_default_thresholds(bad_json_path)
+
+    assert config["baseline_stale_days"] == BASELINE_STALE_DAYS
+    assert any(
+        "baseline_stale_days" in rec.message for rec in caplog.records
+    ), f"expected baseline_stale_days warning in caplog; got {[r.message for r in caplog.records]}"
+
+
+def test_baseline_stale_days_negative_raises_in_prod(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Wave 5 #2: zero / negative baseline_stale_days rejected in prod (a
+    stale window of -10 days is nonsensical; a 0-day window would fire on
+    every report)."""
+    monkeypatch.delenv("SLO_TEST_MODE", raising=False)
+    from backend.services.promotion_slo_monitor import load_default_thresholds
+
+    for bad_value in (0, -1, -1000):
+        bad_json_path = tmp_path / f"slo_thresholds_{bad_value}.json"
+        bad_json_path.write_text(
+            json.dumps(
+                {
+                    "thresholds": {},
+                    "baseline": {},
+                    "baseline_provenance": {
+                        "measured_at": datetime.now(timezone.utc).isoformat(),
+                        "window_hours": 24,
+                        "sample_size": 100,
+                        "computed_by": "calibrate_cli",
+                        "computed_at_main_sha": "wave5-test",
+                    },
+                    "baseline_stale_days": bad_value,
+                }
+            ),
+            encoding="utf-8",
+        )
+        with pytest.raises(
+            ValueError, match=r"baseline_stale_days.*must be positive int"
+        ):
+            load_default_thresholds(bad_json_path)
+
+
+def test_baseline_stale_days_bool_rejected_in_prod(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Wave 5 #2: bool is technically int subclass but JSON `true` would
+    silently parse as baseline_stale_days=1. Rejected explicitly. Mirrors
+    paused_stale_days bool guard."""
+    monkeypatch.delenv("SLO_TEST_MODE", raising=False)
+    from backend.services.promotion_slo_monitor import load_default_thresholds
+
+    bad_json_path = tmp_path / "slo_thresholds.json"
+    bad_json_path.write_text(
+        json.dumps(
+            {
+                "thresholds": {},
+                "baseline": {},
+                "baseline_provenance": {
+                    "measured_at": datetime.now(timezone.utc).isoformat(),
+                    "window_hours": 24,
+                    "sample_size": 100,
+                    "computed_by": "calibrate_cli",
+                    "computed_at_main_sha": "wave5-test",
+                },
+                "baseline_stale_days": True,  # ← bool, not int
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(
+        ValueError, match=r"baseline_stale_days.*must be positive int"
+    ):
+        load_default_thresholds(bad_json_path)
+
+
+def test_bc_baseline_stale_days_missing_falls_back_to_module_default(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Wave 5 #2: BC — a thresholds JSON omitting `baseline_stale_days`
+    entirely (pre-Wave 5 #2 file) must still load successfully and surface
+    the module default BASELINE_STALE_DAYS=60 (no warning, no raise).
+
+    ``_bc_`` prefix per I-3 convention — grep / `pytest -k bc_` isolates BC
+    tests from feature tests.
+    """
+    monkeypatch.delenv("SLO_TEST_MODE", raising=False)
+    from backend.services.promotion_slo_monitor import (
+        BASELINE_STALE_DAYS,
+        load_default_thresholds,
+    )
+
+    legacy_json_path = tmp_path / "slo_thresholds.json"
+    legacy_json_path.write_text(
+        json.dumps(
+            {
+                "thresholds": {
+                    "comfyui_failure_rate_max": 0.05,
+                    "vlm_disagreement_rate_max": 0.10,
+                    "vlm_judge_missing_rate_max": 0.10,
+                    "delivery_gate_rejection_rate_multiplier_max": 1.05,
+                    "pre_render_gate_blocker_multiplier_max": 1.10,
+                },
+                "baseline": {
+                    "delivery_gate_rejection_rate": 0.10,
+                    "pre_render_gate_blocker_count": 5,
+                },
+                "baseline_provenance": {
+                    "measured_at": datetime.now(timezone.utc).isoformat(),
+                    "window_hours": 24,
+                    "sample_size": 100,
+                    "computed_by": "calibrate_cli",
+                    "computed_at_main_sha": "wave5-test",
+                },
+                "minimum_sample_size": 30,
+                "default_window_hours": 48,
+                "paused_stale_days": 7,
+                # ← no baseline_stale_days key
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_default_thresholds(legacy_json_path)
+    assert config["baseline_stale_days"] == BASELINE_STALE_DAYS
+
+
+# ---------------------------------------------------------------------------
+# Wave 5 followup #2 — minimum_sample_size validation upgrade
+# ---------------------------------------------------------------------------
+#
+# Pre-Wave 5 #2 the field was loaded with a bare ``int()`` cast which silently
+# coerced bool → 1/0, accepted negatives, and accepted other anti-patterns.
+# Wave 5 #2 routes it through ``_validate_positive_int`` for parity with the
+# other two positive-int JSON fields. Behavior change is fail-closed in prod
+# (with test-mode fallback for legacy fixtures).
+
+
+def test_minimum_sample_size_bool_now_rejected_in_prod(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Wave 5 #2: pre-fix a JSON `minimum_sample_size: true` silently
+    coerced to 1 via ``int(True)``; post-fix it raises in prod (parity with
+    paused_stale_days / baseline_stale_days)."""
+    monkeypatch.delenv("SLO_TEST_MODE", raising=False)
+    from backend.services.promotion_slo_monitor import load_default_thresholds
+
+    bad_json_path = tmp_path / "slo_thresholds.json"
+    bad_json_path.write_text(
+        json.dumps(
+            {
+                "thresholds": {},
+                "baseline": {},
+                "baseline_provenance": {
+                    "measured_at": datetime.now(timezone.utc).isoformat(),
+                    "window_hours": 24,
+                    "sample_size": 100,
+                    "computed_by": "calibrate_cli",
+                    "computed_at_main_sha": "wave5-test",
+                },
+                "minimum_sample_size": True,  # ← bool, not int
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(
+        ValueError, match=r"minimum_sample_size.*must be positive int"
+    ):
+        load_default_thresholds(bad_json_path)
+
+
+def test_minimum_sample_size_negative_now_raises_in_prod(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Wave 5 #2: pre-fix a JSON `minimum_sample_size: -5` silently loaded
+    as -5 (and then short-circuited every report into insufficient_data
+    semantics for a state.sample_size >= 0 baseline). Post-fix it raises in
+    prod."""
+    monkeypatch.delenv("SLO_TEST_MODE", raising=False)
+    from backend.services.promotion_slo_monitor import load_default_thresholds
+
+    bad_json_path = tmp_path / "slo_thresholds.json"
+    bad_json_path.write_text(
+        json.dumps(
+            {
+                "thresholds": {},
+                "baseline": {},
+                "baseline_provenance": {
+                    "measured_at": datetime.now(timezone.utc).isoformat(),
+                    "window_hours": 24,
+                    "sample_size": 100,
+                    "computed_by": "calibrate_cli",
+                    "computed_at_main_sha": "wave5-test",
+                },
+                "minimum_sample_size": -5,  # ← negative
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(
+        ValueError, match=r"minimum_sample_size.*must be positive int"
+    ):
+        load_default_thresholds(bad_json_path)
+
+
+def test_bc_minimum_sample_size_missing_falls_back_to_default_30(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Wave 5 #2: BC — a thresholds JSON omitting `minimum_sample_size`
+    entirely (theoretically possible in custom test fixtures) falls back to
+    DEFAULT_MINIMUM_SAMPLE_SIZE=30 without warning or raise. The shipped
+    slo_thresholds.json has always carried the key, but the validator
+    contract must preserve the absent-key default for parity with the other
+    positive-int fields.
+
+    ``_bc_`` prefix per I-3 convention.
+    """
+    monkeypatch.delenv("SLO_TEST_MODE", raising=False)
+    from backend.services.promotion_slo_monitor import (
+        DEFAULT_MINIMUM_SAMPLE_SIZE,
+        load_default_thresholds,
+    )
+
+    legacy_json_path = tmp_path / "slo_thresholds.json"
+    legacy_json_path.write_text(
+        json.dumps(
+            {
+                "thresholds": {
+                    "comfyui_failure_rate_max": 0.05,
+                    "vlm_disagreement_rate_max": 0.10,
+                    "vlm_judge_missing_rate_max": 0.10,
+                    "delivery_gate_rejection_rate_multiplier_max": 1.05,
+                    "pre_render_gate_blocker_multiplier_max": 1.10,
+                },
+                "baseline": {
+                    "delivery_gate_rejection_rate": 0.10,
+                    "pre_render_gate_blocker_count": 5,
+                },
+                "baseline_provenance": {
+                    "measured_at": datetime.now(timezone.utc).isoformat(),
+                    "window_hours": 24,
+                    "sample_size": 100,
+                    "computed_by": "calibrate_cli",
+                    "computed_at_main_sha": "wave5-test",
+                },
+                "default_window_hours": 48,
+                # ← no minimum_sample_size key
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_default_thresholds(legacy_json_path)
+    assert config["minimum_sample_size"] == DEFAULT_MINIMUM_SAMPLE_SIZE
