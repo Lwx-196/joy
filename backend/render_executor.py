@@ -38,6 +38,36 @@ DEFAULT_RENDER_TIMEOUT_SEC = int(os.environ.get("CASE_WORKBENCH_RENDER_TIMEOUT_S
 DEFAULT_SEMANTIC_SCREEN_TIMEOUT_SEC = "3"
 DEFAULT_SEMANTIC_PAIR_REVIEW_TIMEOUT_SEC = "8"
 DEFAULT_SEMANTIC_FINAL_QA_TIMEOUT_SEC = "8"
+SEMANTIC_PROVIDER_ENV_VARS = (
+    "CASE_LAYOUT_SEMANTIC_TIMEOUT_SEC",
+    "VISION_PROVIDER",
+    "VISION_API_BASE",
+    "VISION_API_KEY",
+    "VISION_API_MODEL",
+    "VISION_API_STREAM",
+    "CASE_LAYOUT_VERTEX_PROJECT",
+    "CASE_LAYOUT_VERTEX_LOCATION",
+    "CASE_LAYOUT_VERTEX_MODEL",
+    "CASE_LAYOUT_VERTEX_ENDPOINT",
+    "CASE_LAYOUT_VERTEX_REQUEST_TYPE",
+    "CASE_LAYOUT_VERTEX_RESPONSE_MIME_TYPE",
+    "CASE_LAYOUT_SEMANTIC_MODEL",
+    "CASE_WORKBENCH_VERTEX_PROJECT",
+    "CASE_WORKBENCH_VERTEX_LOCATION",
+    "GOOGLE_CLOUD_PROJECT",
+    "GOOGLE_CLOUD_LOCATION",
+    "GCLOUD_PROJECT",
+    "VERTEX_AI_MODEL",
+    "VERTEX_AI_LLM_REQUEST_TYPE",
+    "VERTEX_GENERATE_CONTENT_ENDPOINT",
+    "GEMINI_FLASH_PROVIDER",
+    "GEMINI_FLASH_BASE_URL",
+    "GEMINI_FLASH_API_KEY",
+    "GEMINI_FLASH_MODEL",
+    "GEMINI_FLASH_BACKUP_BASE_URL",
+    "GEMINI_FLASH_BACKUP_API_KEY",
+    "GEMINI_TUZI_API_KEY",
+)
 
 # Keep at most this many archived final-board.jpg snapshots per (case, brand, template).
 # LRU evicts the oldest beyond the limit so the case directory doesn't grow unbounded.
@@ -878,7 +908,7 @@ def _entry_from_plan(entry, candidate, role):
 
 def _blocker_belongs_to_applied_slot(message, applied_slots):
     text = str(message or "")
-    removable_tokens = ("缺少", "方向不一致", "命中过多", "没有可渲染")
+    removable_tokens = ("缺少", "方向不一致", "命中过多", "没有可渲染", "姿态差过大", "清晰度差")
     if not any(token in text for token in removable_tokens):
         return False
     for slot in applied_slots:
@@ -887,9 +917,39 @@ def _blocker_belongs_to_applied_slot(message, applied_slots):
             return True
     return False
 
+def _blocker_belongs_to_inactive_slot(message, active_slots):
+    if not active_slots:
+        return False
+    text = str(message or "")
+    removable_tokens = ("缺少", "方向不一致", "命中过多", "姿态差过大", "清晰度差")
+    if not any(token in text for token in removable_tokens):
+        return False
+    slot = _warning_slot(text)
+    return bool(slot and slot not in active_slots)
+
+def _active_render_slots(group, fallback_slots):
+    slots = group.get("render_slots") if isinstance(group, dict) else None
+    if isinstance(slots, list):
+        active = {str(slot) for slot in slots if str(slot)}
+        if active:
+            return active
+    selected_slots = group.get("selected_slots") if isinstance(group, dict) else None
+    if isinstance(selected_slots, dict):
+        active = {str(slot) for slot, value in selected_slots.items() if isinstance(value, dict)}
+        if active:
+            return active
+    return {str(slot) for slot in fallback_slots if str(slot)}
+
 def _filter_group_rejections(rejections, applied_slots):
     kept = []
-    removable_reasons = {"missing_phase", "direction_mismatch", "ambiguous_candidates", "duplicate_slot_material"}
+    removable_reasons = {
+        "missing_phase",
+        "direction_mismatch",
+        "ambiguous_candidates",
+        "duplicate_slot_material",
+        "pose_delta_exceeded",
+        "sharpness_gap",
+    }
     for item in rejections or []:
         if (
             isinstance(item, dict)
@@ -1003,17 +1063,24 @@ def _apply_render_selection_plan(manifest, plan):
                 group["render_slots"] = render_slots
             if effective_template:
                 group["effective_template"] = effective_template
+        active_slots = _active_render_slots(group, applied_for_group)
         group["render_selection_note"] = f"正式出图已按 source_selection_v1 候选排序覆盖 {len(applied_for_group)} 个槽位"
         group["blocking_issues"] = [
             item for item in (group.get("blocking_issues") or [])
             if not _blocker_belongs_to_applied_slot(item, set(applied_for_group))
+            and not _blocker_belongs_to_inactive_slot(item, active_slots)
         ]
         group["rejection_reasons"] = _filter_group_rejections(group.get("rejection_reasons") or [], set(applied_for_group))
         group["status"] = "ok" if not group.get("blocking_issues") else group.get("status")
     applied_slots = {item.get("slot") for item in audit["applied_slots"] if item.get("slot")}
+    active_slots = set()
+    for group in manifest.get("groups") or []:
+        if isinstance(group, dict):
+            active_slots.update(_active_render_slots(group, applied_slots))
     manifest["blocking_issues"] = [
         item for item in (manifest.get("blocking_issues") or [])
         if not _blocker_belongs_to_applied_slot(item, applied_slots)
+        and not _blocker_belongs_to_inactive_slot(item, active_slots)
     ]
     manifest["rejection_reasons"] = _filter_group_rejections(manifest.get("rejection_reasons") or [], applied_slots)
     warnings = manifest.get("warnings") if isinstance(manifest.get("warnings"), list) else []
@@ -1541,7 +1608,7 @@ def _render_subprocess_env() -> dict[str, str]:
     allowed to consume the whole formal render. These short defaults remain
     overrideable for dedicated deep runs.
     """
-    return {
+    env = {
         "PATH": os.environ.get("PATH", ""),
         "HOME": os.environ.get("HOME", ""),
         "PYTHONIOENCODING": "utf-8",
@@ -1559,6 +1626,11 @@ def _render_subprocess_env() -> dict[str, str]:
             DEFAULT_SEMANTIC_FINAL_QA_TIMEOUT_SEC,
         ),
     }
+    for name in SEMANTIC_PROVIDER_ENV_VARS:
+        value = os.environ.get(name)
+        if value:
+            env[name] = value
+    return env
 
 
 def _run_render_subprocess(args: list[str], timeout: int) -> subprocess.CompletedProcess[str]:
