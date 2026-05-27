@@ -183,9 +183,11 @@ def exposure_component(before: dict[str, Any] | None, after: dict[str, Any] | No
 def crop_component(view: str, before: dict[str, Any] | None, after: dict[str, Any] | None) -> dict[str, Any]:
     touched: list[str] = []
     observed = False
+    role_items: dict[str, dict[str, Any]] = {}
     for role, item in (("before", before or {}), ("after", after or {})):
         if not isinstance(item, dict):
             continue
+        role_items[role] = item
         if "crop_touches_frame" in item or "face_crop_touches_frame" in item:
             observed = True
         if item.get("crop_touches_frame") or item.get("face_crop_touches_frame"):
@@ -200,13 +202,34 @@ def crop_component(view: str, before: dict[str, Any] | None, after: dict[str, An
     if not touched:
         return {"method": "cv_crop_metrics", "status": "ok", "score": 5, "message": "主体裁切未触边"}
     status = "block" if view == "front" else "review"
+    touched_set = set(touched)
+    # Canonical role order (before, after) so downstream selected_files / roles 顺序稳定。
+    touched_canonical = [r for r in ("before", "after") if r in touched_set]
+    # P0.2-A: warning 附完整匹配维度，让下游 pre_render_gate 可与 cases.meta_json
+    # .source_group_selection.accepted_warnings 做精确匹配（slot+code+selected_files
+    # 交集 / message_contains 子串），结束 5/16 18 case 卡死。
+    selected_files: list[str] = []
+    for role in touched_canonical:
+        item = role_items.get(role) or {}
+        path = item.get("image_path") or item.get("path") or item.get("filename")
+        if path:
+            selected_files.append(str(path))
+    if not selected_files:
+        selected_files = list(touched_canonical)
+    message = (
+        "正式正面图存在面部/主体裁切贴边" if status == "block" else "侧向图裁切贴边需复核"
+    )
     return {
         "method": "cv_crop_metrics",
         "status": status,
         "score": -24 if status == "block" else -8,
-        "roles": sorted(set(touched)),
+        "roles": touched_canonical,
         "code": "crop_touches_frame",
-        "message": "正式正面图存在面部/主体裁切贴边" if status == "block" else "侧向图裁切贴边需复核",
+        "message": message,
+        "slot": view,
+        "selected_files": selected_files,
+        "message_contains": "裁切贴边",
+        "source": "source_selection",
     }
 
 
@@ -1328,13 +1351,17 @@ def slot_pair_quality(view: str, before: dict[str, Any] | None, after: dict[str,
         code = str(component.get("code") or "")
         status = str(component.get("status") or "")
         if code and status in {"block", "review"}:
-            warnings.append(
-                {
-                    "code": code,
-                    "severity": "block" if status == "block" else "review",
-                    "message": str(component.get("message") or code),
-                }
-            )
+            warning_entry: dict[str, Any] = {
+                "code": code,
+                "severity": "block" if status == "block" else "review",
+                "message": str(component.get("message") or code),
+            }
+            # P0.2-A: 透传匹配维度（如果 component 产了），让 pre_render_gate
+            # 可对 accepted_warnings 做精确匹配。
+            for dim_key in ("slot", "selected_files", "message_contains", "source", "roles"):
+                if dim_key in component:
+                    warning_entry[dim_key] = component[dim_key]
+            warnings.append(warning_entry)
     pair_feedback = _matched_pair_feedback(view, before, after)
     if pair_feedback:
         total_penalty = min(80, sum(int(item.get("penalty") or 0) for item in pair_feedback))
