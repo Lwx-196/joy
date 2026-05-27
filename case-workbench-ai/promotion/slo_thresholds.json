@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "thresholds": {
+    "comfyui_failure_rate_max": 0.05,
+    "vlm_disagreement_rate_max": 0.10,
+    "delivery_gate_rejection_rate_multiplier_max": 1.05,
+    "pre_render_gate_blocker_multiplier_max": 1.10
+  },
+  "baseline": {
+    "delivery_gate_rejection_rate": 0.10,
+    "pre_render_gate_blocker_count": 5
+  },
+  "minimum_sample_size": 30,
+  "default_window_hours": 48,
+  "notes": "Edit thresholds + baseline to tune SLO. Baseline should be measured during shadow period. Per plan §P2.4."
+}
