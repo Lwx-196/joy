@@ -4,14 +4,23 @@
 1) **Read-only**：仅查询 `simulation_jobs` / `candidate_lineage` / `ops_audit_log`
    三张 Wave 1 落地的表，不写任何业务表，不动 manifest，不触发回滚动作。
    回滚 applier 是 Wave 3 范围（避免本 wave 撞 Agent Y 的 manifest_loader）。
-2) **4 维 SLO**（plan §P2.4）：
+2) **5 维 SLO**（plan §P2.4 + Wave 3 eval-auditor C-3）：
      - comfyui_failure_rate     ← simulation_jobs (failed/total)
      - vlm_disagreement_rate    ← candidate_lineage.vlm_judge_result_json
+     - vlm_judge_missing_rate   ← candidate_lineage missing/malformed 比例
      - delivery_gate_rejection_rate ← ops_audit_log 失败 ratio
      - pre_render_gate_blocker_count ← simulation_jobs.audit_json.failure_stage
-3) **样本量保护**：window 内 sample < `minimum_sample_size` 一律
-   recommendation='insufficient_data'，避免冷启动 / 灰度初期 false positive。
-4) **阈值可注入**：thresholds 可通过 kwarg 覆盖（测试 / 临时调参 / 多环境），
+3) **样本量保护**（Wave 3 eval-auditor C-1 区分灰度 vs shadow）：
+     - sample < `minimum_sample_size` + promotion_state ∈ {p10/p25/p50/p100}
+       → `monitoring_paused`（保留状态等数据，within_slo=None）
+     - sample < `minimum_sample_size` + promotion_state == 'shadow'（含
+       fail-closed default 与 'rolled_back'）→ `insufficient_data`
+4) **VLM judge missing rate 独立维度**（Wave 3 eval-auditor C-3）：
+     - 分母 = 窗口内全量 candidate_lineage 行（不再只数 non-null judge 行）
+     - 分子 missing = vlm_judge_result_json IS NULL 或 JSON 无法 parse
+     - missing_rate > threshold（默认 0.10）→ violation
+     - disagreement_rate 分母同步改全量行
+5) **阈值可注入**：thresholds 可通过 kwarg 覆盖（测试 / 临时调参 / 多环境），
    未传则读 `case-workbench-ai/promotion/slo_thresholds.json` 默认。
 """
 
@@ -40,6 +49,11 @@ _DEFAULT_THRESHOLDS_FILE = (
 _DEFAULT_THRESHOLDS: dict[str, Any] = {
     "comfyui_failure_rate_max": 0.05,
     "vlm_disagreement_rate_max": 0.10,
+    # Wave 3 C-3: missing/malformed payload rate cap (fallback default; may be
+    # overridden via slo_thresholds.json `thresholds.vlm_judge_missing_rate_max`
+    # — but we do NOT depend on the JSON having it. Agent C will reify the
+    # threshold file separately.)
+    "vlm_judge_missing_rate_max": 0.10,
     "delivery_gate_rejection_rate_multiplier_max": 1.05,
     "pre_render_gate_blocker_multiplier_max": 1.10,
 }
@@ -51,6 +65,18 @@ _DEFAULT_BASELINE: dict[str, Any] = {
 
 DEFAULT_MINIMUM_SAMPLE_SIZE = 30
 DEFAULT_WINDOW_HOURS = 48
+
+# Recommendation 常量（避免散落 magic string）
+RECOMMENDATION_CONTINUE = "continue"
+RECOMMENDATION_ROLLBACK = "rollback"
+RECOMMENDATION_INSUFFICIENT_DATA = "insufficient_data"
+# Wave 3 C-1: 灰度态小样本，保留状态等数据
+RECOMMENDATION_MONITORING_PAUSED = "monitoring_paused"
+
+# Wave 3 C-1: 灰度（已发布）态集合 — 这些 state 小样本走 monitoring_paused。
+# `shadow` 与 `rolled_back` 是非灰度态（前者尚未发布，后者已撤回），均走
+# insufficient_data；fail-closed 默认 'shadow' 也走 insufficient_data。
+_PROMOTED_STATES: frozenset[str] = frozenset({"p10", "p25", "p50", "p100"})
 
 # Endpoint 关键字 — `ops_audit_log.endpoint` 匹配 delivery / gate / batch-rerun 三类
 _DELIVERY_GATE_ENDPOINT_KEYWORDS: tuple[str, ...] = (
@@ -72,12 +98,18 @@ _COUNTED_OUTCOMES: frozenset[str] = frozenset({"ok", "error", "partial"})
 
 @dataclass(frozen=True)
 class SLOReport:
-    within_slo: bool
+    # Wave 3 C-1: `None` when recommendation='monitoring_paused' — small sample
+    # under promoted state, decision is "保留状态等数据", neither pass nor fail.
+    within_slo: bool | None
     violations: list[dict[str, Any]]
     evidence: dict[str, Any]
-    recommendation: str  # 'continue' | 'rollback' | 'insufficient_data'
+    # 'continue' | 'rollback' | 'insufficient_data' | 'monitoring_paused'
+    recommendation: str
     window_hours: int
     sample_size: int
+    # Wave 3 C-1: human-readable note (e.g. small_sample_in_promoted_state,
+    # promotion_state echo). Empty string when no annotation needed.
+    notes: str = ""
     generated_at: str = field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )
@@ -195,45 +227,84 @@ def _compute_comfyui_failure_rate(
 def _compute_vlm_disagreement_rate(
     conn: sqlite3.Connection, cutoff_iso: str
 ) -> dict[str, Any]:
-    """Average `1 - agreement_rate` over candidate_lineage rows with non-null
-    vlm_judge_result_json within window. Missing / malformed payloads are
-    skipped (don't count toward denominator)."""
+    """Compute VLM disagreement rate **and** missing rate over all
+    candidate_lineage rows within window.
+
+    Wave 3 eval-auditor C-3 fix:
+      - Pre-fix denominator was rows WHERE `vlm_judge_result_json IS NOT NULL`,
+        which hid silent failure modes (judge call dropped, payload corrupted,
+        agreement field missing). Operators got `sample_count=0` regardless of
+        whether the judge actually ran 0 times or ran 100 times with all
+        malformed output.
+      - Post-fix denominator is **all** candidate_lineage rows in the window.
+        Missing / malformed / unparseable / out-of-range payloads count toward
+        `missing_count`; valid payloads contribute their `1 - agreement_rate`.
+      - We return both signals so the orchestrator can emit independent
+        violations for `vlm_disagreement_rate` and `vlm_judge_missing_rate`.
+
+    Return keys:
+      - total_rows:        full lineage row count in window
+      - parsed_count:      rows w/ valid agreement_rate ∈ [0,1] (disagreement
+                           denominator)
+      - missing_count:     rows lacking usable agreement_rate
+      - missing_rate:      missing_count / total_rows
+      - mean_disagreement: avg(1 - agreement_rate) across parsed rows
+      - sample_count:      alias of parsed_count, kept for backward-compatible
+                           sample_size aggregation in evaluate_window
+    """
     rows = conn.execute(
         """
         SELECT vlm_judge_result_json
         FROM candidate_lineage
         WHERE julianday(created_at) >= julianday(?)
-          AND vlm_judge_result_json IS NOT NULL
         """,
         (cutoff_iso,),
     ).fetchall()
+    total_rows = len(rows)
     disagreements: list[float] = []
+    missing_count = 0
     for row in rows:
         raw = row["vlm_judge_result_json"]
         if not raw:
+            missing_count += 1
             continue
         try:
             payload = json.loads(raw)
         except (json.JSONDecodeError, TypeError):
+            missing_count += 1
             continue
         if not isinstance(payload, dict):
+            missing_count += 1
             continue
         agreement = payload.get("agreement_rate")
         if agreement is None:
+            missing_count += 1
             continue
         try:
             agreement_f = float(agreement)
         except (TypeError, ValueError):
+            missing_count += 1
             continue
         if agreement_f < 0 or agreement_f > 1:
+            missing_count += 1
             continue
         disagreements.append(1.0 - agreement_f)
-    if not disagreements:
-        return {"sample_count": 0, "mean_disagreement": 0.0}
-    mean = sum(disagreements) / len(disagreements)
+
+    parsed_count = len(disagreements)
+    mean_disagreement = (
+        round(sum(disagreements) / parsed_count, 6) if parsed_count > 0 else 0.0
+    )
+    missing_rate = round(missing_count / total_rows, 6) if total_rows > 0 else 0.0
     return {
-        "sample_count": len(disagreements),
-        "mean_disagreement": round(mean, 6),
+        "total_rows": total_rows,
+        "parsed_count": parsed_count,
+        "missing_count": missing_count,
+        "missing_rate": missing_rate,
+        "mean_disagreement": mean_disagreement,
+        # Backward-compat alias used by sample_size aggregation. We deliberately
+        # alias to total_rows (not parsed_count) — the lineage existence itself
+        # is signal, and missing rows are now a first-class dimension.
+        "sample_count": total_rows,
     }
 
 
@@ -316,12 +387,22 @@ def evaluate_window(
     *,
     conn: sqlite3.Connection | None = None,
     thresholds: dict[str, Any] | None = None,
+    promotion_state: str | None = None,
 ) -> SLOReport:
     """Compute SLO report for the past `window_hours`. Returns immutable
     SLOReport DTO. If `conn` is None we open one from `backend.db`.
 
-    Sample size = sum of all evidence denominators across 4 dimensions; if
-    < minimum_sample_size we short-circuit to `insufficient_data`.
+    Sample size = sum of all evidence denominators across dimensions; if
+    < minimum_sample_size we short-circuit (Wave 3 C-1):
+      - promotion_state ∈ {p10/p25/p50/p100} → `monitoring_paused`
+        (within_slo=None, do NOT call this insufficient because there IS
+        live promoted traffic — we just need more of it before deciding)
+      - promotion_state ∈ {shadow, rolled_back, unknown} → `insufficient_data`
+        (legacy semantics — no promoted traffic yet, normal cold-start case)
+
+    `promotion_state` is read from
+    `backend.services.promotion_manifest_loader.get_promotion_state()` unless
+    explicitly overridden via the kwarg (tests / dry-run / multi-env).
     """
     if window_hours <= 0:
         raise ValueError("window_hours must be > 0")
@@ -332,6 +413,19 @@ def evaluate_window(
     min_sample = int(config["minimum_sample_size"])
 
     cutoff = _cutoff_iso(window_hours)
+
+    # Wave 3 C-1: resolve promotion_state once at the top so it's available
+    # both for the small-sample triage AND for evidence echo. Import is local
+    # to keep the service importable without touching the manifest module at
+    # import time.
+    if promotion_state is None:
+        try:
+            from . import promotion_manifest_loader as _pml
+
+            promotion_state = _pml.get_promotion_state()
+        except Exception:  # pragma: no cover  — defensive; loader is fail-closed by design
+            promotion_state = "shadow"
+    resolved_state = str(promotion_state or "shadow")
 
     owns_conn = False
     if conn is None:
@@ -366,14 +460,28 @@ def evaluate_window(
         "thresholds": th,
         "baseline": bl,
         "minimum_sample_size": min_sample,
+        "promotion_state": resolved_state,
     }
 
     if sample_size < min_sample:
+        # Wave 3 C-1: triage on promotion_state
+        if resolved_state in _PROMOTED_STATES:
+            return SLOReport(
+                within_slo=None,
+                violations=[],
+                evidence=evidence,
+                recommendation=RECOMMENDATION_MONITORING_PAUSED,
+                window_hours=window_hours,
+                sample_size=sample_size,
+                notes="small_sample_in_promoted_state",
+            )
+        # shadow / rolled_back / fail-closed default — cold start, no live
+        # promoted traffic yet. Legacy semantics: pass-through + flag.
         return SLOReport(
             within_slo=True,
             violations=[],
             evidence=evidence,
-            recommendation="insufficient_data",
+            recommendation=RECOMMENDATION_INSUFFICIENT_DATA,
             window_hours=window_hours,
             sample_size=sample_size,
         )
@@ -393,9 +501,11 @@ def evaluate_window(
             }
         )
 
-    # 2) vlm disagreement rate
+    # 2) vlm disagreement rate — Wave 3 C-3: denominator is `parsed_count`
+    # (rows with usable agreement_rate). When all rows are missing, parsed_count
+    # is 0 and we don't fire a disagreement violation (missing_rate covers it).
     vd_max = float(th["vlm_disagreement_rate_max"])
-    if vlm_evidence["sample_count"] > 0 and vlm_evidence["mean_disagreement"] > vd_max:
+    if vlm_evidence["parsed_count"] > 0 and vlm_evidence["mean_disagreement"] > vd_max:
         violations.append(
             {
                 "dimension": "vlm_disagreement_rate",
@@ -403,6 +513,26 @@ def evaluate_window(
                 "threshold": vd_max,
                 "comparator": "<=",
                 "context": vlm_evidence,
+            }
+        )
+
+    # 2b) Wave 3 C-3: vlm_judge_missing_rate — fires when >= threshold of
+    # candidate_lineage rows are missing or malformed VLM judge output. The
+    # threshold is read from the thresholds map with a hardcoded fallback so
+    # that older slo_thresholds.json files (pre-Agent-C reify) still work.
+    vmr_max = float(th.get("vlm_judge_missing_rate_max", 0.10))
+    if vlm_evidence["total_rows"] > 0 and vlm_evidence["missing_rate"] > vmr_max:
+        violations.append(
+            {
+                "dimension": "vlm_judge_missing_rate",
+                "actual": vlm_evidence["missing_rate"],
+                "threshold": vmr_max,
+                "comparator": "<=",
+                "context": {
+                    "missing_count": vlm_evidence["missing_count"],
+                    "total_rows": vlm_evidence["total_rows"],
+                    "parsed_count": vlm_evidence["parsed_count"],
+                },
             }
         )
 
@@ -441,7 +571,7 @@ def evaluate_window(
         )
 
     within = len(violations) == 0
-    recommendation = "continue" if within else "rollback"
+    recommendation = RECOMMENDATION_CONTINUE if within else RECOMMENDATION_ROLLBACK
     return SLOReport(
         within_slo=within,
         violations=violations,
@@ -458,6 +588,10 @@ __all__ = [
     "load_default_thresholds",
     "DEFAULT_WINDOW_HOURS",
     "DEFAULT_MINIMUM_SAMPLE_SIZE",
+    "RECOMMENDATION_CONTINUE",
+    "RECOMMENDATION_ROLLBACK",
+    "RECOMMENDATION_INSUFFICIENT_DATA",
+    "RECOMMENDATION_MONITORING_PAUSED",
 ]
 
 
