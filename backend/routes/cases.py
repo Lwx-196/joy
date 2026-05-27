@@ -4,6 +4,7 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import os
 import shlex
 import sqlite3
 import shutil
@@ -49,9 +50,12 @@ from ..models import (
     SimulateAfterResponse,
     SimulationJob,
     SimulationJobReviewRequest,
+    LegacySimulationQuarantineRequest,
     SourceBlockerActionRequest,
     SourceDirectoryBindRequest,
 )
+from ..services import vlm_source_classifier
+from ..services.vlm_provider import VLMProvider
 
 # Stage B: 单张图 phase / view 手动覆盖允许的取值。
 # phase 与 skill manifest 输出对齐('before' / 'after');None 表示未覆盖。
@@ -396,9 +400,9 @@ def _infer_phase_from_filename(filename: str) -> str | None:
 
 
 def _infer_view_from_filename(filename: str) -> str | None:
-    if re.search(r"3/4|34|45|45°|微侧|斜侧|半侧", filename, re.I):
+    if re.search(r"3/4|34|45|45°|45度|45侧|四分之三|微侧|斜侧|斜面|半侧|oblique", filename, re.I):
         return "oblique"
-    if re.search(r"侧面|侧脸", filename, re.I):
+    if re.search(r"侧面|侧脸|左侧(?!背景)|右侧(?!背景)|左脸|右脸|side|profile", filename, re.I):
         return "side"
     if re.search(r"正面|正脸|front", filename, re.I):
         return "front"
@@ -1411,13 +1415,36 @@ def _materialize_simulation_image(
     stamp: str,
 ) -> Path:
     if item.kind == "existing":
-        return _resolve_existing_source(case_dir, item.filename)
+        source = _resolve_existing_source(case_dir, item.filename)
+        return _normalize_simulation_existing_image_if_needed(case_dir, source, role, stamp)
     raw, suffix = _decode_upload_image(item)
     target_dir = _simulation_input_root(case_dir) / stamp
     target_dir.mkdir(parents=True, exist_ok=True)
     target = target_dir / f"{role}{suffix.lower()}"
     target.write_bytes(raw)
     return target
+
+
+def _normalize_simulation_existing_image_if_needed(case_dir: Path, source: Path, role: str, stamp: str) -> Path:
+    """Materialize a standard JPEG copy for source containers rejected by image-edit APIs."""
+    try:
+        from PIL import Image, ImageOps
+
+        with Image.open(source) as raw:
+            image_format = str(raw.format or "").upper()
+            image_mode = str(raw.mode or "").upper()
+            needs_normalize = image_format == "MPO" or image_mode not in {"RGB", "RGBA"}
+            if not needs_normalize:
+                return source
+            normalized = ImageOps.exif_transpose(raw).convert("RGB")
+            target_dir = _simulation_input_root(case_dir) / stamp
+            target_dir.mkdir(parents=True, exist_ok=True)
+            target = target_dir / f"{role}-normalized.jpg"
+            normalized.save(target, format="JPEG", quality=95, optimize=True)
+            return target
+    except Exception:  # noqa: BLE001 - keep original error path if PIL cannot inspect the source.
+        return source
+    return source
 
 
 def _resolve_simulation_image_input(
@@ -1432,7 +1459,8 @@ def _resolve_simulation_image_input(
     if image is not None:
         return _materialize_simulation_image(case_dir, image, role, stamp)
     if path:
-        return _resolve_existing_source(case_dir, path)
+        source = _resolve_existing_source(case_dir, path)
+        return _normalize_simulation_existing_image_if_needed(case_dir, source, role, stamp)
     if required:
         raise HTTPException(400, f"{role} image is required")
     return None
@@ -1609,6 +1637,23 @@ def _simulation_policy(focus_regions: list[dict[str, Any]] | None = None) -> dic
         "mix_with_real_case": False,
         "can_publish_default": False,
     }
+
+
+def _validate_simulation_provider(provider: str, model_name: str | None) -> None:
+    if provider == _SIMULATION_PROVIDER:
+        return
+    if provider == ai_generation_adapter.COMFYUI_PROVIDER:
+        if ai_generation_adapter.is_t90_allowed_comfyui_candidate(model_name):
+            return
+        allowed = ", ".join(sorted(ai_generation_adapter.COMFYUI_ALLOWED_CANDIDATE_WORKFLOWS))
+        raise HTTPException(
+            400,
+            f"ComfyUI workflow not allowed by T90 gate; allowed candidate workflows: {allowed}",
+        )
+    raise HTTPException(
+        400,
+        f"provider must be one of {_SIMULATION_PROVIDER}, {ai_generation_adapter.COMFYUI_PROVIDER}",
+    )
 
 
 def _normalize_focus_regions(regions: list[Any]) -> list[dict[str, Any]]:
@@ -1910,6 +1955,91 @@ def _simulation_review_decision(job: SimulationJob, policy: dict[str, Any] | Non
         else:
             passes.append(f"目标区域变化 {target:.1f}，能看到局部处理")
 
+    qa_scores = job.audit.get("qa_scores") if isinstance(job.audit, dict) else None
+    if isinstance(qa_scores, dict):
+        halo = _float_metric(qa_scores, "halo_score")
+        if halo is not None:
+            metrics["halo_score"] = halo
+            if halo >= thresholds.get("reject_halo_score_min", 5.0):
+                blockers.append(f"光圈/halo 评分 {halo:.1f} 过高，疑似伪影或边界泄漏")
+        luma_delta = _float_metric(qa_scores, "masked_luma_delta")
+        if luma_delta is not None:
+            metrics["masked_luma_delta"] = luma_delta
+            if luma_delta <= thresholds.get("reject_masked_luma_darkening_min", -7.0):
+                blockers.append(f"目标区域亮度下降 {luma_delta:.1f}，候选图疑似偏暗")
+        color_cast = _float_metric(qa_scores, "color_cast_delta")
+        if color_cast is not None:
+            metrics["color_cast_delta"] = color_cast
+            if color_cast >= thresholds.get("reject_color_cast_delta_min", 6.0):
+                blockers.append(f"目标区域色偏 {color_cast:.1f} 过高，疑似偏冷/偏红")
+        texture_delta = _float_metric(qa_scores, "texture_detail_delta")
+        if texture_delta is not None:
+            metrics["texture_detail_delta"] = texture_delta
+            if texture_delta <= thresholds.get("reject_texture_detail_loss_min", -6.0):
+                blockers.append(f"目标区域纹理损失 {texture_delta:.1f}，疑似过度平滑")
+        shadow_contrast_delta = _float_metric(qa_scores, "masked_shadow_contrast_delta")
+        shadow_p10_delta = _float_metric(qa_scores, "masked_shadow_p10_delta")
+        if shadow_contrast_delta is not None:
+            metrics["masked_shadow_contrast_delta"] = shadow_contrast_delta
+            if (
+                shadow_p10_delta is not None
+                and shadow_contrast_delta >= thresholds.get("reject_shadow_contrast_delta_min", 16.0)
+                and shadow_p10_delta <= thresholds.get("reject_shadow_p10_delta_max", 0.0)
+            ):
+                blockers.append(f"下半脸/目标区域阴影对比增加 {shadow_contrast_delta:.1f}，轮廓阴影疑似过重")
+        if shadow_p10_delta is not None:
+            metrics["masked_shadow_p10_delta"] = shadow_p10_delta
+        highlight_p95_delta = _float_metric(qa_scores, "masked_highlight_p95_delta")
+        highlight_p99_delta = _float_metric(qa_scores, "masked_highlight_p99_delta")
+        specular_ratio_delta = _float_metric(qa_scores, "masked_specular_ratio_delta")
+        if highlight_p95_delta is not None:
+            metrics["masked_highlight_p95_delta"] = highlight_p95_delta
+        if highlight_p99_delta is not None:
+            metrics["masked_highlight_p99_delta"] = highlight_p99_delta
+        if specular_ratio_delta is not None:
+            metrics["masked_specular_ratio_delta"] = specular_ratio_delta
+        if (
+            highlight_p99_delta is not None
+            and highlight_p99_delta >= thresholds.get("reject_highlight_p99_delta_min", 12.0)
+        ):
+            blockers.append(f"目标区域局部高光 P99 增加 {highlight_p99_delta:.1f}，疑似鼻梁/唇部小面积亮斑或涂抹伪影")
+        if (
+            highlight_p95_delta is not None
+            and specular_ratio_delta is not None
+            and highlight_p95_delta >= thresholds.get("reject_highlight_p95_delta_min", 10.0)
+            and specular_ratio_delta >= thresholds.get("reject_specular_ratio_delta_min", 0.03)
+        ):
+            blockers.append(
+                f"目标区域高光增加 {highlight_p95_delta:.1f} 且镜面高光比例增加 {specular_ratio_delta:.3f}，疑似蜡感/高光过处理"
+            )
+        face_luma_delta = _float_metric(qa_scores, "face_luma_delta")
+        face_background_contrast_delta = _float_metric(qa_scores, "face_background_contrast_delta")
+        if face_luma_delta is not None:
+            metrics["face_luma_delta"] = face_luma_delta
+            if face_luma_delta <= thresholds.get("reject_face_luma_delta_min", -4.0):
+                blockers.append(f"脸部亮度下降 {face_luma_delta:.1f}，candidate 模特人脸不如基线明亮")
+        if face_background_contrast_delta is not None:
+            metrics["face_background_contrast_delta"] = face_background_contrast_delta
+            if face_background_contrast_delta <= thresholds.get("reject_face_background_contrast_delta_min", -4.0):
+                blockers.append(f"脸部与背景对比分离下降 {face_background_contrast_delta:.1f}，candidate 主体不够突出")
+        scale_d = _float_metric(qa_scores, "subject_scale_delta")
+        if scale_d is not None:
+            metrics["subject_scale_delta"] = scale_d
+            if scale_d >= thresholds.get("reject_subject_scale_delta_min", 0.08):
+                blockers.append(f"主体尺度偏移 subject_scale_delta={scale_d:.3f}，超出安全范围")
+
+    audit_provider = job.audit.get("provider") if isinstance(job.audit, dict) else None
+    is_comfyui = str(audit_provider or "").startswith("comfyui")
+    if is_comfyui and p95 is not None:
+        identity_drift_threshold = thresholds.get("reject_comfyui_identity_drift_min", 12.0)
+        metrics["comfyui_identity_drift_proxy_score"] = p95
+        if p95 >= identity_drift_threshold:
+            blockers.append(f"ComfyUI 身份漂移代理 P95={p95:.1f} 过高，疑似面部特征变形")
+
+    if is_comfyui and not blockers:
+        metrics["comfyui_manual_review_required"] = 1
+        warnings.append("ComfyUI 实验链路产出，需人工复核后才能正式采用")
+
     if blockers:
         verdict = "rejected"
         label = "建议拒绝"
@@ -1961,7 +2091,26 @@ def _simulation_row_to_model(row: sqlite3.Row, policy: dict[str, Any] | None = N
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
-    job.review_decision = _simulation_review_decision(job, policy)
+    decision = _simulation_review_decision(job, policy)
+    job.review_decision = decision
+
+    legacy_pub = bool(row["can_publish"]) if "can_publish" in row.keys() else False
+    blockers = list(decision.get("blocking_reasons") or [])
+
+    # An approved status is required for effective_can_publish to be True
+    # Plus it must have no blockers under the current policy
+    eff_pub = bool(job.review_status == "approved" and not blockers and job.status in {"done", "done_with_issues"})
+
+    job.legacy_can_publish = legacy_pub
+    job.effective_can_publish = eff_pub
+    job.can_publish = eff_pub
+
+    if legacy_pub and not eff_pub:
+        job.blocking_reasons = ["当前 AI 审核策略不可通过"] + blockers
+    else:
+        job.blocking_reasons = blockers
+
+
     return job
 
 
@@ -2499,6 +2648,8 @@ def _quality_root_causes(
         latest_render_rows.append(row)
 
     for row in latest_render_rows[:30]:
+        if row["can_publish"] or row["review_verdict"] == "approved":
+            continue
         job_id = int(row["id"])
         case_id = int(row["case_id"])
         metrics = _json_field(row, "metrics_json", {})
@@ -2743,7 +2894,7 @@ def _quality_report(conn: sqlite3.Connection, limit: int) -> dict[str, Any]:
         "totals": {
             "artifacts": len(render_rows) + len(simulation_rows),
             "reviewed": int(render_counts["reviewed"]) + int(sim_counts["reviewed"]),
-            "publishable": int(render_counts["publishable"]) + int(sim_counts["publishable"]),
+            "publishable": int(render_counts["publishable"]),
             "not_publishable": int(render_counts["not_publishable"]) + int(sim_counts["not_publishable"]),
             "classification_completion_rate": classification_counts["completion_rate"],
             "final_board_visible_rate": render_counts["artifact_visibility"].get("final_board_visible_rate"),
@@ -3110,6 +3261,288 @@ def quality_report(limit: int = Query(300, ge=1, le=2000)) -> dict[str, Any]:
         return _quality_report(conn, limit)
 
 
+@router.get("/quality-report/publishable-items")
+def quality_report_publishable_items(
+    limit: int = Query(100, ge=1, le=2000)
+) -> dict[str, Any]:
+    with db.connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT
+              j.id,
+              j.case_id,
+              j.status,
+              j.brand,
+              j.template,
+              j.enqueued_at,
+              j.finished_at,
+              j.output_path,
+              j.manifest_path,
+              j.error_message,
+              j.semantic_judge,
+              j.render_mode,
+              j.best_pair_selection_id,
+              j.candidates_fingerprint_snapshot,
+              c.abs_path,
+              c.customer_raw,
+              cu.canonical_name AS customer_canonical,
+              rq.quality_status,
+              rq.quality_score,
+              rq.can_publish,
+              rq.review_verdict,
+              rq.reviewer,
+              rq.review_note,
+              rq.reviewed_at,
+              rq.metrics_json,
+              rq.manifest_status,
+              rq.blocking_count,
+              rq.warning_count,
+              rq.artifact_mode
+            FROM render_jobs j
+            JOIN cases c ON c.id = j.case_id
+            LEFT JOIN customers cu ON cu.id = c.customer_id
+            LEFT JOIN render_quality rq ON rq.render_job_id = j.id
+            WHERE c.trashed_at IS NULL
+              AND j.status IN ('done', 'done_with_issues', 'blocked', 'failed')
+              AND rq.can_publish = 1
+            ORDER BY COALESCE(j.finished_at, j.enqueued_at) DESC, j.id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+
+        items = []
+        unique_cases = set()
+        for row in rows:
+            case_id = row["case_id"]
+            unique_cases.add(case_id)
+
+            quality_dict = None
+            if row["quality_status"] is not None:
+                quality_dict = {
+                    "id": row["id"],
+                    "render_job_id": row["id"],
+                    "quality_status": row["quality_status"],
+                    "quality_score": row["quality_score"],
+                    "can_publish": bool(row["can_publish"]),
+                    "manifest_status": row["manifest_status"],
+                    "blocking_count": row["blocking_count"],
+                    "warning_count": row["warning_count"],
+                    "metrics": json.loads(row["metrics_json"] or "{}"),
+                    "review_verdict": row["review_verdict"],
+                    "reviewer": row["reviewer"],
+                    "review_note": row["review_note"],
+                    "reviewed_at": row["reviewed_at"],
+                    "artifact_mode": row["artifact_mode"] or "real_layout",
+                }
+
+            job_dict = {
+                "id": row["id"],
+                "case_id": case_id,
+                "brand": row["brand"],
+                "template": row["template"],
+                "status": row["status"],
+                "enqueued_at": row["enqueued_at"],
+                "finished_at": row["finished_at"],
+                "output_path": row["output_path"],
+                "manifest_path": row["manifest_path"],
+                "error_message": row["error_message"],
+                "semantic_judge": row["semantic_judge"],
+                "render_mode": row["render_mode"] or "ai",
+                "best_pair_selection_id": row["best_pair_selection_id"],
+                "candidates_fingerprint_snapshot": row["candidates_fingerprint_snapshot"],
+                "quality": quality_dict,
+            }
+
+            delivery_envelope = {
+                "class": "formal_ready" if row["status"] == "done" else "experimental_blocked",
+                "can_deliver": row["status"] == "done",
+                "source": "render_quality",
+                "gate_status": "ready_to_publish" if row["status"] == "done" else "blocked",
+                "reasons": [] if row["status"] == "done" else ["job_status_not_done"],
+            }
+
+            items.append({
+                "kind": "render",
+                "delivery_envelope": delivery_envelope,
+                "sort_at": row["finished_at"] or row["enqueued_at"],
+                "job": job_dict,
+                "case": {
+                    "id": case_id,
+                    "abs_path": row["abs_path"],
+                    "customer_raw": row["customer_raw"],
+                    "customer_canonical": row["customer_canonical"],
+                }
+            })
+
+        return {
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "scope": "formal_publishable_v1",
+            "limit": limit,
+            "total": len(items),
+            "unique_case_count": len(unique_cases),
+            "counts": {
+                "render": len(items),
+                "simulation": 0,
+            },
+            "items": items,
+        }
+
+
+@router.get("/simulation-jobs/legacy-publishable-risk")
+def get_simulation_legacy_publishable_risk(
+    limit: int = Query(200, ge=1, le=1000)
+) -> dict[str, Any]:
+    with db.connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT
+              s.*,
+              c.abs_path AS case_abs_path,
+              c.customer_raw AS case_customer_raw,
+              cu.canonical_name AS case_customer_canonical
+            FROM simulation_jobs s
+            LEFT JOIN cases c ON c.id = s.case_id
+            LEFT JOIN customers cu ON cu.id = c.customer_id
+            WHERE (c.id IS NULL OR c.trashed_at IS NULL)
+              AND s.status IN ('done', 'done_with_issues')
+              AND s.can_publish = 1
+            ORDER BY s.updated_at DESC, s.id DESC
+            """
+        ).fetchall()
+
+        policy = simulation_quality.load_ai_review_policy()
+
+        affected_items = []
+        affected_ids = []
+        for row in rows:
+            job = _simulation_row_to_model(row, policy)
+            if not job.effective_can_publish:
+                # This job is at risk!
+                affected_ids.append(job.id)
+                case_id = row["case_id"]
+                affected_items.append({
+                    "kind": "simulation",
+                    "risk_status": "legacy_publishable_risk",
+                    "job": job,
+                    "case": (
+                        {
+                            "id": case_id,
+                            "abs_path": row["case_abs_path"],
+                            "customer_raw": row["case_customer_raw"],
+                            "customer_canonical": row["case_customer_canonical"],
+                        }
+                        if case_id is not None
+                        else None
+                    )
+                })
+
+        # Handle limit
+        truncated_items = affected_items[:limit]
+
+        return {
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "scope": "legacy_simulation_publishable_risk_v1",
+            "limit": limit,
+            "affected_count": len(affected_items),
+            "affected_job_ids": affected_ids,
+            "items": truncated_items,
+        }
+
+
+@router.post("/simulation-jobs/legacy-publishable-risk/quarantine")
+def quarantine_legacy_simulation_publishable_risk(
+    payload: LegacySimulationQuarantineRequest,
+) -> dict[str, Any]:
+    with db.connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT
+              s.*,
+              c.abs_path AS case_abs_path,
+              c.customer_raw AS case_customer_raw,
+              cu.canonical_name AS case_customer_canonical
+            FROM simulation_jobs s
+            LEFT JOIN cases c ON c.id = s.case_id
+            LEFT JOIN customers cu ON cu.id = c.customer_id
+            WHERE (c.id IS NULL OR c.trashed_at IS NULL)
+              AND s.status IN ('done', 'done_with_issues')
+              AND s.can_publish = 1
+            ORDER BY s.updated_at DESC, s.id DESC
+            """
+        ).fetchall()
+
+        policy = simulation_quality.load_ai_review_policy()
+
+        affected_items = []
+        affected_ids = []
+        for row in rows:
+            job = _simulation_row_to_model(row, policy)
+            if not job.effective_can_publish:
+                # This job is at risk!
+                affected_ids.append(job.id)
+                case_id = row["case_id"]
+                affected_items.append({
+                    "kind": "simulation",
+                    "risk_status": "legacy_publishable_risk",
+                    "job": job,
+                    "case": (
+                        {
+                            "id": case_id,
+                            "abs_path": row["case_abs_path"],
+                            "customer_raw": row["case_customer_raw"],
+                            "customer_canonical": row["case_customer_canonical"],
+                        }
+                        if case_id is not None
+                        else None
+                    )
+                })
+
+        if not payload.dry_run:
+            # We must apply the quarantine update in the DB!
+            now_iso = datetime.now(timezone.utc).isoformat()
+            for item in affected_items:
+                job_id = item["job"].id
+                existing_job = item["job"]
+                audit = existing_job.audit or {}
+                audit["legacy_publish_quarantine"] = {
+                    "previous_review_status": existing_job.review_status,
+                    "applied_at": now_iso,
+                    "reviewer": payload.reviewer,
+                    "note": payload.note or "正式发布版隔离 legacy AI 可发布污染",
+                }
+
+                conn.execute(
+                    """
+                    UPDATE simulation_jobs
+                    SET can_publish = 0,
+                        review_status = 'needs_recheck',
+                        reviewer = ?,
+                        review_note = ?,
+                        audit_json = ?,
+                        updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        payload.reviewer,
+                        payload.note or "正式发布版隔离 legacy AI 可发布污染",
+                        json.dumps(audit, ensure_ascii=False),
+                        now_iso,
+                        job_id,
+                    ),
+                )
+
+        return {
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "scope": "legacy_simulation_publishable_risk_v1",
+            "affected_count": len(affected_ids),
+            "affected_job_ids": affected_ids,
+            "dry_run": payload.dry_run,
+            "items": affected_items,
+        }
+
+
+
 @router.get("/simulation-jobs/{job_id}/file")
 def simulation_job_file_by_id(
     job_id: int,
@@ -3422,6 +3855,7 @@ def _source_group_row_payload(
         if filename:
             metadata_by_file[filename] = item
     default_body_part = "unknown"
+    vlm_observations = _vlm_classifier_observations_for_case(conn, case_id)
     images: list[dict[str, Any]] = []
     for filename in image_files:
         item = metadata_by_file.get(filename)
@@ -3436,7 +3870,7 @@ def _source_group_row_payload(
         if review_state is None:
             review_state = image_review_states.get(filename) or image_review_states.get(Path(filename).name)
         review_state = review_state if isinstance(review_state, dict) else None
-        images.append({
+        image_payload = {
             "case_id": case_id,
             "filename": filename,
             "preview_url": f"/api/cases/{case_id}/files?name={quote(filename, safe='')}",
@@ -3458,7 +3892,12 @@ def _source_group_row_payload(
             "pose": (item or {}).get("pose") if isinstance(item, dict) else None,
             "direction": (item or {}).get("direction") if isinstance(item, dict) else None,
             "sharpness_score": (item or {}).get("sharpness_score") if isinstance(item, dict) else None,
-        })
+        }
+        image_payload = _apply_vlm_observation_to_source_image(
+            image_payload,
+            vlm_observations.get(filename) or vlm_observations.get(Path(filename).name),
+        )
+        images.append(image_payload)
     return {
         "case_id": case_id,
         "case_title": case_title,
@@ -3531,6 +3970,75 @@ _SOURCE_GROUP_METADATA_FALLBACK_FIELDS = {
 
 def _source_group_empty_metadata_value(value: Any) -> bool:
     return value is None or value == "" or value == [] or value == {}
+
+
+def _vlm_classifier_observations_for_case(conn: sqlite3.Connection, case_id: int) -> dict[str, dict[str, Any]]:
+    rows = conn.execute(
+        """
+        SELECT image_path, phase, body_part, view, confidence, reasons_json, updated_at
+        FROM image_observations
+        WHERE case_id = ?
+          AND source = 'vlm_classifier'
+        ORDER BY confidence DESC, updated_at DESC, id DESC
+        """,
+        (case_id,),
+    ).fetchall()
+    out: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        image_path = str(row["image_path"] or "").strip()
+        if not image_path:
+            continue
+        obs = {
+            "source": "vlm_classifier",
+            "phase": row["phase"],
+            "body_part": row["body_part"],
+            "view": row["view"],
+            "confidence": row["confidence"],
+            "reasons": _json_field(row, "reasons_json", []),
+            "updated_at": row["updated_at"],
+        }
+        for key in (image_path, Path(image_path).name):
+            out.setdefault(key, obs)
+    return out
+
+
+def _apply_vlm_observation_to_source_image(
+    image: dict[str, Any],
+    observation: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if not isinstance(observation, dict):
+        return image
+    confidence = source_selection.float_value(observation.get("confidence"))
+    if confidence is None or confidence < vlm_source_classifier.MIN_VLM_APPLY_CONFIDENCE:
+        return image
+    merged = dict(image)
+    applied = {
+        "source": "vlm_classifier",
+        "confidence": round(float(confidence), 4),
+        "phase": observation.get("phase"),
+        "view": observation.get("view"),
+        "body_part": observation.get("body_part"),
+    }
+    if (
+        merged.get("phase_source") != "manual"
+        and merged.get("phase") not in _ALLOWED_OVERRIDE_PHASES
+        and observation.get("phase") in _ALLOWED_OVERRIDE_PHASES
+    ):
+        merged["phase"] = observation.get("phase")
+        merged["phase_source"] = "vlm_classifier"
+    if (
+        merged.get("view_source") != "manual"
+        and merged.get("view") not in _ALLOWED_OVERRIDE_VIEWS
+        and observation.get("view") in _ALLOWED_OVERRIDE_VIEWS
+    ):
+        merged["view"] = observation.get("view")
+        merged["view_source"] = "vlm_classifier"
+        merged["angle_confidence"] = round(float(confidence), 4)
+    if merged.get("body_part") in {None, "", "unknown"} and observation.get("body_part"):
+        merged["body_part"] = observation.get("body_part")
+    merged["classification_source"] = "vlm_classifier"
+    merged["vlm_classification"] = applied
+    return merged
 
 
 def _apply_source_group_metadata_fallback(
@@ -3915,6 +4423,9 @@ def _source_group_preflight(
                 "direction": image_for_quality.get("direction"),
                 "sharpness_score": image_for_quality.get("sharpness_score"),
                 "selection_metadata_source": image_for_quality.get("selection_metadata_source"),
+                "classification_source": image_for_quality.get("classification_source"),
+                "vlm_classification": image_for_quality.get("vlm_classification"),
+                "source": image_for_quality.get("classification_source"),
             }
             candidate.update(_candidate_quality(image_for_quality, source_role))
             if candidate.get("selection_metadata_source") == "primary_render_history":
@@ -4919,10 +5430,24 @@ def patch_image_override(
         new_view = view_val if touch_view else (existing["manual_view"] if existing else None)
         transform_arg = payload.manual_transform if touch_transform else _UNSET
         _write_image_override(conn, case_id, filename, new_phase, new_view, now, manual_transform=transform_arg)
+        reviewer = (payload.reviewer or "operator").strip() or "operator"
         new_transform = (
             _decode_manual_transform(_manual_transform_to_json(payload.manual_transform))
             if touch_transform
             else (_decode_manual_transform(existing["manual_transform_json"]) if existing else None)
+        )
+        reason_parts: list[str] = []
+        if new_phase:
+            reason_parts.append("phase")
+        if new_view:
+            reason_parts.append("view")
+        if new_transform:
+            reason_parts.append("transform")
+        default_reason = f"manual_override:{','.join(reason_parts)}" if reason_parts else "manual_override"
+        reason = (payload.reason or default_reason).strip() or default_reason
+        conn.execute(
+            "UPDATE case_image_overrides SET reviewer = ?, reason_json = ? WHERE case_id = ? AND filename = ?",
+            (reviewer, json.dumps({"reason": reason}, ensure_ascii=False), case_id, filename),
         )
     return ImageOverride(
         case_id=case_id,
@@ -4930,6 +5455,8 @@ def patch_image_override(
         manual_phase=new_phase,
         manual_view=new_view,
         manual_transform=new_transform,
+        reason=reason,
+        reviewer=reviewer,
         updated_at=now,
     )
 
@@ -5262,8 +5789,7 @@ def simulate_case_after(case_id: int, payload: SimulateAfterRequest) -> Simulate
     if not payload.ai_generation_authorized:
         raise HTTPException(400, "ai_generation_authorized must be true")
     provider = (payload.provider or _SIMULATION_PROVIDER).strip()
-    if provider != _SIMULATION_PROVIDER:
-        raise HTTPException(400, f"provider must be {_SIMULATION_PROVIDER}")
+    _validate_simulation_provider(provider, payload.model_name)
 
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%f")
     with db.connect() as conn:
@@ -5322,7 +5848,8 @@ def simulate_case_after(case_id: int, payload: SimulateAfterRequest) -> Simulate
         )
 
     try:
-        result = ai_generation_adapter.run_ps_model_router_after_simulation(
+        result = ai_generation_adapter.run_after_simulation(
+            provider=provider,
             job_id=job_id,
             after_image_path=after_path,
             before_image_path=before_path,
@@ -5331,6 +5858,7 @@ def simulate_case_after(case_id: int, payload: SimulateAfterRequest) -> Simulate
             model_name=payload.model_name,
             note=payload.note,
             style_reference_image_paths=style_reference_paths,
+            brand=payload.brand,
         )
         status = str(result["status"])
         output_refs = result["output_refs"]
@@ -5430,7 +5958,7 @@ def simulate_case_after(case_id: int, payload: SimulateAfterRequest) -> Simulate
         focus_targets=focus_targets,
         focus_regions=focus_regions,
         provider=provider,
-        model_name=payload.model_name,
+        model_name=audit_payload.get("model_name") or payload.model_name,
         input_refs=input_refs,
         output_refs=output_refs,
         audit=audit_payload,

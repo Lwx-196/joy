@@ -1818,9 +1818,13 @@ def test_render_queue_pulls_overrides_into_run_render(client, seed_case, monkeyp
     queue = render_queue.RenderQueue()
     queue._execute_render(job_id)
 
-    assert captured["manual_overrides"] == {
-        "term.jpg": {"phase": "before", "view": "front"},
-    }
+    # PR #2 PATCH endpoint auto-populates reviewer='operator' + reason / reason_json
+    # default fields. Test core intent is "render_queue passes manual_overrides
+    # kwarg with the human classification" — assert on phase/view subset.
+    overrides = captured["manual_overrides"]
+    assert "term.jpg" in overrides
+    assert overrides["term.jpg"]["phase"] == "before"
+    assert overrides["term.jpg"]["view"] == "front"
     # Verify the job moved to done
     with db.connect() as conn:
         row = conn.execute("SELECT status FROM render_jobs WHERE id = ?", (job_id,)).fetchone()

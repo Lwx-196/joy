@@ -18,6 +18,13 @@ def _int_or_zero(value: Any) -> int:
         return 0
 
 
+def _float_or_zero(value: Any) -> float:
+    try:
+        return max(0.0, float(value))
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def record_vlm_usage(
     conn: sqlite3.Connection,
     *,
@@ -27,6 +34,7 @@ def record_vlm_usage(
     case_id: int | None = None,
     input_tokens: int = 0,
     output_tokens: int = 0,
+    cost_usd: float | None = None,
     cost_usd_micros: int | None = None,
     cost_source: str = "unknown",
     latency_ms: int = 0,
@@ -37,11 +45,15 @@ def record_vlm_usage(
 ) -> int:
     """Insert one append-only VLM usage row and return its id.
 
-    cost_usd_micros: USD expressed as integer micro-dollars (1 USD = 1_000_000).
-    Schema column still named `cost_usd` for compatibility with the in-flight
-    migration; values written are integers in micro-USD units.
+    cost_usd stores real USD. cost_usd_micros remains accepted for older call
+    sites and is converted to USD when cost_usd is not provided.
     """
     usage_raw_json = json.dumps(usage_raw or {}, ensure_ascii=False, sort_keys=True)
+    resolved_cost_usd = (
+        _float_or_zero(cost_usd)
+        if cost_usd is not None
+        else _float_or_zero(cost_usd_micros) / 1_000_000
+    )
     cursor = conn.execute(
         """
         INSERT INTO vlm_usage_log (
@@ -58,7 +70,7 @@ def record_vlm_usage(
             case_id,
             _int_or_zero(input_tokens),
             _int_or_zero(output_tokens),
-            _int_or_zero(cost_usd_micros),
+            resolved_cost_usd,
             str(cost_source or "unknown"),
             _int_or_zero(latency_ms),
             str(status),
