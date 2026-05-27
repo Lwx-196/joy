@@ -22,7 +22,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Header, HTTPException, Query, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -1848,3 +1848,264 @@ def ops_vlm_comfyui_status(days: int = Query(default=7, ge=1, le=90)) -> dict[st
         "comfyui": comfyui,
         "gate": gate,
     }
+
+
+# ---------------------------------------------------------------------------
+# P1.1 ops API — 把"野蛮跑批脚本"收编为 audited job-queue API
+#
+# 设计原则：
+#   1) 所有调用必落 ops_audit_log（含 dry_run）；reviewer 必填，reason 强烈推荐
+#   2) request_id 取 X-Request-Id header；否则服务端生成 uuid
+#   3) outcome ∈ {ok|partial|error|dry_run}；http_status 与返回一致
+#   4) scope 受限——firing 路径触碰 owner WIP（ai_generation_adapter / VLM
+#      runner）的子能力一律 record-only（dry_run / plan），actual fire 仍由
+#      owner 现有路径触发；待 owner WIP 合 main 后再开放 fire
+# ---------------------------------------------------------------------------
+
+
+ALLOWED_OPS_RERUN_SCOPES = {"render", "simulation"}
+ALLOWED_OPS_OUTCOMES = {"ok", "partial", "error", "dry_run"}
+MAX_OPS_BATCH_CASE_IDS = 200
+MAX_OPS_AB_SAMPLE_SIZE = 200
+MAX_OPS_VLM_SHADOW_SAMPLE = 200
+ALLOWED_OPS_AB_SOURCE_POOLS = {"recent_done", "candidate_layer", "case_ids"}
+
+
+class OpsBatchRerunRequest(BaseModel):
+    case_ids: list[int] = Field(..., min_length=1, max_length=MAX_OPS_BATCH_CASE_IDS)
+    scope: str = Field(default="render")
+    workflow_filter: str | None = Field(default=None, max_length=160)
+    dry_run: bool = Field(default=False)
+    reviewer: str = Field(..., min_length=1, max_length=128)
+    reason: str | None = Field(default=None, max_length=1000)
+    brand: str = Field(default=DEFAULT_BRAND)
+    template: str = Field(default=DEFAULT_TEMPLATE)
+    semantic_judge: str = Field(default=DEFAULT_SEMANTIC)
+
+
+def _gen_request_id(supplied: str | None) -> str:
+    """Use client-supplied X-Request-Id if present (trimmed, ≤64), else uuid."""
+    if supplied:
+        text = supplied.strip()
+        if text:
+            return text[:64]
+    return f"req-{uuid.uuid4().hex[:16]}"
+
+
+def _write_ops_audit_log(
+    *,
+    request_id: str,
+    endpoint: str,
+    reviewer: str,
+    reason: str | None,
+    payload: Any,
+    response: Any,
+    outcome: str,
+    http_status: int,
+) -> int:
+    """Insert one row into ops_audit_log. outcome ∈ ALLOWED_OPS_OUTCOMES."""
+    if outcome not in ALLOWED_OPS_OUTCOMES:
+        raise ValueError(f"invalid outcome {outcome!r}")
+    with db.connect() as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO ops_audit_log
+              (request_id, endpoint, reviewer, reason,
+               payload_json, response_json, outcome, http_status, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                request_id,
+                endpoint,
+                reviewer,
+                reason,
+                json.dumps(payload, ensure_ascii=False, default=str),
+                json.dumps(response, ensure_ascii=False, default=str),
+                outcome,
+                int(http_status),
+                datetime_now_iso(),
+            ),
+        )
+    return int(cur.lastrowid or 0)
+
+
+def _simulation_rerun_plan(
+    case_ids: list[int],
+    workflow_filter: str | None,
+) -> list[dict[str, Any]]:
+    """Build the simulation rerun plan: matching simulation_jobs filtered by workflow."""
+    if not case_ids:
+        return []
+    with db.connect() as conn:
+        placeholders = ",".join("?" * len(case_ids))
+        rows = conn.execute(
+            f"""
+            SELECT id, case_id, status, model_plan_json, audit_json
+            FROM simulation_jobs
+            WHERE case_id IN ({placeholders})
+            ORDER BY case_id, created_at DESC
+            """,
+            case_ids,
+        ).fetchall()
+    planned: list[dict[str, Any]] = []
+    for row in rows:
+        try:
+            plan = json.loads(row["model_plan_json"] or "{}")
+        except (json.JSONDecodeError, TypeError):
+            plan = {}
+        try:
+            audit = json.loads(row["audit_json"] or "{}")
+        except (json.JSONDecodeError, TypeError):
+            audit = {}
+        wf = (
+            (plan.get("workflow_name") if isinstance(plan, dict) else None)
+            or (audit.get("workflow_name") if isinstance(audit, dict) else None)
+            or "unknown"
+        )
+        if workflow_filter and str(workflow_filter) != str(wf):
+            continue
+        planned.append(
+            {
+                "simulation_job_id": int(row["id"]),
+                "case_id": int(row["case_id"]),
+                "status": row["status"],
+                "workflow": str(wf),
+            }
+        )
+    return planned
+
+
+@router.post("/api/render/ops/batch-rerun")
+def ops_batch_rerun(
+    payload: OpsBatchRerunRequest,
+    x_request_id: str | None = Header(default=None, alias="X-Request-Id"),
+) -> dict[str, Any]:
+    """P1.1 收编 force_render_*.py / formal_render_repair_execution.py 跑批脚本。
+
+    scope=render 经 RENDER_QUEUE.enqueue_batch 真实入队；scope=simulation 因 owner
+    `ai_generation_adapter` WIP，目前仅支持 dry_run（返回会被重跑的
+    simulation_jobs 计划，由 operator 手动从 /api/cases/{id}/simulate-after 触发）。
+    每次调用必落 `ops_audit_log`，含 dry_run。
+    """
+    request_id = _gen_request_id(x_request_id)
+    endpoint = "POST /api/render/ops/batch-rerun"
+    payload_dump = payload.model_dump()
+
+    if payload.scope not in ALLOWED_OPS_RERUN_SCOPES:
+        resp = {
+            "request_id": request_id,
+            "error": f"scope must be one of {sorted(ALLOWED_OPS_RERUN_SCOPES)}",
+        }
+        _write_ops_audit_log(
+            request_id=request_id, endpoint=endpoint,
+            reviewer=payload.reviewer, reason=payload.reason,
+            payload=payload_dump, response=resp,
+            outcome="error", http_status=400,
+        )
+        raise HTTPException(400, resp)
+
+    seen: set[int] = set()
+    deduped: list[int] = []
+    duplicate_count = 0
+    for cid in payload.case_ids:
+        if cid in seen:
+            duplicate_count += 1
+            continue
+        seen.add(cid)
+        deduped.append(cid)
+    valid_ids, invalid = _batch_preview_rows(deduped)
+
+    if payload.scope == "simulation":
+        if not payload.dry_run:
+            resp = {
+                "request_id": request_id,
+                "error": (
+                    "scope=simulation requires dry_run=true; real simulation rerun is "
+                    "pending owner ai_generation_adapter integration. Use POST "
+                    "/api/cases/{id}/simulate-after for manual fire."
+                ),
+            }
+            _write_ops_audit_log(
+                request_id=request_id, endpoint=endpoint,
+                reviewer=payload.reviewer, reason=payload.reason,
+                payload=payload_dump, response=resp,
+                outcome="error", http_status=501,
+            )
+            raise HTTPException(501, resp)
+        planned = _simulation_rerun_plan(valid_ids, payload.workflow_filter)
+        resp = {
+            "request_id": request_id,
+            "scope": "simulation",
+            "dry_run": True,
+            "planned": planned,
+            "planned_count": len(planned),
+            "invalid": invalid,
+            "duplicate_count": duplicate_count,
+        }
+        _write_ops_audit_log(
+            request_id=request_id, endpoint=endpoint,
+            reviewer=payload.reviewer, reason=payload.reason,
+            payload=payload_dump, response=resp,
+            outcome="dry_run", http_status=200,
+        )
+        return resp
+
+    # scope == "render"
+    _validate_request(payload.brand, payload.semantic_judge)
+    if payload.dry_run:
+        resp = {
+            "request_id": request_id,
+            "scope": "render",
+            "dry_run": True,
+            "would_enqueue_case_ids": valid_ids,
+            "would_enqueue_count": len(valid_ids),
+            "invalid": invalid,
+            "duplicate_count": duplicate_count,
+        }
+        _write_ops_audit_log(
+            request_id=request_id, endpoint=endpoint,
+            reviewer=payload.reviewer, reason=payload.reason,
+            payload=payload_dump, response=resp,
+            outcome="dry_run", http_status=200,
+        )
+        return resp
+    if not valid_ids:
+        resp = {
+            "request_id": request_id,
+            "scope": "render",
+            "error": "no valid case ids in batch",
+            "invalid": invalid,
+            "duplicate_count": duplicate_count,
+        }
+        _write_ops_audit_log(
+            request_id=request_id, endpoint=endpoint,
+            reviewer=payload.reviewer, reason=payload.reason,
+            payload=payload_dump, response=resp,
+            outcome="error", http_status=404,
+        )
+        raise HTTPException(404, resp)
+
+    batch_id, job_ids = RENDER_QUEUE.enqueue_batch(
+        case_ids=valid_ids,
+        brand=payload.brand,
+        template=payload.template,
+        semantic_judge=payload.semantic_judge,
+    )
+    outcome = "partial" if (len(job_ids) < len(valid_ids) or invalid) else "ok"
+    resp = {
+        "request_id": request_id,
+        "scope": "render",
+        "dry_run": False,
+        "batch_id": batch_id,
+        "job_ids": job_ids,
+        "enqueued_count": len(job_ids),
+        "invalid": invalid,
+        "duplicate_count": duplicate_count,
+    }
+    _write_ops_audit_log(
+        request_id=request_id, endpoint=endpoint,
+        reviewer=payload.reviewer, reason=payload.reason,
+        payload=payload_dump, response=resp,
+        outcome=outcome, http_status=200,
+    )
+    return resp
