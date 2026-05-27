@@ -5918,6 +5918,11 @@ def simulate_case_after(case_id: int, payload: SimulateAfterRequest) -> Simulate
         output_refs = []
         # P0.1: 结构化失败上下文 — oncall 可 SQL 归因到 failure_stage / error_class
         # 而不必翻 stderr。保留 legacy error_message 字段向后兼容。
+        # P0.5 (review H-2): traceback 截 16KB 防 DB 行膨胀 / json.loads 在
+        # /api/render/jobs/failures/recent 拉 200 行时内存峰值。
+        _tb = traceback.format_exc()
+        if len(_tb) > 16384:
+            _tb = _tb[:16384] + f"\n... [truncated {len(_tb) - 16384} chars]"
         failure_block = {
             "failure_stage": "provider_call",
             "error_class": type(exc).__name__,
@@ -5932,7 +5937,7 @@ def simulate_case_after(case_id: int, payload: SimulateAfterRequest) -> Simulate
             ],
             "workflow_name": payload.model_name,
             "retry_trace": [],
-            "traceback": traceback.format_exc(),
+            "traceback": _tb,
         }
         audit_payload = {
             "provider": provider,

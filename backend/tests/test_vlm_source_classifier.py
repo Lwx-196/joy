@@ -426,7 +426,11 @@ def test_classify_images_api_legacy_dry_run_false_maps_to_apply(client, tmp_path
     # mode should be 'apply' (not legacy dry_run path).
     assert response.status_code == 200
     body = response.json()
-    assert body["mode"] == "apply"
+    # P0.5 H-1 后：requested_mode 保留用户请求的 apply（即便 fail-closed 把
+    # 实际 mode 降到 live-no-apply）。本测试只验证 legacy dry_run=False → apply
+    # 映射契约，不强求 final mode == apply。
+    assert body["requested_mode"] == "apply"
+    assert body["mode"] in {"apply", "live-no-apply"}
 
 
 def test_source_group_uses_vlm_classifier_observation_without_manual_override(client, tmp_path: Path) -> None:

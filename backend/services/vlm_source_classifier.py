@@ -29,6 +29,15 @@ VALID_PHASES = {"before", "intraop", "after"}
 VALID_VIEWS = {"front", "oblique", "side", "back"}
 VALID_BODY_PARTS = {"face", "body", "unknown"}
 
+# P0.5 (review H-2): cap traceback size to avoid multi-MB blobs landing in DB rows.
+TRACEBACK_MAX_CHARS = 16384
+
+
+def _truncate_tb(tb: str) -> str:
+    if len(tb) <= TRACEBACK_MAX_CHARS:
+        return tb
+    return tb[:TRACEBACK_MAX_CHARS] + f"\n... [truncated {len(tb) - TRACEBACK_MAX_CHARS} chars]"
+
 
 @dataclass(frozen=True)
 class ClassificationQueueItem:
@@ -389,6 +398,9 @@ def run_classification(
     report: dict[str, Any] = {
         "run_status": "dry_run" if resolved_mode == "dry-run" else "pending",
         "mode": resolved_mode,
+        # P0.5: 保留原始解析的 mode，让 caller 区分"用户要 apply + 系统降级"
+        # 与"用户直接要 live-no-apply"。fail-closed 改写 mode 不改 requested_mode。
+        "requested_mode": resolved_mode,
         "case_id": case_id,
         "all_low_confidence": bool(all_low_confidence),
         "candidate_count": len(queue),
@@ -443,17 +455,31 @@ def run_classification(
         for r in results
         if not isinstance(r, BaseException)
     ]
-    calibration = _vlm_calibration.detect_distribution_collapse(batch_records)
-    report["calibration_status"] = calibration.status
-    report["calibration_recommendation"] = calibration.recommendation
+    # P0.5 (review H-1)：空 batch_records → status="insufficient_data" 而非误报 "ok"。
+    # 用 detect_distribution_collapse 对空列表返 status="ok" 会让 ops dashboard 看起来
+    # "一切正常"，但实际上 0 个分类成功。明确降级 + fail_closed=True 留证。
     report["fail_closed"] = False
-    if calibration.status == "uncalibrated" and resolved_mode == "apply":
-        resolved_mode = "live-no-apply"
-        report["mode"] = resolved_mode
-        report["fail_closed"] = True
-        report["fail_closed_reason"] = (
-            "distribution_collapse: " + calibration.recommendation
+    if not batch_records:
+        report["calibration_status"] = "insufficient_data"
+        report["calibration_recommendation"] = (
+            "0 successful classifications in batch; cannot evaluate distribution."
         )
+        if resolved_mode == "apply":
+            resolved_mode = "live-no-apply"
+            report["mode"] = resolved_mode
+            report["fail_closed"] = True
+            report["fail_closed_reason"] = "insufficient_data: 0 successful classifications"
+    else:
+        calibration = _vlm_calibration.detect_distribution_collapse(batch_records)
+        report["calibration_status"] = calibration.status
+        report["calibration_recommendation"] = calibration.recommendation
+        if calibration.status == "uncalibrated" and resolved_mode == "apply":
+            resolved_mode = "live-no-apply"
+            report["mode"] = resolved_mode
+            report["fail_closed"] = True
+            report["fail_closed_reason"] = (
+                "distribution_collapse: " + calibration.recommendation
+            )
 
     classified = 0
     skipped = 0
@@ -463,7 +489,9 @@ def run_classification(
         if isinstance(result, BaseException):
             error_class = type(result).__name__
             error_message = str(result)
-            tb_text = "".join(_traceback.format_exception(type(result), result, result.__traceback__))
+            tb_text = _truncate_tb(
+                "".join(_traceback.format_exception(type(result), result, result.__traceback__))
+            )
             errors.append({
                 "observation_id": item.observation_id,
                 "case_id": item.case_id,
@@ -509,7 +537,7 @@ def run_classification(
                 _record_usage(conn, item, result, status="live_no_apply")
         except (sqlite3.Error, ValueError) as exc:
             error_class = type(exc).__name__
-            tb_text = _traceback.format_exc()
+            tb_text = _truncate_tb(_traceback.format_exc())
             errors.append({
                 "observation_id": item.observation_id,
                 "case_id": item.case_id,

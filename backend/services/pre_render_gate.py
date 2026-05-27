@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from pathlib import Path
 from typing import Any
 
 from .. import db, render_queue, source_images
@@ -35,15 +36,28 @@ def _ticket_matching_dims(ticket: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _basename(token: str) -> str:
+    """Canonicalize a file token to its basename for matching.
+
+    P0.5 (review interface C-1): source_selection.crop_component produces selected_files
+    from raw `image_path/path/filename`（可能是 basename like "术后正面.jpg"），而
+    accept_source_group_warning 写入端从 manifest 抽 `group_relative_path`（含前缀如
+    "front/术后正面.jpg"）。直接 set intersect 永远空集 → 过滤失效。两侧都跑 basename
+    归一化，确保 P0.2-A/B/C 链路真生效。
+    """
+    text = str(token or "").strip()
+    return Path(text).name if text else text
+
+
 def _accepted_warning_matches(ticket_dims: dict[str, Any], accepted: dict[str, Any]) -> bool:
     """slot+code 必匹配 + (selected_files 交集非空 OR message_contains 子串)；
-    accepted 仅给 code+slot 时退化为广义接受。"""
+    accepted 仅给 code+slot 时退化为广义接受。selected_files 双侧 basename 归一化。"""
     if str(accepted.get("code") or "") != str(ticket_dims.get("code") or ""):
         return False
     if str(accepted.get("slot") or "") != str(ticket_dims.get("slot") or ""):
         return False
-    accepted_files = list(accepted.get("selected_files") or [])
-    ticket_files = list(ticket_dims.get("selected_files") or [])
+    accepted_files = [_basename(t) for t in (accepted.get("selected_files") or []) if t]
+    ticket_files = [_basename(t) for t in (ticket_dims.get("selected_files") or []) if t]
     mc = str(accepted.get("message_contains") or "")
     if not accepted_files and not mc:
         return True  # broad accept by code+slot
