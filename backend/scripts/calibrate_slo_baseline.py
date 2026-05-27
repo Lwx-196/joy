@@ -21,13 +21,15 @@ Exit codes:
     0  success (dry_run or apply succeeded)
     2  invalid argument / runtime error
 
-Baseline algorithm (intentionally simple — provenance trace matters more than
-sophistication; future revs can swap in higher-quantile or Bayesian methods):
-    - comfyui_failure_rate_max:    P95 of per-window observed rates  (floor 0.05)
-    - vlm_disagreement_rate_max:   P95 of mean_disagreement          (floor 0.10)
-    - vlm_judge_missing_rate_max:  observed missing_rate * 1.1       (floor 0.10)
-    - delivery_gate_rejection_rate:  mean over window               (raw baseline)
-    - pre_render_gate_blocker_count: mean blocker count             (raw baseline)
+Baseline algorithm (intentionally simple — single-window observed + safety
+floor; provenance trace matters more than sophistication. Future revs can
+swap in higher-quantile P95 or Bayesian methods over multiple sliding
+windows; today we score a single calibration window and floor it):
+    - comfyui_failure_rate_max:    max(observed_rate, 0.05)          single window
+    - vlm_disagreement_rate_max:   max(observed_mean, 0.10)          single window
+    - vlm_judge_missing_rate_max:  max(observed_missing * 1.1, 0.10) single window
+    - delivery_gate_rejection_rate:  observed_rate                   raw baseline
+    - pre_render_gate_blocker_count: observed_count                  raw baseline
 """
 
 from __future__ import annotations

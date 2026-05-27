@@ -13,6 +13,7 @@ per-test patch transparently.
 """
 from __future__ import annotations
 
+import os
 import sqlite3
 import tempfile
 from datetime import datetime, timezone
@@ -20,6 +21,17 @@ from pathlib import Path
 from typing import Iterator
 
 import pytest
+
+# --- Test-session permissive mode ----------------------------------------
+# Wave 4 W4-1 (production deploy gate): the production check in
+# `promotion_slo_monitor._validate_baseline_provenance` rejects placeholder
+# `computed_by ∈ {manual_seed, placeholder, seed}` thresholds JSON. The
+# checked-in `case-workbench-ai/promotion/slo_thresholds.json` is precisely
+# such a placeholder seed (sample_size=0, computed_by="manual_seed"), so
+# loading it under tests would hard-fail. Enable the documented escape hatch
+# session-wide; per-test overrides via `monkeypatch.delenv("SLO_TEST_MODE")`
+# still exercise the prod-mode path.
+os.environ.setdefault("SLO_TEST_MODE", "1")
 
 # --- Module-level placeholder DB ------------------------------------------
 # Override DB_PATH BEFORE any other backend module sees the import-time
@@ -47,6 +59,26 @@ def temp_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
     db.init_schema()
     return db_path
+
+
+@pytest.fixture(autouse=True)
+def _isolate_slo_paused_state_sidecar(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> Path:
+    """Wave 4 W4-2: `evaluate_window` writes a sidecar paused-state file
+    `_DEFAULT_PAUSED_STATE_FILE` whenever a promoted state under-samples.
+    Without isolation every test that exercises that branch would pollute the
+    real worktree path under `case-workbench-ai/promotion/`. Autouse fixture
+    redirects the default to a per-test tmp file so no cross-talk and no
+    on-disk side effects.
+    """
+    sidecar = tmp_path / "slo_paused_state.json"
+    monkeypatch.setattr(
+        "backend.services.promotion_slo_monitor._DEFAULT_PAUSED_STATE_FILE",
+        sidecar,
+    )
+    return sidecar
 
 
 @pytest.fixture

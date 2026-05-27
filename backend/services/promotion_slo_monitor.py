@@ -26,15 +26,25 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
 import sqlite3
 import sys
+import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Iterator
+
+try:  # POSIX-only; macOS / Linux are the primary targets. Windows: degrade no-op.
+    import fcntl  # type: ignore[import-not-found]
+
+    _HAS_FCNTL = True
+except ImportError:  # pragma: no cover  (non-POSIX)
+    fcntl = None  # type: ignore[assignment]
+    _HAS_FCNTL = False
 
 _logger = logging.getLogger(__name__)
 
@@ -76,6 +86,10 @@ RECOMMENDATION_ROLLBACK = "rollback"
 RECOMMENDATION_INSUFFICIENT_DATA = "insufficient_data"
 # Wave 3 C-1: 灰度态小样本，保留状态等数据
 RECOMMENDATION_MONITORING_PAUSED = "monitoring_paused"
+# Wave 4 K-5: 灰度长时间 stop-loss escalate — 不真撤回灰度（语义是"流量不足
+# 无法判定 SLO"），让 applier 写 audit alert 但保 manifest 不变；这与
+# `RECOMMENDATION_ROLLBACK`（SLO 真违反 → applier 撤回）严格区分。
+RECOMMENDATION_STOP_LOSS_HALT = "stop_loss_halt"
 
 # Wave 3 C-1: 灰度（已发布）态集合 — 这些 state 小样本走 monitoring_paused。
 # `shadow` 与 `rolled_back` 是非灰度态（前者尚未发布，后者已撤回），均走
@@ -94,6 +108,48 @@ _REQUIRED_PROVENANCE_FIELDS: tuple[str, ...] = (
     "computed_at_main_sha",
 )
 _SLO_TEST_MODE_ENV = "SLO_TEST_MODE"
+
+# Wave 4 K-3 — explicit truthy allowlist for SLO_TEST_MODE. Pre-K-3 the check
+# was `value not in ("", "0", "false", "False")` which silently enabled
+# test-mode on ANY other value — e.g. `SLO_TEST_MODE=production`,
+# `SLO_TEST_MODE=off`, `SLO_TEST_MODE=disable` all flipped fail-closed off.
+# Strict whitelist closes that footgun: only the strings below count as
+# "enabled", everything else (including unknown literals, whitespace, empty,
+# typos) is treated as production mode.
+_TEST_MODE_TRUTHY: frozenset[str] = frozenset(
+    {"1", "true", "True", "yes", "Yes", "TRUE", "YES"}
+)
+
+# Wave 4 W4-1 — production deploy gate (release blocker).
+# `computed_by` values that signal a placeholder / pre-calibration baseline.
+# Production must refuse to load such thresholds (fail-closed) and any in-flight
+# evaluation must surface `baseline_unmeasured` as an explicit violation so
+# operators see it even if test-mode demotion silences the load-time check.
+_PLACEHOLDER_COMPUTED_BY: frozenset[str] = frozenset(
+    {"manual_seed", "placeholder", "seed"}
+)
+_PLACEHOLDER_SAMPLE_SIZE_THRESHOLD = 1  # sample_size < 1 == zero observed runs
+
+# Wave 4 K-4 — producer allowlist. Only `computed_by` values listed here may
+# load thresholds in production. Future calibration v2/v3 algorithms append
+# their own labels here; unknown labels are rejected by name so a typo or
+# rogue producer can't sneak past `_PLACEHOLDER_COMPUTED_BY` (which only
+# rejects three explicit seed labels).
+_LEGITIMATE_COMPUTED_BY: frozenset[str] = frozenset({"calibrate_cli"})
+
+# Wave 4 W4-2 — `monitoring_paused` time-axis stop-loss.
+# Promoted state + sample<min for > PAUSED_STALE_DAYS days → escalate to
+# `rollback` recommendation + emit `monitoring_paused_stale` violation. State
+# is tracked in a sidecar JSON file so it survives restarts without touching
+# the manifest schema (no Wave 1-3 contract churn).
+PAUSED_STALE_DAYS = 7
+_PAUSED_STATE_SCHEMA_VERSION = 1
+_DEFAULT_PAUSED_STATE_FILE = (
+    Path(__file__).resolve().parent.parent.parent
+    / "case-workbench-ai"
+    / "promotion"
+    / "slo_paused_state.json"
+)
 
 # Endpoint 关键字 — `ops_audit_log.endpoint` 匹配 delivery / gate / batch-rerun 三类
 _DELIVERY_GATE_ENDPOINT_KEYWORDS: tuple[str, ...] = (
@@ -141,8 +197,15 @@ class SLOReport:
 
 
 def _is_test_mode() -> bool:
-    """Permissive mode for tests / dev. Production keeps fail-closed semantics."""
-    return os.environ.get(_SLO_TEST_MODE_ENV, "").strip() not in ("", "0", "false", "False")
+    """Permissive mode for tests / dev. Production keeps fail-closed semantics.
+
+    Wave 4 K-3: STRICT whitelist — only the canonical truthy literals enable
+    test mode. Any other value (incl. ``"production"``, ``"off"``, ``"2"``,
+    ``" "``, ``"disable"``) is treated as production. This closes a footgun
+    where operators thought they were turning test-mode off by writing
+    ``SLO_TEST_MODE=production`` and instead silently enabled it.
+    """
+    return os.environ.get(_SLO_TEST_MODE_ENV, "").strip() in _TEST_MODE_TRUTHY
 
 
 def _validate_baseline_provenance(provenance: Any) -> dict[str, Any]:
@@ -207,6 +270,59 @@ def _validate_baseline_provenance(provenance: Any) -> dict[str, Any]:
         if _is_test_mode():
             _logger.warning(msg)
             return {}
+        raise ValueError(msg)
+
+    # Wave 4 W4-1: schema passed, but is this a placeholder baseline? A doc
+    # with computed_by ∈ {manual_seed, placeholder, seed} + sample_size below
+    # threshold means the threshold numbers were hand-seeded, not measured —
+    # safe to load in test/dev (warn), unsafe in production (raise).
+    computed_by = provenance.get("computed_by")
+    sample_size = provenance.get("sample_size", 0)
+    if (
+        isinstance(computed_by, str)
+        and computed_by in _PLACEHOLDER_COMPUTED_BY
+        and isinstance(sample_size, int)
+        and not isinstance(sample_size, bool)
+        and sample_size < _PLACEHOLDER_SAMPLE_SIZE_THRESHOLD
+    ):
+        msg = (
+            "baseline_provenance is a placeholder "
+            f"(computed_by='{computed_by}', sample_size={sample_size}); "
+            "production deploy refused. Run "
+            "`python -m backend.scripts.calibrate_slo_baseline "
+            "--window <N> --apply` to compute a real baseline from shadow data."
+        )
+        if _is_test_mode():
+            _logger.warning(msg)
+            # Returning the (validated-but-placeholder) provenance so downstream
+            # `evaluate_window` can still emit the `baseline_unmeasured`
+            # violation — visibility > silent pass in test mode too.
+            return dict(provenance)
+        raise ValueError(msg)
+
+    # Wave 4 K-4 — producer allowlist. ``computed_by`` outside the union of
+    # legitimate (``_LEGITIMATE_COMPUTED_BY``) and explicit-placeholder
+    # (``_PLACEHOLDER_COMPUTED_BY``) sets means an unknown / rogue / typo
+    # producer wrote this thresholds file. Fail-closed in production. We do
+    # NOT silently accept on the assumption "if it has full provenance it's
+    # fine" — a typo'd `computed_by="ops_seed"` would otherwise bypass the
+    # placeholder gate (since "ops_seed" is not in the placeholder set) AND
+    # still load with full schema. K-4 forces an explicit allowlist update
+    # for every new producer.
+    if (
+        isinstance(computed_by, str)
+        and computed_by not in _LEGITIMATE_COMPUTED_BY
+        and computed_by not in _PLACEHOLDER_COMPUTED_BY
+    ):
+        msg = (
+            f"unknown computed_by '{computed_by}' — must be one of "
+            f"{sorted(_LEGITIMATE_COMPUTED_BY)}. If you added a new "
+            "calibration producer, append its label to "
+            "promotion_slo_monitor._LEGITIMATE_COMPUTED_BY."
+        )
+        if _is_test_mode():
+            _logger.warning(msg)
+            return dict(provenance)
         raise ValueError(msg)
 
     return dict(provenance)
@@ -285,13 +401,66 @@ def _check_baseline_stale(
     }
 
 
+def _code_default_thresholds() -> dict[str, Any]:
+    """Pure code-default thresholds, no file I/O. Used as last-resort fallback
+    when on-disk thresholds file is rejected by the W4-1 placeholder gate but
+    callers supply a full override (e.g. tests, ad-hoc CLI sessions)."""
+    return {
+        "thresholds": dict(_DEFAULT_THRESHOLDS),
+        "baseline": dict(_DEFAULT_BASELINE),
+        "baseline_provenance": {},
+        "minimum_sample_size": DEFAULT_MINIMUM_SAMPLE_SIZE,
+        "default_window_hours": DEFAULT_WINDOW_HOURS,
+    }
+
+
 def _merge_thresholds(
     user_thresholds: dict[str, Any] | None,
 ) -> dict[str, Any]:
     """Merge user override on top of file defaults. user_thresholds may carry the
     full structure (`{thresholds, baseline, baseline_provenance, ...}`) OR a
-    flat map of threshold names (treated as `thresholds` overlay)."""
-    base = load_default_thresholds()
+    flat map of threshold names (treated as `thresholds` overlay).
+
+    Wave 4 K-2 — fallback contract (post-hardening):
+      The on-disk thresholds file may be rejected at load time (W4-1
+      placeholder gate or K-4 unknown-producer gate). In that case we fall
+      back to `_code_default_thresholds()` ONLY when one of the two safety
+      conditions holds:
+
+        (a) `_is_test_mode()` is True (developer / CI escape hatch), or
+        (b) The caller has supplied a structured override whose own
+            `baseline_provenance` passes `_validate_baseline_provenance`
+            (i.e. the caller is taking explicit responsibility for the
+            measured baseline; production calibrate CLI's own sanity-load
+            uses this branch).
+
+      Any other situation — production mode + user override with no
+      provenance (or with placeholder provenance, or with a flat
+      thresholds-only override) — re-raises the original ValueError so the
+      file rejection is propagated. This protects against a footgun where
+      a caller could silently bypass W4-1 by passing a single threshold
+      override that happens to skip the fallback condition.
+    """
+    try:
+        base = load_default_thresholds()
+    except ValueError:
+        # Decide whether fallback is safe:
+        if _is_test_mode():
+            base = _code_default_thresholds()
+        elif user_thresholds and isinstance(
+            user_thresholds.get("baseline_provenance"), dict
+        ):
+            # Caller-supplied provenance — validate before allowing fallback.
+            try:
+                _validate_baseline_provenance(
+                    user_thresholds.get("baseline_provenance")
+                )
+            except ValueError:
+                raise  # caller's provenance is itself bad — propagate
+            base = _code_default_thresholds()
+        else:
+            # No safe path — fall through to the original file rejection.
+            raise
     if not user_thresholds:
         return base
     if "thresholds" in user_thresholds or "baseline" in user_thresholds:
@@ -522,6 +691,324 @@ def _compute_pre_render_gate_blocker_count(
 
 
 # ---------------------------------------------------------------------------
+# Wave 4 W4-2 — paused state sidecar (file-based, atomic, optional path inject)
+# ---------------------------------------------------------------------------
+
+
+# K-6 status tokens for `_load_paused_state` tri-state return. Pre-K-6 the
+# loader collapsed missing / corrupt / unreadable to a single `None`, which
+# meant a transient OSError (permission flip / disk hiccup) silently reset
+# the stop-loss clock — operator could never see the 7-day window elapse.
+# Post-K-6 we surface the cause so callers can branch.
+PAUSED_STATE_STATUS_OK = "ok"
+PAUSED_STATE_STATUS_MISSING = "missing"
+PAUSED_STATE_STATUS_CORRUPT = "corrupt"
+PAUSED_STATE_STATUS_UNREADABLE = "unreadable"
+
+
+@contextlib.contextmanager
+def _paused_state_lock(target_path: Path) -> Iterator[int | None]:
+    """K-1 — exclusive non-blocking flock around sidecar read-modify-write.
+
+    Pre-K-1 the sidecar suffered two race conditions:
+
+      1) Fixed ``<target>.tmp`` filename meant concurrent cron writes could
+         overwrite each other's tmp file mid-flight (corrupt payload land in
+         the canonical path).
+      2) Even with unique tmps, the read-modify-write of the sidecar payload
+         (load → mutate → write) was unprotected — two evaluators racing
+         could both observe "no paused_state" and both write a fresh
+         paused_since=now, losing the older anchor.
+
+    This context manager acquires ``fcntl.flock(LOCK_EX | LOCK_NB)`` on a
+    sibling lock file (``<sidecar>.lock``). On Windows (no fcntl) we degrade
+    to a no-op — the macOS / Linux deployment targets cover all production
+    crons; CI runs serially per-test under the autouse isolation fixture.
+
+    On lock contention we yield ``None`` (caller may skip the write) rather
+    than blocking — stop-loss MUST not stall the SLO monitor loop. The
+    caller logs and proceeds with evaluation; the other process's write
+    will land first and the next eval cycle will reconcile.
+    """
+    if not _HAS_FCNTL:  # pragma: no cover  (POSIX-only path)
+        yield None
+        return
+    lock_path = Path(str(target_path) + ".lock")
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        _logger.warning("paused-state lock-dir mkdir failed (%s); proceeding lockless", exc)
+        yield None
+        return
+    fd: int | None = None
+    try:
+        try:
+            fd = os.open(
+                str(lock_path), os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o644
+            )
+        except OSError as exc:
+            _logger.warning("paused-state lock open failed (%s); proceeding lockless", exc)
+            yield None
+            return
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)  # type: ignore[union-attr]
+        except BlockingIOError:
+            _logger.warning(
+                "paused-state lock held by another process at %s; "
+                "skipping this write cycle",
+                lock_path,
+            )
+            yield None
+            return
+        yield fd
+    finally:
+        if fd is not None:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)  # type: ignore[union-attr]
+            except OSError:  # pragma: no cover
+                _logger.warning("flock LOCK_UN failed (non-fatal)", exc_info=True)
+            try:
+                os.close(fd)
+            except OSError:  # pragma: no cover
+                _logger.warning("paused-state lock fd close failed (non-fatal)", exc_info=True)
+
+
+def _load_paused_state(
+    path: Path | None = None,
+) -> tuple[dict[str, Any] | None, str]:
+    """K-6: tri-state read.
+
+    Returns ``(payload, status)``:
+      * ``(None, "missing")``     — file does not exist (first paused episode)
+      * ``(None, "corrupt")``     — JSON parse failed or root is not a dict
+      * ``(None, "unreadable")``  — OSError (permission / I/O); caller MUST
+                                    NOT treat this as "no prior pause" or
+                                    the stop-loss clock would be reset by a
+                                    transient disk error.
+      * ``(payload, "ok")``       — valid sidecar payload
+
+    Pre-K-6 all four cases returned ``None``, meaning a transient unreadable
+    sidecar silently rewrote a fresh ``paused_since=now`` anchor — the
+    7-day stop-loss timer was effectively infinitely deferred on any
+    permission flip.
+    """
+    target = Path(path) if path else _DEFAULT_PAUSED_STATE_FILE
+    if not target.exists():
+        return None, PAUSED_STATE_STATUS_MISSING
+    try:
+        raw = target.read_text(encoding="utf-8")
+    except OSError as exc:
+        _logger.warning(
+            "paused-state unreadable at %s (%s); preserving prior anchor "
+            "(NOT resetting stop-loss clock)",
+            target,
+            exc,
+        )
+        return None, PAUSED_STATE_STATUS_UNREADABLE
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, TypeError) as exc:
+        _logger.warning(
+            "paused-state corrupt at %s (%s); will rewrite fresh anchor",
+            target,
+            exc,
+        )
+        return None, PAUSED_STATE_STATUS_CORRUPT
+    if not isinstance(data, dict):
+        _logger.warning(
+            "paused-state malformed at %s (root not object); "
+            "will rewrite fresh anchor",
+            target,
+        )
+        return None, PAUSED_STATE_STATUS_CORRUPT
+    return data, PAUSED_STATE_STATUS_OK
+
+
+def _write_paused_state(payload: dict[str, Any], path: Path | None = None) -> None:
+    """Atomic write (unique tmp + os.replace) so concurrent SLO runs never
+    read a half-flushed payload AND never collide on the tmp filename.
+
+    K-1 fix: tmp name now embeds pid + uuid so two parallel cron invocations
+    each write to their own tmp file (no in-flight overwrite). The lock
+    held by ``_paused_state_lock`` serializes the os.replace landing —
+    callers MUST hold the lock when calling this function.
+    """
+    target = Path(path) if path else _DEFAULT_PAUSED_STATE_FILE
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp_name = target.name + f".{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp"
+    tmp = target.parent / tmp_name
+    serialized = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+    try:
+        tmp.write_text(serialized, encoding="utf-8")
+        os.replace(tmp, target)
+    except Exception:
+        # Best-effort cleanup of the tmp; never mask the original error.
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except OSError:  # pragma: no cover
+            pass
+        raise
+
+
+def _clear_paused_state(path: Path | None = None) -> None:
+    """Remove sidecar when paused window resolves (sample recovered) or the
+    promoted state transitions (counter must reset). Silent on missing file."""
+    target = Path(path) if path else _DEFAULT_PAUSED_STATE_FILE
+    try:
+        target.unlink()
+    except FileNotFoundError:
+        return
+    except OSError as exc:  # pragma: no cover  (best-effort cleanup)
+        _logger.warning("paused-state clear failed at %s: %s", target, exc)
+
+
+def _evaluate_paused_state(
+    *,
+    promotion_state: str,
+    sample_size: int,
+    min_sample: int,
+    paused_state_path: Path | None,
+    stale_days: int = PAUSED_STALE_DAYS,
+    now: datetime | None = None,
+) -> tuple[dict[str, Any] | None, str]:
+    """Apply Wave 4 W4-2 stop-loss policy. Returns ``(violation, notes_extra)``:
+
+    * ``violation`` is non-None when the paused window has overstayed
+      ``stale_days`` under the same promoted state — caller appends it to the
+      report violations and escalates the recommendation to
+      :data:`RECOMMENDATION_STOP_LOSS_HALT` (K-5).
+    * Always (re)writes / clears the sidecar so the next eval inherits a
+      correct cursor. K-1: all sidecar mutations happen under exclusive
+      flock so concurrent crons can't lose the paused_since anchor.
+    * K-6: ``OSError`` during sidecar read no longer silently resets the
+      stop-loss clock; we surface ``paused_state_unreadable`` and treat it
+      as a synthetic stale violation (conservative — operator must
+      investigate before deploy).
+    """
+    current = now or datetime.now(timezone.utc)
+    target = Path(paused_state_path) if paused_state_path else _DEFAULT_PAUSED_STATE_FILE
+
+    fresh_state: dict[str, Any] = {
+        "schema_version": _PAUSED_STATE_SCHEMA_VERSION,
+        "paused_since": current.isoformat(),
+        "promotion_state_at_pause": promotion_state,
+        "last_sample_size": int(sample_size),
+        "minimum_sample_size": int(min_sample),
+    }
+
+    with _paused_state_lock(target) as lock_fd:
+        existing, status = _load_paused_state(target)
+
+        # K-6: unreadable sidecar — preserve the stop-loss clock. Surface a
+        # synthetic violation so the operator sees we can't read the
+        # canonical anchor; conservative (treat as if paused window
+        # exceeded) so we don't silently green-light a stale promotion.
+        if status == PAUSED_STATE_STATUS_UNREADABLE:
+            violation = {
+                "dimension": "paused_state_unreadable",
+                "actual_days": None,
+                "threshold_days": stale_days,
+                "comparator": "<=",
+                "context": {
+                    "paused_state_path": str(target),
+                    "promotion_state": promotion_state,
+                    "last_sample_size": int(sample_size),
+                    "minimum_sample_size": int(min_sample),
+                    "hint": (
+                        "could not read sidecar file (OSError); verify "
+                        "permissions on promotion/ — refusing to reset the "
+                        "stop-loss clock until operator confirms"
+                    ),
+                },
+            }
+            return violation, "paused_state_unreadable"
+
+        if status == PAUSED_STATE_STATUS_MISSING:
+            # First time we observe paused + small-sample under this state.
+            if lock_fd is None:
+                # Contention: another process is currently writing. Skip this
+                # cycle's write — the holder will land a fresh anchor and the
+                # next eval will reconcile.
+                return None, "paused_state_lock_contention"
+            _write_paused_state(fresh_state, target)
+            return None, f"paused_since={fresh_state['paused_since']}"
+
+        if status == PAUSED_STATE_STATUS_CORRUPT:
+            # Corrupt sidecar — rewrite with fresh anchor + diagnostic note.
+            if lock_fd is None:
+                return None, "paused_state_lock_contention"
+            _write_paused_state(fresh_state, target)
+            return None, "paused_state_repaired"
+
+        # status == OK — proceed with anchor reconciliation
+        assert existing is not None
+
+        prior_state_name = existing.get("promotion_state_at_pause")
+        if prior_state_name != promotion_state:
+            # Promotion bucket changed (e.g. p10 → p25); reset the timer so we
+            # only stop-loss when the operator leaves a single state stuck.
+            if lock_fd is None:
+                return None, "paused_state_lock_contention"
+            _write_paused_state(fresh_state, target)
+            return None, (
+                f"paused_state_reset (prior={prior_state_name}, "
+                f"current={promotion_state})"
+            )
+
+        paused_since_raw = existing.get("paused_since")
+        if not isinstance(paused_since_raw, str) or not paused_since_raw:
+            # Schema drift on a critical field — rewrite anchor.
+            if lock_fd is None:
+                return None, "paused_state_lock_contention"
+            _write_paused_state(fresh_state, target)
+            return None, "paused_state_repaired"
+
+        try:
+            paused_since = datetime.fromisoformat(paused_since_raw)
+        except ValueError:
+            if lock_fd is None:
+                return None, "paused_state_lock_contention"
+            _write_paused_state(fresh_state, target)
+            return None, "paused_state_repaired"
+        if paused_since.tzinfo is None:
+            paused_since = paused_since.replace(tzinfo=timezone.utc)
+
+        duration = current - paused_since
+        duration_days = round(duration.total_seconds() / 86400.0, 4)
+        # Mutate existing payload to keep paused_since anchor but refresh
+        # last_sample_size + minimum_sample_size (operator can audit recent obs).
+        if lock_fd is not None:
+            existing_update: dict[str, Any] = dict(existing)
+            existing_update["last_sample_size"] = int(sample_size)
+            existing_update["minimum_sample_size"] = int(min_sample)
+            _write_paused_state(existing_update, target)
+
+        if duration > timedelta(days=stale_days):
+            violation = {
+                "dimension": "monitoring_paused_stale",
+                "actual_days": duration_days,
+                "threshold_days": stale_days,
+                "comparator": "<=",
+                "context": {
+                    "paused_since": paused_since_raw,
+                    "promotion_state": promotion_state,
+                    "last_sample_size": int(sample_size),
+                    "minimum_sample_size": int(min_sample),
+                },
+            }
+            return violation, (
+                f"paused_since={paused_since_raw}, "
+                f"paused_duration_days={duration_days}"
+            )
+
+        return None, (
+            f"paused_since={paused_since_raw}, "
+            f"paused_duration_days={duration_days}"
+        )
+
+
+# ---------------------------------------------------------------------------
 # 主入口
 # ---------------------------------------------------------------------------
 
@@ -532,6 +1019,7 @@ def evaluate_window(
     conn: sqlite3.Connection | None = None,
     thresholds: dict[str, Any] | None = None,
     promotion_state: str | None = None,
+    paused_state_path: Path | None = None,
 ) -> SLOReport:
     """Compute SLO report for the past `window_hours`. Returns immutable
     SLOReport DTO. If `conn` is None we open one from `backend.db`.
@@ -614,6 +1102,34 @@ def evaluate_window(
     if sample_size < min_sample:
         # Wave 3 C-1: triage on promotion_state
         if resolved_state in _PROMOTED_STATES:
+            # Wave 4 W4-2 — apply paused-state stop-loss before returning.
+            stop_loss_violation, paused_notes = _evaluate_paused_state(
+                promotion_state=resolved_state,
+                sample_size=sample_size,
+                min_sample=min_sample,
+                paused_state_path=paused_state_path,
+            )
+            notes_parts = ["small_sample_in_promoted_state"]
+            if paused_notes:
+                notes_parts.append(paused_notes)
+            if stop_loss_violation is not None:
+                # K-5: overstayed paused window → emit
+                # ``RECOMMENDATION_STOP_LOSS_HALT`` (NOT ``ROLLBACK``). The
+                # semantics here are "灰度流量长时间不足 — 无法 SLO 评估"
+                # rather than "SLO 真违反"; the applier writes an audit
+                # alert + keeps the manifest intact (operator review
+                # required). ``within_slo=False`` so the report is
+                # actionable; downstream applier branches on the
+                # recommendation, not within_slo.
+                return SLOReport(
+                    within_slo=False,
+                    violations=[stop_loss_violation],
+                    evidence=evidence,
+                    recommendation=RECOMMENDATION_STOP_LOSS_HALT,
+                    window_hours=window_hours,
+                    sample_size=sample_size,
+                    notes="; ".join(notes_parts),
+                )
             return SLOReport(
                 within_slo=None,
                 violations=[],
@@ -621,10 +1137,13 @@ def evaluate_window(
                 recommendation=RECOMMENDATION_MONITORING_PAUSED,
                 window_hours=window_hours,
                 sample_size=sample_size,
-                notes="small_sample_in_promoted_state",
+                notes="; ".join(notes_parts),
             )
         # shadow / rolled_back / fail-closed default — cold start, no live
         # promoted traffic yet. Legacy semantics: pass-through + flag.
+        # If we previously had a paused-state file (e.g. operator demoted
+        # back to shadow), clear it so a future re-promotion starts fresh.
+        _clear_paused_state(paused_state_path)
         return SLOReport(
             within_slo=True,
             violations=[],
@@ -634,7 +1153,70 @@ def evaluate_window(
             sample_size=sample_size,
         )
 
+    # Sample recovered — paused window resolved. Clear the sidecar so the
+    # next paused episode (if any) starts its 7-day stop-loss clock fresh.
+    _clear_paused_state(paused_state_path)
+
     violations: list[dict[str, Any]] = []
+
+    # Wave 4 W4-1 (b): baseline_unmeasured — fires whenever the loaded
+    # provenance is empty OR computed_by ∈ placeholder set. Independent of
+    # baseline_stale (which keys on measured_at age); this one keys on
+    # "did anyone actually measure this?". Even in SLO_TEST_MODE where (a)
+    # demotes the load-time check, this violation makes the placeholder
+    # state visible in every report — operators can't silently deploy onto
+    # seed values.
+    placeholder_computed_by: str | None = None
+    prov_computed_by = provenance.get("computed_by") if provenance else None
+    if isinstance(prov_computed_by, str) and prov_computed_by in _PLACEHOLDER_COMPUTED_BY:
+        placeholder_computed_by = prov_computed_by
+    if not provenance or placeholder_computed_by is not None:
+        violations.append(
+            {
+                "dimension": "baseline_unmeasured",
+                "comparator": "==",
+                "context": {
+                    "computed_by": placeholder_computed_by
+                    or (provenance.get("computed_by") if provenance else None),
+                    "sample_size": provenance.get("sample_size") if provenance else None,
+                    "hint": (
+                        "run `python -m backend.scripts.calibrate_slo_baseline "
+                        "--window <N> --apply` before production deploy"
+                    ),
+                },
+            }
+        )
+    else:
+        # K-4: legitimate (non-placeholder) provenance but the calibration
+        # window itself was undersampled. Surface as an independent
+        # violation — operators should re-calibrate with a larger window
+        # before trusting the baseline numbers. Parallel to
+        # ``baseline_unmeasured`` semantically (both indicate the baseline
+        # is not trustworthy) but distinct in cause (this one means "we
+        # tried to measure, but didn't see enough traffic").
+        prov_sample = provenance.get("sample_size")
+        if (
+            isinstance(prov_sample, int)
+            and not isinstance(prov_sample, bool)
+            and prov_sample < min_sample
+        ):
+            violations.append(
+                {
+                    "dimension": "baseline_undersampled",
+                    "comparator": ">=",
+                    "context": {
+                        "computed_by": provenance.get("computed_by"),
+                        "sample_size": prov_sample,
+                        "minimum_sample_size": min_sample,
+                        "hint": (
+                            "baseline calibrated on too few rows; re-run "
+                            "`python -m backend.scripts.calibrate_slo_baseline "
+                            "--window <N> --apply` with a larger N"
+                        ),
+                    },
+                }
+            )
+
     if stale_violation is not None:
         violations.append(stale_violation)
 
@@ -737,12 +1319,14 @@ __all__ = [
     "evaluate_window",
     "load_default_thresholds",
     "BASELINE_STALE_DAYS",
+    "PAUSED_STALE_DAYS",
     "DEFAULT_WINDOW_HOURS",
     "DEFAULT_MINIMUM_SAMPLE_SIZE",
     "RECOMMENDATION_CONTINUE",
     "RECOMMENDATION_ROLLBACK",
     "RECOMMENDATION_INSUFFICIENT_DATA",
     "RECOMMENDATION_MONITORING_PAUSED",
+    "RECOMMENDATION_STOP_LOSS_HALT",
 ]
 
 

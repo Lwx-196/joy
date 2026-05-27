@@ -11,6 +11,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +19,7 @@ import pytest
 
 from backend import db
 from backend.services.promotion_rollback_applier import (
+    AUDIT_OUTCOME_STOP_LOSS_HALT_ALERT,
     REASON_ALREADY_ROLLED_BACK,
     REASON_APPLIED,
     REASON_CONCURRENT_APPLY,
@@ -27,10 +29,12 @@ from backend.services.promotion_rollback_applier import (
     REASON_MONITORING_PAUSED,
     REASON_NO_MANIFEST,
     REASON_NO_ROLLBACK_NEEDED,
+    REASON_STOP_LOSS_HALT_ALERT,
     REC_CONTINUE,
     REC_INSUFFICIENT,
     REC_MONITORING_PAUSED,
     REC_ROLLBACK,
+    REC_STOP_LOSS_HALT,
     ROLLBACK_LOCK_FILENAME,
     ROLLED_BACK_STATE,
     REVIEWER,
@@ -731,7 +735,14 @@ def test_cli_dry_run_returns_exit_2_when_rollback_planned(
 def test_cli_continue_returns_exit_0(
     temp_db: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Healthy SLO + manifest → exit 0 / mode=apply / no manifest mutation."""
+    """Healthy SLO + manifest → exit 0 / mode=apply / no manifest mutation.
+
+    Wave 4 W4-1: the checked-in slo_thresholds.json is placeholder
+    (manual_seed) which now emits a `baseline_unmeasured` violation and
+    flips the SLO to rollback. Inject a calibrated-provenance thresholds
+    JSON via --thresholds so this test exercises the genuine
+    healthy-traffic continue path.
+    """
     with db.connect() as conn:
         from backend.tests.test_promotion_slo_monitor import (
             _insert_lineage,
@@ -752,10 +763,49 @@ def test_cli_continue_returns_exit_0(
     manifest_path = tmp_path / "manifest.json"
     _write_manifest(manifest_path, _make_manifest(promotion_state="p50"))
 
+    # Calibrated provenance overlay so baseline_unmeasured does not fire.
+    calibrated_thresholds = tmp_path / "calibrated_slo.json"
+    calibrated_thresholds.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "thresholds": {
+                    "comfyui_failure_rate_max": 0.05,
+                    "vlm_disagreement_rate_max": 0.10,
+                    "vlm_judge_missing_rate_max": 0.10,
+                    "delivery_gate_rejection_rate_multiplier_max": 1.05,
+                    "pre_render_gate_blocker_multiplier_max": 1.10,
+                },
+                "baseline": {
+                    "delivery_gate_rejection_rate": 0.10,
+                    "pre_render_gate_blocker_count": 5,
+                },
+                "baseline_provenance": {
+                    "measured_at": datetime.now(timezone.utc).isoformat(),
+                    "window_hours": 24,
+                    "sample_size": 100,
+                    "computed_by": "calibrate_cli",
+                    "computed_at_main_sha": "wave4-test",
+                },
+                "minimum_sample_size": 30,
+                "default_window_hours": 48,
+            }
+        ),
+        encoding="utf-8",
+    )
+
     from backend.scripts import promotion_rollback_check
 
     code = promotion_rollback_check.main(
-        ["--apply", "--window", "48", "--manifest", str(manifest_path)]
+        [
+            "--apply",
+            "--window",
+            "48",
+            "--manifest",
+            str(manifest_path),
+            "--thresholds",
+            str(calibrated_thresholds),
+        ]
     )
     captured = capsys.readouterr()
     assert code == 0, f"expected 0 got {code}; stdout={captured.out!r}"
@@ -765,3 +815,91 @@ def test_cli_continue_returns_exit_0(
     assert payload["applier"]["applied"] is False
     # Manifest untouched.
     assert json.loads(manifest_path.read_text())["promotion_state"] == "p50"
+
+
+# ---------------------------------------------------------------------------
+# K-5 — STOP_LOSS_HALT recommendation: audit-only, manifest unchanged
+# ---------------------------------------------------------------------------
+
+
+def test_k5_stop_loss_halt_does_not_revert_manifest(
+    temp_db: Path, tmp_path: Path
+) -> None:
+    """K-5: when SLO monitor emits STOP_LOSS_HALT (灰度流量长时间不足),
+    the applier MUST NOT mutate the manifest. It writes an audit alert
+    row only — operator review decides next step.
+
+    Pre-K-5 the monitor would emit ROLLBACK for stale paused windows,
+    triggering a real auto-rollback on the basis of insufficient signal
+    rather than a true SLO violation. K-5 introduces STOP_LOSS_HALT as
+    a distinct, audit-only intermediate state.
+    """
+    manifest_path = tmp_path / "manifest.json"
+    pre_payload = _make_manifest(promotion_state="p25")
+    _write_manifest(manifest_path, pre_payload)
+    pre_bytes = manifest_path.read_bytes()
+
+    decision = _make_decision(
+        recommendation=REC_STOP_LOSS_HALT,
+        violations=[
+            {
+                "dimension": "monitoring_paused_stale",
+                "actual_days": 9.1,
+                "threshold_days": 7,
+                "comparator": "<=",
+                "context": {"promotion_state": "p25"},
+            }
+        ],
+        sample_size=4,
+    )
+    result = apply_rollback_decision(
+        decision, dry_run=False, manifest_path=manifest_path
+    )
+
+    # Manifest must be byte-identical to the pre-state — K-5 forbids mutation.
+    assert manifest_path.read_bytes() == pre_bytes
+    # Result surfaces the audit-only outcome.
+    assert result["applied"] is False
+    assert result["reason"] == REASON_STOP_LOSS_HALT_ALERT
+    assert result["recommendation"] == REC_STOP_LOSS_HALT
+    assert "warning" in result and "operator review" in result["warning"]
+    # Audit log row exists and has the right outcome.
+    audit_id = result.get("audit_log_id")
+    assert isinstance(audit_id, int) and audit_id > 0
+
+    with db.connect() as conn:
+        row = conn.execute(
+            "SELECT outcome, reason FROM ops_audit_log WHERE id = ?",
+            (audit_id,),
+        ).fetchone()
+    assert row is not None
+    assert row["outcome"] == AUDIT_OUTCOME_STOP_LOSS_HALT_ALERT
+
+
+def test_k5_stop_loss_halt_dry_run_writes_no_audit_row(
+    temp_db: Path, tmp_path: Path
+) -> None:
+    """K-5: dry_run STOP_LOSS_HALT mirrors dry_run ROLLBACK semantics —
+    no DB write, no manifest write, would_apply=True for preview."""
+    manifest_path = tmp_path / "manifest.json"
+    _write_manifest(manifest_path, _make_manifest(promotion_state="p10"))
+    pre_bytes = manifest_path.read_bytes()
+
+    with db.connect() as conn:
+        pre_count = conn.execute("SELECT COUNT(*) AS n FROM ops_audit_log").fetchone()["n"]
+
+    result = apply_rollback_decision(
+        _make_decision(recommendation=REC_STOP_LOSS_HALT, sample_size=3),
+        dry_run=True,
+        manifest_path=manifest_path,
+    )
+
+    assert manifest_path.read_bytes() == pre_bytes
+    assert result["dry_run"] is True
+    assert result["would_apply"] is True
+    assert result["applied"] is False
+    assert result["reason"] == REASON_STOP_LOSS_HALT_ALERT
+
+    with db.connect() as conn:
+        post_count = conn.execute("SELECT COUNT(*) AS n FROM ops_audit_log").fetchone()["n"]
+    assert post_count == pre_count, "dry_run must NOT write an audit row"

@@ -36,6 +36,15 @@ case-workbench-ai/*
 !case-workbench-ai/promotion/
 !case-workbench-ai/promotion/**
 
+# Wave 4 K-8: SLO paused-state sidecar is RUNTIME state (per-deployment,
+# ops-managed). Tracking it would pollute commit history with 15-min timer
+# updates AND inject a stale paused_since anchor on fresh checkouts.
+# Lock file + pid+uuid-namespaced tmp files (K-1 concurrent-write fix)
+# excluded too.
+/case-workbench-ai/promotion/slo_paused_state.json
+/case-workbench-ai/promotion/slo_paused_state.json.lock
+/case-workbench-ai/promotion/slo_paused_state.json.*.tmp
+
 # Delivery render outputs (large JPGs); only manifests + report are tracked
 delivery/body/
 delivery/standard_face/
