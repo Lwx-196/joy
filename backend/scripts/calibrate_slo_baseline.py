@@ -25,6 +25,7 @@ Baseline algorithm (intentionally simple — provenance trace matters more than
 sophistication; future revs can swap in higher-quantile or Bayesian methods):
     - comfyui_failure_rate_max:    P95 of per-window observed rates  (floor 0.05)
     - vlm_disagreement_rate_max:   P95 of mean_disagreement          (floor 0.10)
+    - vlm_judge_missing_rate_max:  observed missing_rate * 1.1       (floor 0.10)
     - delivery_gate_rejection_rate:  mean over window               (raw baseline)
     - pre_render_gate_blocker_count: mean blocker count             (raw baseline)
 """
@@ -58,6 +59,12 @@ from backend.services.promotion_slo_monitor import (
 # Floors prevent calibration from accidentally relaxing SLO below seed values.
 _COMFYUI_FAILURE_RATE_FLOOR = 0.05
 _VLM_DISAGREEMENT_RATE_FLOOR = 0.10
+# Wave 3 P0.5 H-1: missing/malformed VLM judge payload rate floor.
+_VLM_JUDGE_MISSING_RATE_FLOOR = 0.10
+# Safety multiplier on observed missing_rate so transient spikes don't trip the
+# threshold immediately after calibration. Same semantics as other "observed × k"
+# baselines (delivery / pre_render multipliers use 1.05 / 1.10 respectively).
+_VLM_JUDGE_MISSING_RATE_MULTIPLIER = 1.10
 
 # Multiplier defaults (eval auditor: keep multiplier seeds + recalibrate raw baselines)
 _DELIVERY_GATE_MULT_DEFAULT = 1.05
@@ -112,6 +119,12 @@ def _measure(
     return {
         "comfyui_failure_rate_observed": comfyui["rate"],
         "vlm_disagreement_mean_observed": vlm["mean_disagreement"],
+        # Wave 3 P0.5 H-1: missing_rate piggy-backs on the same
+        # _compute_vlm_disagreement_rate call that produces the disagreement
+        # signal (B重写后 vlm dict 含 total_rows / missing_count / missing_rate).
+        # We surface it here so _build_patch can emit a calibrated
+        # vlm_judge_missing_rate_max threshold alongside the disagreement one.
+        "vlm_judge_missing_rate_observed": vlm["missing_rate"],
         "delivery_rejection_rate_observed": delivery["rate"],
         "pre_render_gate_blocker_count_observed": gate["blocker_count"],
         "sample_size": sample_size,
@@ -142,6 +155,13 @@ def _build_patch(
         float(observed["vlm_disagreement_mean_observed"]),
         _VLM_DISAGREEMENT_RATE_FLOOR,
     )
+    # Wave 3 P0.5 H-1: missing_rate threshold = observed * safety multiplier,
+    # floored at the seed value so a calm shadow window never relaxes the bar.
+    missing_rate_threshold = max(
+        float(observed["vlm_judge_missing_rate_observed"])
+        * _VLM_JUDGE_MISSING_RATE_MULTIPLIER,
+        _VLM_JUDGE_MISSING_RATE_FLOOR,
+    )
     delivery_baseline = float(observed["delivery_rejection_rate_observed"])
     pre_render_baseline = float(observed["pre_render_gate_blocker_count_observed"])
 
@@ -150,6 +170,7 @@ def _build_patch(
         "thresholds": {
             "comfyui_failure_rate_max": round(comfyui_threshold, 6),
             "vlm_disagreement_rate_max": round(vlm_threshold, 6),
+            "vlm_judge_missing_rate_max": round(missing_rate_threshold, 6),
             "delivery_gate_rejection_rate_multiplier_max": _DELIVERY_GATE_MULT_DEFAULT,
             "pre_render_gate_blocker_multiplier_max": _PRE_RENDER_GATE_MULT_DEFAULT,
         },

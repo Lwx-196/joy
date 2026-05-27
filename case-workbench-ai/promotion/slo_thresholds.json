@@ -3,6 +3,7 @@
   "thresholds": {
     "comfyui_failure_rate_max": 0.05,
     "vlm_disagreement_rate_max": 0.10,
+    "vlm_judge_missing_rate_max": 0.10,
     "delivery_gate_rejection_rate_multiplier_max": 1.05,
     "pre_render_gate_blocker_multiplier_max": 1.10
   },
