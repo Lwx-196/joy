@@ -136,7 +136,10 @@ def test_wave3_联动_paused_provenance_missing_rate_evidence(
     # --- C-1: paused triage ------------------------------------------------
     assert report.recommendation == RECOMMENDATION_MONITORING_PAUSED
     assert report.within_slo is None
-    assert report.notes == "small_sample_in_promoted_state"
+    # Wave 4 W4-2 appended `paused_since=...` annotation; legacy prefix
+    # remains stable as the dashboard key.
+    assert report.notes.startswith("small_sample_in_promoted_state")
+    assert "paused_since=" in report.notes
     assert report.violations == []
     assert report.sample_size < 30
 

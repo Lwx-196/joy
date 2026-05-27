@@ -11,6 +11,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -731,7 +732,14 @@ def test_cli_dry_run_returns_exit_2_when_rollback_planned(
 def test_cli_continue_returns_exit_0(
     temp_db: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Healthy SLO + manifest → exit 0 / mode=apply / no manifest mutation."""
+    """Healthy SLO + manifest → exit 0 / mode=apply / no manifest mutation.
+
+    Wave 4 W4-1: the checked-in slo_thresholds.json is placeholder
+    (manual_seed) which now emits a `baseline_unmeasured` violation and
+    flips the SLO to rollback. Inject a calibrated-provenance thresholds
+    JSON via --thresholds so this test exercises the genuine
+    healthy-traffic continue path.
+    """
     with db.connect() as conn:
         from backend.tests.test_promotion_slo_monitor import (
             _insert_lineage,
@@ -752,10 +760,49 @@ def test_cli_continue_returns_exit_0(
     manifest_path = tmp_path / "manifest.json"
     _write_manifest(manifest_path, _make_manifest(promotion_state="p50"))
 
+    # Calibrated provenance overlay so baseline_unmeasured does not fire.
+    calibrated_thresholds = tmp_path / "calibrated_slo.json"
+    calibrated_thresholds.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "thresholds": {
+                    "comfyui_failure_rate_max": 0.05,
+                    "vlm_disagreement_rate_max": 0.10,
+                    "vlm_judge_missing_rate_max": 0.10,
+                    "delivery_gate_rejection_rate_multiplier_max": 1.05,
+                    "pre_render_gate_blocker_multiplier_max": 1.10,
+                },
+                "baseline": {
+                    "delivery_gate_rejection_rate": 0.10,
+                    "pre_render_gate_blocker_count": 5,
+                },
+                "baseline_provenance": {
+                    "measured_at": datetime.now(timezone.utc).isoformat(),
+                    "window_hours": 24,
+                    "sample_size": 100,
+                    "computed_by": "calibrate_cli",
+                    "computed_at_main_sha": "wave4-test",
+                },
+                "minimum_sample_size": 30,
+                "default_window_hours": 48,
+            }
+        ),
+        encoding="utf-8",
+    )
+
     from backend.scripts import promotion_rollback_check
 
     code = promotion_rollback_check.main(
-        ["--apply", "--window", "48", "--manifest", str(manifest_path)]
+        [
+            "--apply",
+            "--window",
+            "48",
+            "--manifest",
+            str(manifest_path),
+            "--thresholds",
+            str(calibrated_thresholds),
+        ]
     )
     captured = capsys.readouterr()
     assert code == 0, f"expected 0 got {code}; stdout={captured.out!r}"

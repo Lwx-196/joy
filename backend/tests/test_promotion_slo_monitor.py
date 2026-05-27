@@ -17,12 +17,39 @@ import pytest
 from backend import db
 from backend.services.promotion_slo_monitor import (
     DEFAULT_MINIMUM_SAMPLE_SIZE,
+    PAUSED_STALE_DAYS,
     RECOMMENDATION_INSUFFICIENT_DATA,
     RECOMMENDATION_MONITORING_PAUSED,
+    RECOMMENDATION_ROLLBACK,
     SLOReport,
     evaluate_window,
     load_default_thresholds,
 )
+
+
+# Wave 4 W4-1 (b): the checked-in slo_thresholds.json carries placeholder
+# provenance (manual_seed / sample_size=0) which now triggers a
+# baseline_unmeasured violation. Tests below that care about specific
+# dimensions (failure rate, disagreement, paused state) inject a measured
+# provenance overlay to isolate the dimension under test from the placeholder
+# signal. This helper is the canonical fresh-provenance overlay.
+def _measured_thresholds_override(
+    overlay_thresholds: dict | None = None,
+) -> dict:
+    base: dict = {
+        # Structured-override branch is triggered by presence of `thresholds`
+        # or `baseline` key in the payload; supply an empty dict so callers
+        # that only want a fresh provenance still hit that branch.
+        "thresholds": dict(overlay_thresholds or {}),
+        "baseline_provenance": {
+            "measured_at": datetime.now(timezone.utc).isoformat(),
+            "window_hours": 24,
+            "sample_size": 100,
+            "computed_by": "calibrate_cli",
+            "computed_at_main_sha": "wave4-test",
+        },
+    }
+    return base
 
 # ---------------------------------------------------------------------------
 # Insert helpers
@@ -121,7 +148,12 @@ def test_empty_window_returns_insufficient_data(temp_db: Path) -> None:
 
 def test_all_within_slo_returns_continue(temp_db: Path) -> None:
     """Healthy window (failure rate well under 5%, vlm agreement high, no
-    rejections, no blockers) → recommendation='continue'."""
+    rejections, no blockers) → recommendation='continue'.
+
+    Inject calibrated-provenance override so the placeholder
+    `baseline_unmeasured` violation (Wave 4 W4-1 b) doesn't surface and mask
+    the dimension under test here.
+    """
     with db.connect() as conn:
         # 50 simulation_jobs: 1 failed (non-pre_render_gate), 49 done = 2% failure
         _insert_simulation_job(conn, status="failed", failure_stage="provider_call")
@@ -136,7 +168,9 @@ def test_all_within_slo_returns_continue(temp_db: Path) -> None:
             _insert_ops_audit(conn, endpoint=ep, outcome="ok")
         conn.commit()
 
-        report = evaluate_window(window_hours=48, conn=conn)
+        report = evaluate_window(
+            window_hours=48, conn=conn, thresholds=_measured_thresholds_override()
+        )
 
     assert report.sample_size >= DEFAULT_MINIMUM_SAMPLE_SIZE
     assert report.within_slo is True
@@ -241,16 +275,18 @@ def test_thresholds_override_via_kwarg(temp_db: Path) -> None:
             _insert_simulation_job(conn, status="done")
         conn.commit()
 
-        # Default thresholds → rollback
+        # Default thresholds → rollback (covers both comfyui_failure_rate and
+        # baseline_unmeasured; we only assert the high-level recommendation).
         default_report = evaluate_window(window_hours=48, conn=conn)
         assert default_report.recommendation == "rollback"
 
-        # Override to 20% → continue
-        override = {"comfyui_failure_rate_max": 0.20}
+        # Override to 20% threshold AND measured provenance → continue
         loose_report = evaluate_window(
             window_hours=48,
             conn=conn,
-            thresholds=override,
+            thresholds=_measured_thresholds_override(
+                overlay_thresholds={"comfyui_failure_rate_max": 0.20}
+            ),
         )
 
     assert loose_report.within_slo is True
@@ -492,7 +528,10 @@ def test_c1_small_sample_under_promoted_state_returns_monitoring_paused(
     assert report.recommendation == RECOMMENDATION_MONITORING_PAUSED
     assert report.within_slo is None, "monitoring_paused must signal indeterminate"
     assert report.violations == []
-    assert report.notes == "small_sample_in_promoted_state"
+    # Wave 4 W4-2 added `paused_since=...` annotation to the notes field.
+    # The leading marker remains stable and is what dashboards key on.
+    assert report.notes.startswith("small_sample_in_promoted_state")
+    assert "paused_since=" in report.notes
     assert report.evidence["promotion_state"] == "p25"
 
 
@@ -708,3 +747,517 @@ def test_c3_malformed_json_counts_as_missing_not_silently_skipped(
 
     dims = {v["dimension"] for v in report.violations}
     assert "vlm_judge_missing_rate" in dims
+
+
+# ---------------------------------------------------------------------------
+# Wave 4 W4-1 — production deploy gate (placeholder baseline rejection)
+# ---------------------------------------------------------------------------
+
+
+def _write_thresholds_file(path: Path, provenance: dict) -> Path:
+    """Write a minimal but schema-valid thresholds JSON with caller-controlled
+    provenance. Used by the W4-1 fail-closed tests."""
+    payload = {
+        "schema_version": 1,
+        "thresholds": {
+            "comfyui_failure_rate_max": 0.05,
+            "vlm_disagreement_rate_max": 0.10,
+            "vlm_judge_missing_rate_max": 0.10,
+            "delivery_gate_rejection_rate_multiplier_max": 1.05,
+            "pre_render_gate_blocker_multiplier_max": 1.10,
+        },
+        "baseline": {
+            "delivery_gate_rejection_rate": 0.10,
+            "pre_render_gate_blocker_count": 5,
+        },
+        "baseline_provenance": provenance,
+        "minimum_sample_size": 30,
+        "default_window_hours": 48,
+    }
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return path
+
+
+def test_w41_validate_baseline_provenance_rejects_manual_seed_in_prod(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Production mode (SLO_TEST_MODE unset): a thresholds file whose
+    provenance is `computed_by='manual_seed', sample_size=0` must raise
+    ValueError on load. This is the release-blocker fail-closed semantics —
+    deploy must refuse to come up on a placeholder baseline."""
+    monkeypatch.delenv("SLO_TEST_MODE", raising=False)
+    p = _write_thresholds_file(
+        tmp_path / "placeholder.json",
+        {
+            "measured_at": datetime.now(timezone.utc).isoformat(),
+            "window_hours": 24,
+            "sample_size": 0,
+            "computed_by": "manual_seed",
+            "computed_at_main_sha": "abc1234",
+        },
+    )
+    with pytest.raises(ValueError, match=r"placeholder.*manual_seed"):
+        load_default_thresholds(p)
+
+
+def test_w41_validate_baseline_provenance_warns_in_test_mode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """SLO_TEST_MODE=1: same placeholder provenance must NOT raise — it
+    must return the dict so downstream `baseline_unmeasured` violation can
+    still fire (visibility in test runs)."""
+    monkeypatch.setenv("SLO_TEST_MODE", "1")
+    p = _write_thresholds_file(
+        tmp_path / "placeholder.json",
+        {
+            "measured_at": datetime.now(timezone.utc).isoformat(),
+            "window_hours": 24,
+            "sample_size": 0,
+            "computed_by": "manual_seed",
+            "computed_at_main_sha": "abc1234",
+        },
+    )
+    with caplog.at_level("WARNING", logger="backend.services.promotion_slo_monitor"):
+        result = load_default_thresholds(p)
+    # Provenance preserved in result so evaluate_window can surface it.
+    assert result["baseline_provenance"]["computed_by"] == "manual_seed"
+    # Warning recorded for operator visibility.
+    assert any("placeholder" in rec.getMessage() for rec in caplog.records), (
+        f"expected placeholder warning, got {caplog.text!r}"
+    )
+
+
+def test_w41_validate_baseline_provenance_rejects_seed_label_in_prod(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The placeholder set covers more than `manual_seed` — `seed` and
+    `placeholder` labels are equally release-blockers."""
+    monkeypatch.delenv("SLO_TEST_MODE", raising=False)
+    for label in ("seed", "placeholder"):
+        p = _write_thresholds_file(
+            tmp_path / f"{label}.json",
+            {
+                "measured_at": datetime.now(timezone.utc).isoformat(),
+                "window_hours": 24,
+                "sample_size": 0,
+                "computed_by": label,
+                "computed_at_main_sha": "abc1234",
+            },
+        )
+        with pytest.raises(ValueError, match=r"placeholder"):
+            load_default_thresholds(p)
+
+
+def test_w41_validate_provenance_accepts_manual_seed_with_real_sample_size(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Boundary: `computed_by='manual_seed'` is benign once sample_size >= 1.
+    Threshold is `sample_size < 1` so a measured-but-manually-labeled
+    baseline still loads. This guards against false-positive rejection of
+    edge cases where an operator manually copied a calibration result."""
+    monkeypatch.delenv("SLO_TEST_MODE", raising=False)
+    p = _write_thresholds_file(
+        tmp_path / "manual_but_real.json",
+        {
+            "measured_at": datetime.now(timezone.utc).isoformat(),
+            "window_hours": 24,
+            "sample_size": 250,  # real measurement
+            "computed_by": "manual_seed",
+            "computed_at_main_sha": "abc1234",
+        },
+    )
+    config = load_default_thresholds(p)
+    assert config["baseline_provenance"]["sample_size"] == 250
+
+
+def test_w41_evaluate_window_emits_baseline_unmeasured_violation_for_placeholder(
+    temp_db: Path,
+) -> None:
+    """End-to-end W4-1 (b): placeholder provenance in loaded thresholds →
+    `evaluate_window` emits `baseline_unmeasured` violation in the report
+    even in test mode (where (a) only warned). Operators MUST see this
+    signal regardless of env."""
+    with db.connect() as conn:
+        # Push sample size above min_sample so we reach the violation collection
+        # path (paused / insufficient_data short-circuits skip this).
+        for _ in range(40):
+            _insert_simulation_job(conn, status="done")
+        conn.commit()
+        # Default thresholds file has placeholder provenance (manual_seed).
+        # No `thresholds` override → real file load path.
+        report = evaluate_window(window_hours=48, conn=conn)
+
+    dims = {v["dimension"] for v in report.violations}
+    assert "baseline_unmeasured" in dims, (
+        f"expected baseline_unmeasured violation, got {report.violations!r}"
+    )
+    bu = next(v for v in report.violations if v["dimension"] == "baseline_unmeasured")
+    assert bu["context"]["computed_by"] == "manual_seed"
+    assert bu["context"]["sample_size"] == 0
+    assert "calibrate_slo_baseline" in bu["context"]["hint"]
+    assert report.within_slo is False
+    assert report.recommendation == RECOMMENDATION_ROLLBACK
+
+
+def test_w41_evaluate_window_no_baseline_unmeasured_with_calibrated_provenance(
+    temp_db: Path,
+) -> None:
+    """Counterpoint: when provenance is `calibrate_cli` and sample_size > 0,
+    `baseline_unmeasured` must NOT fire. Healthy traffic + calibrated
+    baseline → continue."""
+    with db.connect() as conn:
+        for _ in range(40):
+            _insert_simulation_job(conn, status="done")
+        conn.commit()
+        report = evaluate_window(
+            window_hours=48,
+            conn=conn,
+            thresholds=_measured_thresholds_override(),
+        )
+
+    dims = {v["dimension"] for v in report.violations}
+    assert "baseline_unmeasured" not in dims, (
+        f"calibrated provenance must not fire baseline_unmeasured, got {report.violations!r}"
+    )
+    assert report.within_slo is True
+    assert report.recommendation == "continue"
+
+
+def test_w41_evaluate_window_emits_baseline_unmeasured_for_empty_provenance(
+    temp_db: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """If a thresholds file lacks a `baseline_provenance` block entirely,
+    `load_default_thresholds` returns provenance={} in test mode. The
+    `baseline_unmeasured` violation must still fire (empty provenance is
+    just as unsafe as placeholder provenance)."""
+    monkeypatch.setenv("SLO_TEST_MODE", "1")
+    # Build a thresholds file with no baseline_provenance block at all.
+    path = tmp_path / "no_prov.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "thresholds": {
+                    "comfyui_failure_rate_max": 0.05,
+                    "vlm_disagreement_rate_max": 0.10,
+                    "vlm_judge_missing_rate_max": 0.10,
+                    "delivery_gate_rejection_rate_multiplier_max": 1.05,
+                    "pre_render_gate_blocker_multiplier_max": 1.10,
+                },
+                "baseline": {
+                    "delivery_gate_rejection_rate": 0.10,
+                    "pre_render_gate_blocker_count": 5,
+                },
+                "minimum_sample_size": 30,
+                "default_window_hours": 48,
+            }
+        ),
+        encoding="utf-8",
+    )
+    config = load_default_thresholds(path)
+    assert config["baseline_provenance"] == {}
+
+    with db.connect() as conn:
+        for _ in range(40):
+            _insert_simulation_job(conn, status="done")
+        conn.commit()
+        report = evaluate_window(window_hours=48, conn=conn, thresholds=config)
+
+    dims = {v["dimension"] for v in report.violations}
+    assert "baseline_unmeasured" in dims
+
+
+# ---------------------------------------------------------------------------
+# Wave 4 W4-2 — monitoring_paused stop-loss (sidecar state file)
+# ---------------------------------------------------------------------------
+
+
+def test_w42_paused_state_first_pause_writes_paused_since(
+    temp_db: Path,
+    tmp_path: Path,
+) -> None:
+    """First time a promoted state hits small-sample, the sidecar must be
+    written with paused_since=now and a non-stale recommendation."""
+    sidecar = tmp_path / "paused_state.json"
+
+    with db.connect() as conn:
+        for _ in range(5):  # below min_sample=30
+            _insert_simulation_job(conn, status="done")
+        conn.commit()
+
+        report = evaluate_window(
+            window_hours=48,
+            conn=conn,
+            promotion_state="p25",
+            paused_state_path=sidecar,
+        )
+
+    assert report.recommendation == RECOMMENDATION_MONITORING_PAUSED
+    assert report.within_slo is None
+    assert sidecar.exists(), "first pause must write sidecar"
+    payload = json.loads(sidecar.read_text(encoding="utf-8"))
+    assert payload["promotion_state_at_pause"] == "p25"
+    assert payload["last_sample_size"] == report.sample_size
+    # paused_since is ISO8601 with timezone — parseable
+    parsed = datetime.fromisoformat(payload["paused_since"])
+    assert parsed.tzinfo is not None
+
+
+def test_w42_paused_state_stale_exceeds_7d_emits_violation_and_rollback(
+    temp_db: Path,
+    tmp_path: Path,
+) -> None:
+    """Sidecar with paused_since older than PAUSED_STALE_DAYS days → next
+    eval emits `monitoring_paused_stale` violation, escalates recommendation
+    to `rollback`, within_slo=False. This is the stop-loss release gate."""
+    sidecar = tmp_path / "paused_state.json"
+    eight_days_ago = (
+        datetime.now(timezone.utc) - timedelta(days=PAUSED_STALE_DAYS + 1)
+    ).isoformat()
+    sidecar.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "paused_since": eight_days_ago,
+                "promotion_state_at_pause": "p10",
+                "last_sample_size": 7,
+                "minimum_sample_size": 30,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with db.connect() as conn:
+        for _ in range(5):  # still small sample
+            _insert_simulation_job(conn, status="done")
+        conn.commit()
+
+        report = evaluate_window(
+            window_hours=48,
+            conn=conn,
+            promotion_state="p10",
+            paused_state_path=sidecar,
+        )
+
+    assert report.recommendation == RECOMMENDATION_ROLLBACK
+    assert report.within_slo is False
+    dims = {v["dimension"] for v in report.violations}
+    assert "monitoring_paused_stale" in dims
+    mps = next(
+        v for v in report.violations if v["dimension"] == "monitoring_paused_stale"
+    )
+    assert mps["threshold_days"] == PAUSED_STALE_DAYS
+    assert mps["actual_days"] > PAUSED_STALE_DAYS
+    assert mps["context"]["promotion_state"] == "p10"
+    assert mps["context"]["paused_since"] == eight_days_ago
+    assert "paused_since=" in report.notes
+    assert "paused_duration_days=" in report.notes
+
+
+def test_w42_paused_state_within_7d_stays_paused_no_violation(
+    temp_db: Path,
+    tmp_path: Path,
+) -> None:
+    """Sidecar with paused_since 3 days ago → stop-loss window not yet
+    reached → still monitoring_paused, no stale violation, within_slo=None."""
+    sidecar = tmp_path / "paused_state.json"
+    three_days_ago = (datetime.now(timezone.utc) - timedelta(days=3)).isoformat()
+    sidecar.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "paused_since": three_days_ago,
+                "promotion_state_at_pause": "p25",
+                "last_sample_size": 9,
+                "minimum_sample_size": 30,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with db.connect() as conn:
+        for _ in range(6):
+            _insert_simulation_job(conn, status="done")
+        conn.commit()
+
+        report = evaluate_window(
+            window_hours=48,
+            conn=conn,
+            promotion_state="p25",
+            paused_state_path=sidecar,
+        )
+
+    assert report.recommendation == RECOMMENDATION_MONITORING_PAUSED
+    assert report.within_slo is None
+    assert report.violations == []
+    # paused_since anchor preserved, last_sample_size refreshed
+    payload = json.loads(sidecar.read_text(encoding="utf-8"))
+    assert payload["paused_since"] == three_days_ago
+    assert payload["last_sample_size"] == report.sample_size
+
+
+def test_w42_paused_state_promotion_transition_resets_paused_since(
+    temp_db: Path,
+    tmp_path: Path,
+) -> None:
+    """If the promoted state transitions (e.g. operator goes p10 → p25),
+    the stop-loss clock must reset — we only stop-loss when a single state
+    is stuck, not across legitimate progression."""
+    sidecar = tmp_path / "paused_state.json"
+    five_days_ago = (datetime.now(timezone.utc) - timedelta(days=5)).isoformat()
+    sidecar.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "paused_since": five_days_ago,
+                "promotion_state_at_pause": "p10",
+                "last_sample_size": 4,
+                "minimum_sample_size": 30,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with db.connect() as conn:
+        for _ in range(7):
+            _insert_simulation_job(conn, status="done")
+        conn.commit()
+
+        report = evaluate_window(
+            window_hours=48,
+            conn=conn,
+            promotion_state="p25",  # transitioned
+            paused_state_path=sidecar,
+        )
+
+    assert report.recommendation == RECOMMENDATION_MONITORING_PAUSED
+    assert report.within_slo is None
+    assert report.violations == []
+    payload = json.loads(sidecar.read_text(encoding="utf-8"))
+    assert payload["promotion_state_at_pause"] == "p25"
+    # new paused_since within last minute (reset to now)
+    new_since = datetime.fromisoformat(payload["paused_since"])
+    age = datetime.now(timezone.utc) - new_since
+    assert age < timedelta(minutes=1)
+    assert "paused_state_reset" in report.notes
+
+
+def test_w42_paused_state_cleared_when_sample_recovers(
+    temp_db: Path,
+    tmp_path: Path,
+) -> None:
+    """When sample crosses min_sample again, the sidecar must be deleted so
+    a future re-paused episode starts a fresh stop-loss clock (no leftover
+    paused_since=days-ago)."""
+    sidecar = tmp_path / "paused_state.json"
+    sidecar.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "paused_since": datetime.now(timezone.utc).isoformat(),
+                "promotion_state_at_pause": "p10",
+                "last_sample_size": 5,
+                "minimum_sample_size": 30,
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert sidecar.exists()
+
+    with db.connect() as conn:
+        # 40 done jobs → sample size >= min_sample → recovery path
+        for _ in range(40):
+            _insert_simulation_job(conn, status="done")
+        conn.commit()
+
+        report = evaluate_window(
+            window_hours=48,
+            conn=conn,
+            promotion_state="p10",
+            paused_state_path=sidecar,
+            thresholds=_measured_thresholds_override(),
+        )
+
+    assert report.sample_size >= DEFAULT_MINIMUM_SAMPLE_SIZE
+    assert report.recommendation == "continue"
+    assert not sidecar.exists(), (
+        "sidecar must be removed when sample recovers — leftover state would "
+        "carry stale paused_since into the next paused episode"
+    )
+
+
+def test_w42_paused_state_cleared_on_demotion_to_shadow(
+    temp_db: Path,
+    tmp_path: Path,
+) -> None:
+    """Sidecar exists with p10 paused state; operator demotes to shadow.
+    Next eval (small sample, non-promoted state) must clear the sidecar so
+    a future re-promotion starts fresh."""
+    sidecar = tmp_path / "paused_state.json"
+    sidecar.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "paused_since": datetime.now(timezone.utc).isoformat(),
+                "promotion_state_at_pause": "p10",
+                "last_sample_size": 3,
+                "minimum_sample_size": 30,
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert sidecar.exists()
+
+    with db.connect() as conn:
+        for _ in range(3):
+            _insert_simulation_job(conn, status="done")
+        conn.commit()
+
+        report = evaluate_window(
+            window_hours=48,
+            conn=conn,
+            promotion_state="shadow",
+            paused_state_path=sidecar,
+        )
+
+    assert report.recommendation == RECOMMENDATION_INSUFFICIENT_DATA
+    assert not sidecar.exists(), (
+        "sidecar must be cleared when state demotes off the promoted set"
+    )
+
+
+def test_w42_paused_state_corrupt_sidecar_is_repaired(
+    temp_db: Path,
+    tmp_path: Path,
+) -> None:
+    """Corrupt JSON in the sidecar must not crash the SLO loop — the
+    function repairs it with a fresh paused_since on the next eval. This
+    keeps the stop-loss circuit resilient to disk corruption / unfinished
+    writes from prior runs."""
+    sidecar = tmp_path / "paused_state.json"
+    sidecar.write_text("{not valid json", encoding="utf-8")
+
+    with db.connect() as conn:
+        for _ in range(4):
+            _insert_simulation_job(conn, status="done")
+        conn.commit()
+
+        report = evaluate_window(
+            window_hours=48,
+            conn=conn,
+            promotion_state="p50",
+            paused_state_path=sidecar,
+        )
+
+    assert report.recommendation == RECOMMENDATION_MONITORING_PAUSED
+    payload = json.loads(sidecar.read_text(encoding="utf-8"))
+    assert payload["promotion_state_at_pause"] == "p50"
+    # paused_since rewritten to a parseable timestamp
+    datetime.fromisoformat(payload["paused_since"])
