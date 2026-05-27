@@ -30,7 +30,11 @@ backend/.pytest_cache/
 .pytest_cache/
 
 # Local AI simulation artifacts
-case-workbench-ai/
+# Pattern uses /* (not /) so git can still descend and honor the negation below.
+case-workbench-ai/*
+# Exception: promotion manifest is SSoT (approval + hash bindings), tracked.
+!case-workbench-ai/promotion/
+!case-workbench-ai/promotion/**
 
 # Delivery render outputs (large JPGs); only manifests + report are tracked
 delivery/body/
