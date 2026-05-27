@@ -20,5 +20,6 @@
   },
   "minimum_sample_size": 30,
   "default_window_hours": 48,
-  "notes": "Edit thresholds + baseline to tune SLO. Baseline should be measured during shadow period and refreshed via backend.scripts.calibrate_slo_baseline. baseline_provenance is REQUIRED for load_default_thresholds (fail-closed in prod, warning in SLO_TEST_MODE). Per plan §P2.4 + Wave 3 Agent C eval-auditor C-2."
+  "paused_stale_days": 7,
+  "notes": "Edit thresholds + baseline to tune SLO. Baseline should be measured during shadow period and refreshed via backend.scripts.calibrate_slo_baseline. baseline_provenance is REQUIRED for load_default_thresholds (fail-closed in prod, warning in SLO_TEST_MODE). paused_stale_days controls Wave 4 W4-2 stop-loss window in days (default 7); operator may tune without redeploy. Per plan §P2.4 + Wave 3 Agent C eval-auditor C-2 + Wave 5 followup #1 eval-M1."
 }

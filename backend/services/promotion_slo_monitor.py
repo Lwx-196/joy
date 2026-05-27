@@ -328,10 +328,38 @@ def _validate_baseline_provenance(provenance: Any) -> dict[str, Any]:
     return dict(provenance)
 
 
+def _validate_paused_stale_days(raw_value: Any) -> int:
+    """Wave 5 followup #1 (eval-M1): validate the optional `paused_stale_days`
+    JSON field. Must be positive int (not bool — Python ``True``/``False`` are
+    technically ``int`` subclasses but operator intent is nonsensical here).
+
+    Production (`SLO_TEST_MODE` unset/0): invalid → ValueError.
+    Test (`SLO_TEST_MODE=1`): invalid → warn + fallback to module default
+    :data:`PAUSED_STALE_DAYS` so legacy fixtures / placeholder JSONs that
+    omit or mis-type the field still load.
+
+    Absent key returns the module default (back-compat with pre-Wave5 JSONs
+    that don't carry this field at all).
+    """
+    if raw_value is None:
+        return PAUSED_STALE_DAYS
+    if isinstance(raw_value, bool) or not isinstance(raw_value, int) or raw_value <= 0:
+        msg = (
+            f"invalid paused_stale_days: must be positive int, "
+            f"got {raw_value!r} ({type(raw_value).__name__})"
+        )
+        if _is_test_mode():
+            _logger.warning("%s; falling back to default %d", msg, PAUSED_STALE_DAYS)
+            return PAUSED_STALE_DAYS
+        raise ValueError(msg)
+    return int(raw_value)
+
+
 def load_default_thresholds(path: Path | None = None) -> dict[str, Any]:
     """Load thresholds JSON. Returns the full structure (thresholds + baseline +
-    baseline_provenance + sample size + window). Raises ValueError if file is
-    malformed or `baseline_provenance` is missing/invalid in production mode.
+    baseline_provenance + sample size + window + paused_stale_days). Raises
+    ValueError if file is malformed or `baseline_provenance` is missing/invalid
+    in production mode.
     """
     target = Path(path) if path else _DEFAULT_THRESHOLDS_FILE
     if not target.exists():
@@ -342,6 +370,7 @@ def load_default_thresholds(path: Path | None = None) -> dict[str, Any]:
             "baseline_provenance": {},
             "minimum_sample_size": DEFAULT_MINIMUM_SAMPLE_SIZE,
             "default_window_hours": DEFAULT_WINDOW_HOURS,
+            "paused_stale_days": PAUSED_STALE_DAYS,
         }
     try:
         raw = json.loads(target.read_text(encoding="utf-8"))
@@ -361,6 +390,9 @@ def load_default_thresholds(path: Path | None = None) -> dict[str, Any]:
         ),
         "default_window_hours": int(
             raw.get("default_window_hours", DEFAULT_WINDOW_HOURS)
+        ),
+        "paused_stale_days": _validate_paused_stale_days(
+            raw.get("paused_stale_days")
         ),
     }
 
@@ -411,6 +443,7 @@ def _code_default_thresholds() -> dict[str, Any]:
         "baseline_provenance": {},
         "minimum_sample_size": DEFAULT_MINIMUM_SAMPLE_SIZE,
         "default_window_hours": DEFAULT_WINDOW_HOURS,
+        "paused_stale_days": PAUSED_STALE_DAYS,
     }
 
 
@@ -466,6 +499,18 @@ def _merge_thresholds(
     if "thresholds" in user_thresholds or "baseline" in user_thresholds:
         # Full structured override
         overlay_provenance = user_thresholds.get("baseline_provenance")
+        # Wave 5 followup #1: `paused_stale_days` propagation. If the caller
+        # supplied it explicitly, validate (same rules as JSON load) and use
+        # the override; otherwise inherit base. Flat overrides (else branch
+        # below) just `**base` so they inherit automatically.
+        if "paused_stale_days" in user_thresholds:
+            paused_stale_days = _validate_paused_stale_days(
+                user_thresholds.get("paused_stale_days")
+            )
+        else:
+            paused_stale_days = int(
+                base.get("paused_stale_days", PAUSED_STALE_DAYS)
+            )
         return {
             "thresholds": {
                 **base["thresholds"],
@@ -486,8 +531,11 @@ def _merge_thresholds(
             "default_window_hours": int(
                 user_thresholds.get("default_window_hours", base["default_window_hours"])
             ),
+            "paused_stale_days": paused_stale_days,
         }
-    # Flat override → assumed thresholds-only
+    # Flat override → assumed thresholds-only. ``**base`` propagates
+    # ``paused_stale_days`` automatically (and ``minimum_sample_size`` /
+    # ``default_window_hours`` likewise).
     return {
         **base,
         "thresholds": {**base["thresholds"], **dict(user_thresholds)},
@@ -1044,6 +1092,13 @@ def evaluate_window(
     bl = config["baseline"]
     provenance: dict[str, Any] = dict(config.get("baseline_provenance") or {})
     min_sample = int(config["minimum_sample_size"])
+    # Wave 5 followup #1 (eval-M1): configurable stop-loss window. Fallback to
+    # module constant when the merge result is missing the key (shouldn't
+    # happen post-Wave5, but defensive in case of cross-version thresholds
+    # injection from older callers).
+    paused_stale_days = int(
+        config.get("paused_stale_days", PAUSED_STALE_DAYS)
+    )
 
     cutoff = _cutoff_iso(window_hours)
 
@@ -1097,17 +1152,22 @@ def evaluate_window(
         "baseline_provenance": provenance,
         "minimum_sample_size": min_sample,
         "promotion_state": resolved_state,
+        # Wave 5 followup #1: surface effective stop-loss window so operators
+        # can confirm config-driven override took effect (vs module constant).
+        "paused_stale_days": paused_stale_days,
     }
 
     if sample_size < min_sample:
         # Wave 3 C-1: triage on promotion_state
         if resolved_state in _PROMOTED_STATES:
             # Wave 4 W4-2 — apply paused-state stop-loss before returning.
+            # Wave 5 followup #1 — stale_days is now configurable per JSON.
             stop_loss_violation, paused_notes = _evaluate_paused_state(
                 promotion_state=resolved_state,
                 sample_size=sample_size,
                 min_sample=min_sample,
                 paused_state_path=paused_state_path,
+                stale_days=paused_stale_days,
             )
             notes_parts = ["small_sample_in_promoted_state"]
             if paused_notes:
