@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "version": "v1.0.0",
+  "scope": "production",
+  "approver": null,
+  "approved_at": null,
+  "expires_at": null,
+  "promotion_state": "draft",
+  "bindings": {
+    "vlm_calibration_hash": "sha256:28d107245ff57aaf82e2b555535bddf6010df2f558f14e413a365563e92334fc",
+    "production_gate_hash": "sha256:4733567d73ac9c0f064db71db995332117380d0ef10107a24df4e6d45ea791a1",
+    "ab_report_hash": "sha256:95efb8be98493a2f187ea6c19365394aa60c4940a82020fc49f0d31224f5bdd3",
+    "render_quality_baseline_hash": "sha256:7b314914c8191d7c9384cf00678b2d87ba8e20f7217dae9d1f32938022090fa4"
+  },
+  "rollback_baseline": {
+    "manifest_ref": null,
+    "captured_at": null,
+    "bindings": {
+      "vlm_calibration_hash": null,
+      "production_gate_hash": null,
+      "ab_report_hash": null,
+      "render_quality_baseline_hash": null
+    }
+  },
+  "notes": "Initial draft manifest for P2 ComfyUI promotion gate. Populate `bindings` via `python -m backend.scripts.compute_manifest_hashes --write`, then transition `promotion_state` to `pending_review` -> `approved` (with `approver` + `approved_at` filled) before SimulationDeliveryGate (P2.2) consumes it.\n\nValid `scope`: production | staging | canary.\nValid `promotion_state`: draft | pending_review | approved | rejected | rolled_back.\n\n`rollback_baseline.bindings` captures the previously-approved hash set so a rejected promotion can revert atomically; `rollback_baseline.manifest_ref` should be a git SHA or absolute path pointing to the prior manifest snapshot."
+}
