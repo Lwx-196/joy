@@ -415,3 +415,38 @@ def test_window_hours_must_be_positive(temp_db: Path) -> None:
             evaluate_window(window_hours=0, conn=conn)
         with pytest.raises(ValueError):
             evaluate_window(window_hours=-5, conn=conn)
+
+
+def test_mixed_timestamp_formats_all_counted_in_window(temp_db: Path) -> None:
+    """H-4 hardening (nyquist M-2): SLO cutoff comparison must tolerate
+    multiple timestamp formats across writers. Pre-hardening shipped
+    lexicographic TEXT compare which mishandles space-separated
+    SQLite CURRENT_TIMESTAMP rows mixed with `T+00:00` ISO writers.
+
+    Post-fix uses julianday() on both sides so all of these forms work:
+      - '2026-05-27T14:00:00.123456+00:00' (datetime.isoformat tz-aware)
+      - '2026-05-27T14:00:00' (naive isoformat)
+      - '2026-05-27 14:00:00' (SQLite CURRENT_TIMESTAMP / space-sep)
+    """
+    base = datetime.now(timezone.utc) - timedelta(hours=1)  # inside 48h window
+    aware = base.isoformat()                                # 2026-..T..+00:00
+    naive = base.replace(tzinfo=None).isoformat()           # 2026-..T.. (no tz)
+    spaced = base.strftime("%Y-%m-%d %H:%M:%S")             # 2026-.. (space sep)
+
+    with db.connect() as conn:
+        for ts in (aware, naive, spaced):
+            _insert_simulation_job(conn, status="done", when=ts)
+        # Pad so we cross min_sample.
+        for _ in range(30):
+            _insert_simulation_job(conn, status="done")
+        conn.commit()
+        report = evaluate_window(window_hours=48, conn=conn)
+
+    # All 3 explicit + 30 padding = 33 jobs. Pre-hardening lexicographic
+    # compare would drop the spaced + possibly naive rows; terminal_total
+    # would be < 33. Post-hardening julianday() compare counts all.
+    cfe = report.evidence["comfyui_failure"]
+    assert cfe["terminal_total"] == 33, (
+        f"Expected 33 terminal jobs (3 mixed-format + 30 pad); "
+        f"got {cfe['terminal_total']} — H-4 julianday() regression"
+    )

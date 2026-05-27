@@ -168,7 +168,7 @@ def _compute_comfyui_failure_rate(
         """
         SELECT status, COUNT(*) AS n
         FROM simulation_jobs
-        WHERE created_at >= ?
+        WHERE julianday(created_at) >= julianday(?)
         GROUP BY status
         """,
         (cutoff_iso,),
@@ -202,7 +202,7 @@ def _compute_vlm_disagreement_rate(
         """
         SELECT vlm_judge_result_json
         FROM candidate_lineage
-        WHERE created_at >= ?
+        WHERE julianday(created_at) >= julianday(?)
           AND vlm_judge_result_json IS NOT NULL
         """,
         (cutoff_iso,),
@@ -249,7 +249,7 @@ def _compute_delivery_gate_rejection_rate(
         """
         SELECT endpoint, outcome
         FROM ops_audit_log
-        WHERE created_at >= ?
+        WHERE julianday(created_at) >= julianday(?)
         """,
         (cutoff_iso,),
     ).fetchall()
@@ -283,7 +283,7 @@ def _compute_pre_render_gate_blocker_count(
         """
         SELECT audit_json
         FROM simulation_jobs
-        WHERE created_at >= ?
+        WHERE julianday(created_at) >= julianday(?)
           AND status = 'failed'
         """,
         (cutoff_iso,),
