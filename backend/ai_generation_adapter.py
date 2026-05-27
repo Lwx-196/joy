@@ -15,6 +15,7 @@ from typing import Any
 from urllib import parse, request
 
 from . import stress
+from .services.promotion_manifest_loader import should_promote
 
 SIMULATION_ROOT = stress.simulation_root(
     Path(__file__).resolve().parent.parent / "case-workbench-ai" / "simulation_jobs"
@@ -2657,6 +2658,31 @@ def run_direct_clinical_enhancement(
     return image_path
 
 
+def _build_comfyui_policy(
+    *,
+    case_id: int | None,
+    focus_regions: list[dict[str, Any]] | None,
+) -> dict[str, Any]:
+    """Plan §P2.3 runtime guard — turn promotion manifest into per-case policy.
+
+    When `case_id` is None or the manifest says shadow / rolled_back / missing,
+    behavior matches the legacy hardcoded `candidate_only=True` defaults so
+    deployments without a manifest are unchanged (BC).
+    """
+    promoted = bool(case_id is not None and should_promote(int(case_id)))
+    return {
+        "artifact_mode": "ai_after_simulation",
+        "candidate_provider": COMFYUI_PROVIDER,
+        "candidate_only": not promoted,
+        "t90_gate_scope": "local_region_repair_retest",
+        "focus_scope": "region-locked-light" if focus_regions else "whole-image-light",
+        "watermark_required": True,
+        "mix_with_real_case": promoted,
+        "can_publish_default": promoted,
+        "promote_to_default": promoted,
+    }
+
+
 def run_comfyui_local_after_simulation(
     *,
     job_id: int,
@@ -2668,6 +2694,7 @@ def run_comfyui_local_after_simulation(
     note: str | None = None,
     style_reference_image_paths: list[Path] | None = None,
     brand: str = "fumei",
+    case_id: int | None = None,
 ) -> dict[str, Any]:
     profile = _resolve_comfyui_workflow_profile(model_name)
     workflow_name = str(profile["workflow_name"])
@@ -2759,17 +2786,10 @@ def run_comfyui_local_after_simulation(
             "production_ready": bool((run_result.get("preflight") or {}).get("production_ready")),
             "readiness_reasons": (run_result.get("preflight") or {}).get("readiness_reasons") or [],
         },
-        "policy": {
-            "artifact_mode": "ai_after_simulation",
-            "candidate_provider": COMFYUI_PROVIDER,
-            "candidate_only": True,
-            "t90_gate_scope": "local_region_repair_retest",
-            "focus_scope": "region-locked-light" if focus_regions else "whole-image-light",
-            "watermark_required": True,
-            "mix_with_real_case": False,
-            "can_publish_default": False,
-            "promote_to_default": False,
-        },
+        "policy": _build_comfyui_policy(
+            case_id=case_id,
+            focus_regions=focus_regions,
+        ),
     }
     (output_dir / "audit.json").write_text(json.dumps(audit, ensure_ascii=False, indent=2), encoding="utf-8")
     return {
@@ -2972,6 +2992,7 @@ def run_after_simulation(
     note: str | None = None,
     style_reference_image_paths: list[Path] | None = None,
     brand: str = "fumei",
+    case_id: int | None = None,
 ) -> dict[str, Any]:
     if provider == COMFYUI_PROVIDER:
         return run_comfyui_local_after_simulation(
@@ -2984,6 +3005,7 @@ def run_after_simulation(
             note=note,
             style_reference_image_paths=style_reference_image_paths,
             brand=brand,
+            case_id=case_id,
         )
     if provider == DEFAULT_PROVIDER:
         return run_ps_model_router_after_simulation(
