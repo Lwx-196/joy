@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import { CATEGORY_LABEL, TIER_LABEL, type CaseSummary } from "../api";
@@ -11,6 +11,7 @@ import {
   useTriggerScan,
 } from "../hooks/queries";
 import { Bar, CategoryPill, Ico, ReviewPill, TierPill } from "../components/atoms";
+import { WorkflowWizard } from "../components/WorkflowWizard";
 import { useBrand } from "../lib/brand-context";
 import { useBatchJobToastStore } from "../lib/batch-job-toast";
 import { deriveLanes, isHeld, isToday, readLastVisitedCase, type LaneDef } from "../lib/work-queue";
@@ -41,6 +42,7 @@ const TIER_COLORS: Record<string, string> = {
 
 export default function Dashboard() {
   const { t } = useTranslation("dashboard");
+  const [wizardOpen, setWizardOpen] = useState(false);
   const statsQ = useStats();
   const latestQ = useScanLatest();
   const recentQ = useCases({ limit: 8 });
@@ -171,6 +173,14 @@ export default function Dashboard() {
           </div>
         </div>
         <div style={{ display: "flex", gap: 8 }}>
+          <button
+            className="btn primary"
+            onClick={() => setWizardOpen((v) => !v)}
+            style={{ background: wizardOpen ? "var(--cyan-600, #0891b2)" : undefined }}
+          >
+            <Ico name="split" size={12} />
+            {t("wizard.trigger")}
+          </button>
           <button className="btn" onClick={() => handleScan("incremental")} disabled={scanning}>
             <Ico name="refresh" size={12} />
             {scanning ? t("scan.scanning") : t("scan.incremental")}
@@ -193,6 +203,11 @@ export default function Dashboard() {
           alignContent: "start",
         }}
       >
+        {wizardOpen && (
+          <div style={{ gridColumn: "1 / span 2" }}>
+            <WorkflowWizard onClose={() => setWizardOpen(false)} />
+          </div>
+        )}
         {/* Work queue v2 — 5 lanes for "what's next" */}
         <div className="card" style={{ gridColumn: "1 / span 2" }}>
           <div className="card-h">

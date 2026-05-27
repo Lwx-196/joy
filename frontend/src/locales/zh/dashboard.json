@@ -76,5 +76,32 @@
     "sourceManual": "auto + 手动",
     "sourceAuto": "自动判读"
   },
-  "loading": "加载中…"
+  "loading": "加载中…",
+  "wizard": {
+    "trigger": "开始工作",
+    "close": "关闭",
+    "steps": {
+      "pick": "选 case 出图",
+      "wait": "等待结果",
+      "review": "审核质量"
+    },
+    "pick": {
+      "title": "批量出图",
+      "desc": "共 {{count}} 个 case 可出图（品牌：{{brand}}）。包含有警告但可强制出图的 case。",
+      "render": "出图 ({{count}})",
+      "submitting": "提交中…"
+    },
+    "wait": {
+      "title": "渲染进行中",
+      "desc": "任务已入队，进度见右下角。完成后这里会变绿，点「去审核」即可。批次",
+      "titleDone": "渲染完成",
+      "descDone": "全部任务结束。点「去审核」查看结果。批次",
+      "goReview": "去审核"
+    },
+    "review": {
+      "title": "出图完成，去审核",
+      "desc": "在质量审核页查看结果，标记通过或重出。",
+      "go": "去审核"
+    }
+  }
 }
