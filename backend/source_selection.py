@@ -35,6 +35,257 @@ def _float_or_zero(value: Any) -> float:
     return parsed if parsed is not None else 0.0
 
 
+def _first_numeric_signal(item: dict[str, Any] | None, keys: tuple[str, ...]) -> float | None:
+    if not isinstance(item, dict):
+        return None
+    for key in keys:
+        value = float_value(item.get(key))
+        if value is not None:
+            return value
+    for container_key in ("identity", "quality", "metrics"):
+        nested = item.get(container_key)
+        if isinstance(nested, dict):
+            for key in keys:
+                value = float_value(nested.get(key))
+                if value is not None:
+                    return value
+    return None
+
+
+def _numeric_vector(item: dict[str, Any] | None) -> list[float] | None:
+    if not isinstance(item, dict):
+        return None
+    for key in ("face_embedding", "arcface_embedding", "identity_embedding", "embedding"):
+        raw = item.get(key)
+        if not isinstance(raw, list) or not raw:
+            continue
+        values: list[float] = []
+        for value in raw:
+            parsed = float_value(value)
+            if parsed is None:
+                values = []
+                break
+            values.append(parsed)
+        if values:
+            return values
+    return None
+
+
+def _cosine_similarity(left: list[float] | None, right: list[float] | None) -> float | None:
+    if not left or not right or len(left) != len(right):
+        return None
+    dot = sum(a * b for a, b in zip(left, right))
+    left_norm = sum(a * a for a in left) ** 0.5
+    right_norm = sum(b * b for b in right) ** 0.5
+    if left_norm <= 0 or right_norm <= 0:
+        return None
+    return dot / (left_norm * right_norm)
+
+
+def identity_embedding_component(before: dict[str, Any] | None, after: dict[str, Any] | None) -> dict[str, Any]:
+    """Same-person primary judgment from deterministic face embedding evidence."""
+    keys = (
+        "identity_similarity",
+        "same_person_similarity",
+        "person_similarity",
+        "arcface_similarity",
+        "face_embedding_similarity",
+        "embedding_similarity",
+    )
+    similarity = _first_numeric_signal(before, keys)
+    if similarity is None:
+        similarity = _first_numeric_signal(after, keys)
+    method = "embedding_similarity"
+    if similarity is None:
+        similarity = _cosine_similarity(_numeric_vector(before), _numeric_vector(after))
+        method = "embedding_cosine" if similarity is not None else "embedding_missing"
+    if similarity is None:
+        return {
+            "method": method,
+            "status": "not_verified",
+            "score": 0,
+            "message": "缺少同一人 embedding 证据，需人工兜底",
+        }
+    similarity = round(float(similarity), 4)
+    if similarity >= 0.72:
+        return {
+            "method": method,
+            "status": "ok",
+            "score": 8,
+            "similarity": similarity,
+            "message": "同一人 embedding 相似度通过",
+        }
+    if similarity >= 0.58:
+        return {
+            "method": method,
+            "status": "review",
+            "score": -6,
+            "similarity": similarity,
+            "code": "identity_embedding_low_confidence",
+            "message": "同一人 embedding 相似度偏低，需人工复核",
+        }
+    return {
+        "method": method,
+        "status": "block",
+        "score": -32,
+        "similarity": similarity,
+        "code": "identity_embedding_mismatch",
+        "message": "同一人 embedding 相似度过低，阻断正式配对",
+    }
+
+
+def exposure_component(before: dict[str, Any] | None, after: dict[str, Any] | None) -> dict[str, Any]:
+    keys = ("brightness", "mean_luma", "luma", "exposure_score")
+    before_value = _first_numeric_signal(before, keys)
+    after_value = _first_numeric_signal(after, keys)
+    labels = {
+        str((before or {}).get("exposure") or "").lower(),
+        str((after or {}).get("exposure") or "").lower(),
+    }
+    if labels & {"overexposed", "underexposed", "too_dark", "too_bright"}:
+        return {
+            "method": "cv_exposure_label",
+            "status": "review",
+            "score": -8,
+            "code": "exposure_label_review",
+            "message": "CV 曝光标签提示需复核",
+        }
+    if before_value is None or after_value is None:
+        return {"method": "cv_exposure_metrics", "status": "not_verified", "score": 0, "message": "缺少曝光指标"}
+    delta = round(abs(float(before_value) - float(after_value)), 4)
+    if delta >= 0.55:
+        return {
+            "method": "cv_exposure_metrics",
+            "status": "block",
+            "score": -18,
+            "delta": delta,
+            "code": "exposure_delta_large",
+            "message": "术前术后曝光差过大，阻断正式配对",
+        }
+    if delta >= 0.28:
+        return {
+            "method": "cv_exposure_metrics",
+            "status": "review",
+            "score": -8,
+            "delta": delta,
+            "code": "exposure_delta_review",
+            "message": "术前术后曝光差较大，需人工复核",
+        }
+    return {
+        "method": "cv_exposure_metrics",
+        "status": "ok",
+        "score": 4,
+        "delta": delta,
+        "message": "术前术后曝光接近",
+    }
+
+
+def crop_component(view: str, before: dict[str, Any] | None, after: dict[str, Any] | None) -> dict[str, Any]:
+    touched: list[str] = []
+    observed = False
+    for role, item in (("before", before or {}), ("after", after or {})):
+        if not isinstance(item, dict):
+            continue
+        if "crop_touches_frame" in item or "face_crop_touches_frame" in item:
+            observed = True
+        if item.get("crop_touches_frame") or item.get("face_crop_touches_frame"):
+            touched.append(role)
+        margin = _first_numeric_signal(item, ("crop_margin", "face_crop_margin"))
+        if margin is not None:
+            observed = True
+        if margin is not None and margin < 0.025:
+            touched.append(role)
+    if not observed:
+        return {"method": "cv_crop_metrics", "status": "not_verified", "score": 0, "message": "缺少裁切贴边指标"}
+    if not touched:
+        return {"method": "cv_crop_metrics", "status": "ok", "score": 5, "message": "主体裁切未触边"}
+    status = "block" if view == "front" else "review"
+    return {
+        "method": "cv_crop_metrics",
+        "status": status,
+        "score": -24 if status == "block" else -8,
+        "roles": sorted(set(touched)),
+        "code": "crop_touches_frame",
+        "message": "正式正面图存在面部/主体裁切贴边" if status == "block" else "侧向图裁切贴边需复核",
+    }
+
+
+def _vlm_classification_record(role: str, item: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(item, dict):
+        return None
+    raw = item.get("vlm_classification") if isinstance(item.get("vlm_classification"), dict) else {}
+    source = (
+        raw.get("source")
+        or item.get("classification_source")
+        or item.get("source")
+        or item.get("observation_source")
+    )
+    if str(source or "") != "vlm_classifier":
+        return None
+    confidence = float_value(raw.get("confidence") if raw else item.get("classification_confidence"))
+    return {
+        "role": role,
+        "source": "vlm_classifier",
+        "phase": raw.get("phase") or item.get("phase"),
+        "view": raw.get("view") or item.get("view"),
+        "confidence": confidence,
+    }
+
+
+def vlm_supplement_metadata(before: dict[str, Any] | None, after: dict[str, Any] | None) -> dict[str, Any]:
+    records = [
+        item
+        for item in (
+            _vlm_classification_record("before", before),
+            _vlm_classification_record("after", after),
+        )
+        if item is not None
+    ]
+    metadata: dict[str, Any] = {
+        "role": "supplement_only",
+        "can_override_primary": False,
+        "promotion_requires_human": True,
+        "classification_available": bool(records),
+        "classification_source": "vlm_classifier" if records else None,
+    }
+    if records:
+        metadata["classifications"] = records
+    return metadata
+
+
+def pair_primary_judgment(view: str, before: dict[str, Any] | None, after: dict[str, Any] | None) -> dict[str, Any]:
+    identity = identity_embedding_component(before, after)
+    exposure = exposure_component(before, after)
+    crop = crop_component(view, before, after)
+    components = {"identity": identity, "exposure": exposure, "crop": crop}
+    blocking = [
+        str(component.get("code") or key)
+        for key, component in components.items()
+        if component.get("status") == "block"
+    ]
+    review = [
+        str(component.get("code") or key)
+        for key, component in components.items()
+        if component.get("status") in {"review", "not_verified"}
+    ]
+    return {
+        "policy": "algorithm_primary_vlm_supplement_human_fallback_v1",
+        "identity": identity,
+        "exposure": exposure,
+        "crop": crop,
+        "vlm": vlm_supplement_metadata(before, after),
+        "human": {
+            "required": bool(blocking or review),
+            "reasons": [*blocking, *review],
+        },
+        "render_gate": {
+            "blocks_render": bool(blocking),
+            "reason": blocking[0] if blocking else ("human_review_required" if review else "ready"),
+            "review_reasons": review,
+        },
+    }
+
+
 def pose_delta(view: str, before: dict[str, Any] | None, after: dict[str, Any] | None) -> dict[str, Any] | None:
     if not before or not after:
         return None
@@ -219,7 +470,12 @@ def selection_controls_from_meta(meta: dict[str, Any] | None) -> dict[str, Any]:
         if pair:
             normalized["selected_pair"] = pair
         accepted_warnings.append(normalized)
-    return {"locked_slots": locked_slots, "accepted_warnings": accepted_warnings}
+    ticket_decisions = raw.get("ticket_decisions") if isinstance(raw.get("ticket_decisions"), list) else []
+    return {
+        "locked_slots": locked_slots,
+        "accepted_warnings": accepted_warnings,
+        "ticket_decisions": ticket_decisions,
+    }
 
 
 def candidate_matches_lock(candidate: dict[str, Any], spec: dict[str, Any] | None) -> bool:
@@ -552,6 +808,43 @@ def render_feedback_from_payload(source_job_id: int, payload: dict[str, Any]) ->
                 penalty=18,
                 code="selected_pair_sharpness_mismatch",
                 reason="上一轮正式出图该配对清晰度差异过大",
+            )
+
+    for raw_text in payload.get("blocking_issues") or []:
+        text = str(raw_text or "")
+        if not text.strip():
+            continue
+        slot = _slot_from_text(text)
+        if slot not in applied_by_slot:
+            continue
+        pair = applied_by_slot[slot]
+        before = pair.get("before")
+        after = pair.get("after")
+        before_key = _feedback_key_for_name(render_to_source, before)
+        after_key = _feedback_key_for_name(render_to_source, after)
+        if "姿态差" in text:
+            _add_pair_penalty(
+                feedback,
+                view=slot,
+                before_name=before,
+                after_name=after,
+                before_key=before_key,
+                after_key=after_key,
+                penalty=24,
+                code="selected_pose_delta_large",
+                reason="上一轮正式出图硬阻断：该配对姿态差需重选",
+            )
+        elif "清晰度差" in text:
+            _add_pair_penalty(
+                feedback,
+                view=slot,
+                before_name=before,
+                after_name=after,
+                before_key=before_key,
+                after_key=after_key,
+                penalty=18,
+                code="selected_pair_sharpness_mismatch",
+                reason="上一轮正式出图硬阻断：该配对清晰度差异过大",
             )
 
     for row in payload.get("selection_quality") or []:
@@ -1025,6 +1318,23 @@ def slot_pair_quality(view: str, before: dict[str, Any] | None, after: dict[str,
         if isinstance(item, dict)
     ):
         warnings.append({"code": "profile_expected_review", "severity": "info", "message": "侧面/45°面检提示已降噪为轮廓复核"})
+    primary_judge = pair_primary_judgment(view, before, after)
+    metrics["primary_judge"] = primary_judge
+    for key in ("identity", "exposure", "crop"):
+        component = primary_judge.get(key)
+        if not isinstance(component, dict):
+            continue
+        score += int(component.get("score") or 0)
+        code = str(component.get("code") or "")
+        status = str(component.get("status") or "")
+        if code and status in {"block", "review"}:
+            warnings.append(
+                {
+                    "code": code,
+                    "severity": "block" if status == "block" else "review",
+                    "message": str(component.get("message") or code),
+                }
+            )
     pair_feedback = _matched_pair_feedback(view, before, after)
     if pair_feedback:
         total_penalty = min(80, sum(int(item.get("penalty") or 0) for item in pair_feedback))
