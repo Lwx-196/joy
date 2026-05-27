@@ -18,7 +18,7 @@ import json
 import re
 import sqlite3
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -1609,3 +1609,96 @@ async def render_stream(request: Request) -> StreamingResponse:
             "Connection": "keep-alive",
         },
     )
+
+
+# ---------------------------------------------------------------------------
+# P0.1 Failure observability — simulation_jobs.audit_json.failure 聚合/单 job 查询
+# ---------------------------------------------------------------------------
+
+_FAILURE_GROUP_BY_VALID = {"stage", "error_class", "workflow"}
+_FAILURE_GROUP_KEY_MAP = {
+    "stage": "failure_stage",
+    "error_class": "error_class",
+    "workflow": "workflow_name",
+}
+
+
+@router.get("/api/render/jobs/failures/recent")
+def list_recent_failures(
+    days: int = Query(default=7, ge=1, le=90),
+    group_by: str = Query(default="stage"),
+    limit: int = Query(default=200, ge=1, le=1000),
+) -> dict[str, Any]:
+    """聚合最近 N 天 failed simulation_jobs，按 stage/error_class/workflow 分组。
+
+    返回 `groups: [{key, count}]` + `total_failed`，oncall 可直接 SQL 归因失败模式。
+    """
+    if group_by not in _FAILURE_GROUP_BY_VALID:
+        raise HTTPException(
+            400,
+            f"group_by must be one of {sorted(_FAILURE_GROUP_BY_VALID)}",
+        )
+    key_field = _FAILURE_GROUP_KEY_MAP[group_by]
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    with db.connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, audit_json, created_at
+            FROM simulation_jobs
+            WHERE status = 'failed'
+              AND created_at >= ?
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (cutoff, limit),
+        ).fetchall()
+    counts: dict[str, int] = {}
+    total = 0
+    for row in rows:
+        try:
+            audit = json.loads(row["audit_json"] or "{}")
+        except (json.JSONDecodeError, TypeError):
+            audit = {}
+        failure = audit.get("failure") if isinstance(audit, dict) else None
+        if not isinstance(failure, dict):
+            key = "unknown"
+        else:
+            key = str(failure.get(key_field) or "unknown")
+        counts[key] = counts.get(key, 0) + 1
+        total += 1
+    groups = [{"key": k, "count": v} for k, v in sorted(counts.items(), key=lambda kv: -kv[1])]
+    return {
+        "days": days,
+        "group_by": group_by,
+        "total_failed": total,
+        "groups": groups,
+    }
+
+
+@router.get("/api/render/jobs/{job_id}/failure-trace")
+def get_failure_trace(job_id: int) -> dict[str, Any]:
+    """返回单 simulation_job 的结构化 failure 块 + 状态 + legacy error_message。
+
+    成功 job 也能调用（failure 为 null），便于 UI 统一查询。
+    """
+    with db.connect() as conn:
+        row = conn.execute(
+            "SELECT id, status, audit_json, error_message, created_at, updated_at "
+            "FROM simulation_jobs WHERE id = ?",
+            (job_id,),
+        ).fetchone()
+    if not row:
+        raise HTTPException(404, "simulation job not found")
+    try:
+        audit = json.loads(row["audit_json"] or "{}")
+    except (json.JSONDecodeError, TypeError):
+        audit = {}
+    failure = audit.get("failure") if isinstance(audit, dict) else None
+    return {
+        "simulation_job_id": int(row["id"]),
+        "status": row["status"],
+        "error_message": row["error_message"],
+        "failure": failure if isinstance(failure, dict) else None,
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
