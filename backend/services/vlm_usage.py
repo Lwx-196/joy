@@ -40,6 +40,7 @@ def record_vlm_usage(
     latency_ms: int = 0,
     status: str,
     error_detail: str | None = None,
+    error_json: dict[str, Any] | None = None,
     usage_raw: dict[str, Any] | None = None,
     created_at: str | None = None,
 ) -> int:
@@ -49,6 +50,11 @@ def record_vlm_usage(
     sites and is converted to USD when cost_usd is not provided.
     """
     usage_raw_json = json.dumps(usage_raw or {}, ensure_ascii=False, sort_keys=True)
+    error_json_text = (
+        json.dumps(error_json, ensure_ascii=False, sort_keys=True)
+        if error_json is not None
+        else None
+    )
     resolved_cost_usd = (
         _float_or_zero(cost_usd)
         if cost_usd is not None
@@ -59,9 +65,9 @@ def record_vlm_usage(
         INSERT INTO vlm_usage_log (
           purpose, provider, model, case_id, input_tokens, output_tokens,
           cost_usd, cost_source, latency_ms, status, error_detail,
-          usage_raw_json, created_at
+          error_json, usage_raw_json, created_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             str(purpose),
@@ -75,6 +81,7 @@ def record_vlm_usage(
             _int_or_zero(latency_ms),
             str(status),
             error_detail,
+            error_json_text,
             usage_raw_json,
             created_at or _now(),
         ),

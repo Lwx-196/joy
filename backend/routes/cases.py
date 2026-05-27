@@ -10,6 +10,7 @@ import sqlite3
 import shutil
 import re
 import subprocess
+import traceback
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -5866,6 +5867,9 @@ def simulate_case_after(case_id: int, payload: SimulateAfterRequest) -> Simulate
             **result["audit"],
             "input_refs": input_refs,
             "output_refs": output_refs,
+            # P0.1: 显式 failure: null 占位（避免 NULL 与 missing key 歧义）；
+            # provider 内部失败时下方 except 分支会改写为结构化 block。
+            "failure": None,
         }
         audit_payload = stress.tag_payload(audit_payload)
         error_message = result.get("error_message") if status != "done" else None
@@ -5912,6 +5916,24 @@ def simulate_case_after(case_id: int, payload: SimulateAfterRequest) -> Simulate
     except Exception as exc:  # noqa: BLE001 - external model/router failure is recorded, not raised as 500
         status = "failed"
         output_refs = []
+        # P0.1: 结构化失败上下文 — oncall 可 SQL 归因到 failure_stage / error_class
+        # 而不必翻 stderr。保留 legacy error_message 字段向后兼容。
+        failure_block = {
+            "failure_stage": "provider_call",
+            "error_class": type(exc).__name__,
+            "error_message": str(exc)[:4000],
+            "provider_attempts": [
+                {
+                    "provider": provider,
+                    "model_name": payload.model_name,
+                    "attempt": 1,
+                    "error_class": type(exc).__name__,
+                }
+            ],
+            "workflow_name": payload.model_name,
+            "retry_trace": [],
+            "traceback": traceback.format_exc(),
+        }
         audit_payload = {
             "provider": provider,
             "model_name": payload.model_name,
@@ -5921,6 +5943,7 @@ def simulate_case_after(case_id: int, payload: SimulateAfterRequest) -> Simulate
             "output_refs": output_refs,
             "policy": _simulation_policy(focus_regions),
             "note": payload.note,
+            "failure": failure_block,
         }
         audit_payload = stress.tag_payload(audit_payload)
         error_message = str(exc)[:4000]

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import traceback as _traceback
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -344,6 +345,7 @@ def _record_usage(
     *,
     status: str,
     error_detail: str | None = None,
+    error_json: dict[str, Any] | None = None,
 ) -> None:
     record_vlm_usage(
         conn,
@@ -358,6 +360,7 @@ def _record_usage(
         latency_ms=(result.latency_ms if result else 0),
         status=status,
         error_detail=error_detail,
+        error_json=error_json,
         usage_raw=(result.usage_raw if result else {}),
     )
 
@@ -431,12 +434,31 @@ def run_classification(
     previews: list[dict[str, Any]] = []
     for item, result in zip(queue, results):
         if isinstance(result, BaseException):
+            error_class = type(result).__name__
+            error_message = str(result)
+            tb_text = "".join(_traceback.format_exception(type(result), result, result.__traceback__))
             errors.append({
                 "observation_id": item.observation_id,
                 "case_id": item.case_id,
                 "image_path": item.image_path,
-                "reason": f"{type(result).__name__}: {result}",
+                "reason": f"{error_class}: {error_message}",
             })
+            _record_usage(
+                conn,
+                item,
+                None,
+                status="error",
+                error_detail=f"{error_class}: {error_message}"[:4000],
+                error_json={
+                    "provider": getattr(provider, "name", "unknown"),
+                    "attempt": 1,
+                    "error_class": error_class,
+                    "error_message": error_message,
+                    "traceback": tb_text,
+                    "image_path": item.image_path,
+                    "observation_id": item.observation_id,
+                },
+            )
             continue
         try:
             if resolved_mode == "apply":
@@ -459,13 +481,30 @@ def run_classification(
                 })
                 _record_usage(conn, item, result, status="live_no_apply")
         except (sqlite3.Error, ValueError) as exc:
+            error_class = type(exc).__name__
+            tb_text = _traceback.format_exc()
             errors.append({
                 "observation_id": item.observation_id,
                 "case_id": item.case_id,
                 "image_path": item.image_path,
                 "reason": str(exc),
             })
-            _record_usage(conn, item, result, status="error", error_detail=str(exc))
+            _record_usage(
+                conn,
+                item,
+                result,
+                status="error",
+                error_detail=str(exc)[:4000],
+                error_json={
+                    "provider": result.provider if result else "unknown",
+                    "attempt": 1,
+                    "error_class": error_class,
+                    "error_message": str(exc),
+                    "traceback": tb_text,
+                    "image_path": item.image_path,
+                    "observation_id": item.observation_id,
+                },
+            )
             continue
         if updated:
             classified += 1
