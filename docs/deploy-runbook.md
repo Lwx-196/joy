@@ -35,9 +35,21 @@ sqlite3 case-workbench.db ".tables" | tr ' ' '\n' | grep -E "ops_audit_log|promo
 
 ### Step 2 — 初始化 promotion manifest (shadow state)
 
+`compute_manifest_hashes` 计算 source hash bindings，但要求 manifest 文件已存在。手工创建初始文件后再算 bindings：
+
 ```bash
-# 创建初始 manifest（promotion_state=shadow，所有 case_id 都视作非 promoted）
-python -m backend.scripts.compute_manifest_hashes --init-shadow
+# 手工创建初始 manifest（promotion_state=shadow，所有 case_id 都视作非 promoted）
+mkdir -p case-workbench-ai/promotion
+cat > case-workbench-ai/promotion/manifest.json <<'JSON'
+{
+  "promotion_state": "shadow",
+  "bindings": {}
+}
+JSON
+
+# 算 + 写入 source hash bindings
+python -m backend.scripts.compute_manifest_hashes --write
+
 # 验证
 cat case-workbench-ai/promotion/manifest.json | jq '.promotion_state'
 # 期望输出："shadow"
@@ -63,6 +75,8 @@ UNION ALL SELECT 'ops_audit_log', COUNT(*) FROM ops_audit_log WHERE julianday(cr
 **Gate**：跑足够长（建议 48h）让样本累积 ≥ `minimum_sample_size`（默认 30），否则 Step 4 calibrate 写出来的 baseline 仍是低样本不可信。
 
 业务流量小的项目可能要 7d+ — 这正是 Wave 4 W4-2 `PAUSED_STALE_DAYS=7d` 的设计依据（灰度 7d 仍没积够数据 → stop-loss halt 报警让 operator 介入）。
+
+**Wave 5 #1 起**：`paused_stale_days` 可在 `slo_thresholds.json` 顶层调整（int / > 0），无需 redeploy。低流量项目可临时拉长到 14d / 30d；高流量可缩到 3d 更快感知。规则同 `minimum_sample_size` — JSON 字段缺失时回退模块常量 7。
 
 ### Step 4 — Calibrate baseline + 替换 placeholder thresholds
 
@@ -204,7 +218,7 @@ VALUES ('manual_rollback', 'ok', 'manual-$(uuidgen)', '{\"reason\": \"...\"}', d
 | Hardening | 文件 | 影响 |
 |---|---|---|
 | K-1 sidecar fcntl.flock | `promotion_slo_monitor.py:_paused_state_lock` | 多 cron 并发安全；BlockingIOError → 跳过 write log warning |
-| K-2 `_merge_thresholds` fallback 限制 | `promotion_slo_monitor.py:_merge_thresholds` | prod 模式 + user_thresholds 不带合法 provenance → raise |
+| K-2 `_merge_thresholds` fallback 限制 | `promotion_slo_monitor.py:_merge_thresholds` | 三分支：(a) `SLO_TEST_MODE=1` → 安全 fallback 到 code defaults / (b) user override 自带合法 `baseline_provenance` → fallback / (c) prod 模式 + 无 test_mode + override 无合法 provenance → raise |
 | K-3 `_TEST_MODE_TRUTHY` 白名单 | `promotion_slo_monitor.py:_is_test_mode` | `SLO_TEST_MODE` 只接受 `1/true/True/yes/Yes/TRUE/YES`，其他全 prod |
 | K-4 `_LEGITIMATE_COMPUTED_BY` | `promotion_slo_monitor.py:_validate_baseline_provenance` | 未知 producer 字符串拒绝 |
 | K-5 `STOP_LOSS_HALT` 拆 ROLLBACK | `promotion_slo_monitor.py` + `promotion_rollback_applier.py` | stop-loss 不动 manifest 仅 audit alert |
