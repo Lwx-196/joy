@@ -90,21 +90,36 @@ jobs:
         working-directory: frontend
         run: npm ci
 
-      - name: Install Playwright browsers
+      - name: Cache Playwright browsers
+        id: pw-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: pw-${{ runner.os }}-${{ hashFiles('frontend/package-lock.json') }}
+          restore-keys: pw-${{ runner.os }}-
+
+      - name: Install Playwright system deps
         working-directory: frontend
-        timeout-minutes: 10
+        timeout-minutes: 5
+        run: npx playwright install-deps chromium
+
+      - name: Install Playwright Chromium binary
+        working-directory: frontend
+        timeout-minutes: 8
+        env:
+          DEBUG: pw:install
         run: |
           set -e
           for i in 1 2 3; do
-            if npx playwright install --with-deps chromium; then
-              echo "Playwright install succeeded on attempt $i"
+            if timeout 360 npx playwright install chromium; then
+              echo "Playwright chromium install succeeded on attempt $i"
               break
             fi
             if [ $i -eq 3 ]; then
-              echo "Playwright install failed after 3 attempts"
+              echo "Playwright chromium install failed after 3 attempts (timeout 360s each)"
               exit 1
             fi
-            echo "Attempt $i failed (likely CDN throttle), sleeping 30s before retry..."
+            echo "Attempt $i timed out or failed (CDN throttle), sleeping 30s before retry..."
             sleep 30
           done
 
