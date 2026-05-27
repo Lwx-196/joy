@@ -380,6 +380,50 @@ CREATE TABLE IF NOT EXISTS simulation_jobs (
 );
 CREATE INDEX IF NOT EXISTS idx_simulation_jobs_group ON simulation_jobs(group_id);
 CREATE INDEX IF NOT EXISTS idx_simulation_jobs_status ON simulation_jobs(status);
+
+-- P1.2: ComfyUI / VLM 候选谱系。每次 simulation 尝试落一行，operator 决策
+-- 通过 UPDATE 写入 operator_decision / operator_user / decided_at 三件套；
+-- 失败链路用 failure_reason；VLM judge runner 完成时写 vlm_judge_result_json。
+-- 与 simulation_jobs 是 N:1（一个 job 可多次 attempt），与 cases 是 N:1。
+CREATE TABLE IF NOT EXISTS candidate_lineage (
+  id                     INTEGER PRIMARY KEY AUTOINCREMENT,
+  simulation_job_id       INTEGER REFERENCES simulation_jobs(id) ON DELETE SET NULL,
+  case_id                 INTEGER REFERENCES cases(id) ON DELETE SET NULL,
+  input_image_hash        TEXT,
+  workflow_hash           TEXT,
+  provider                TEXT,
+  model_name              TEXT,
+  attempt                 INTEGER NOT NULL DEFAULT 1,
+  failure_reason          TEXT,
+  vlm_judge_result_json   TEXT,
+  operator_decision       TEXT,
+  operator_user           TEXT,
+  decided_at              TIMESTAMP,
+  created_at              TIMESTAMP NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_candidate_lineage_case     ON candidate_lineage(case_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_candidate_lineage_sim      ON candidate_lineage(simulation_job_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_candidate_lineage_decision ON candidate_lineage(operator_decision, decided_at DESC);
+
+-- P1.1: ops API 审计日志。每次 /api/render/ops/* 调用必落一行，无论
+-- dry_run 与否；payload_json / response_json 用 JSON 字符串落原始入参出参，
+-- outcome ∈ {ok|partial|error|dry_run}，http_status 是真实返回码。
+-- reviewer 取 X-Reviewer header（强制）；request_id 取 X-Request-Id 或生成。
+CREATE TABLE IF NOT EXISTS ops_audit_log (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  request_id       TEXT,
+  endpoint         TEXT NOT NULL,
+  reviewer         TEXT NOT NULL,
+  reason           TEXT,
+  payload_json     TEXT,
+  response_json    TEXT,
+  outcome          TEXT NOT NULL,
+  http_status      INTEGER NOT NULL,
+  created_at       TIMESTAMP NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_ops_audit_request      ON ops_audit_log(request_id);
+CREATE INDEX IF NOT EXISTS idx_ops_audit_endpoint_at  ON ops_audit_log(endpoint, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_ops_audit_reviewer     ON ops_audit_log(reviewer, created_at DESC);
 """
 
 
