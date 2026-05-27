@@ -7,17 +7,30 @@ Centralizes deliverability decisions previously scattered across
 * Quality-gate verdict per render (`quality_gate`)
 * Deliverable case selection (`list_deliverables`)
 * Final artifact copy (`export`)
+
+P2.2: `list_deliverables(simulation_gate=...)` may now also surface
+simulation_jobs (ComfyUI candidates) once they pass `SimulationDeliveryGate`.
+Render_jobs still win per-case if both exist for the same case.
 """
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from backend.services.simulation_delivery_gate import SimulationDeliveryGate
 
 P0_THRESHOLD = 90.0
 P1_THRESHOLD = 78.0
+
+# ComfyUI / AI simulation surfacing in `list_deliverables`:
+SIMULATION_ARTIFACT_MODE = "ai_simulation"
+SIMULATION_DEFAULT_TEMPLATE_TIER = "ai_candidate"
 
 
 def classify_tier(score: float) -> str:
@@ -148,10 +161,22 @@ class DeliveryGate:
     # Selection
     # ------------------------------------------------------------------
 
-    def list_deliverables(self) -> list[DeliverableItem]:
-        """Return one DeliverableItem per case (best render only), with
-        physically present output files. Sorted by (customer, case_id).
+    def list_deliverables(
+        self,
+        simulation_gate: "SimulationDeliveryGate | None" = None,
+    ) -> list[DeliverableItem]:
+        """Return one DeliverableItem per case, sorted by (customer, case_id).
+
+        Render_jobs (real artifacts) are surfaced unconditionally as before.
+        When `simulation_gate` is provided, ComfyUI / AI simulation_jobs that
+        pass `SimulationDeliveryGate.evaluate(...)` are also surfaced — but
+        only for cases that don't already have a render_jobs-backed entry
+        (render wins). The caller passes a built gate to keep manifest +
+        threshold config in their hands.
+
+        BC: zero-arg form is identical to pre-P2.2 behaviour (render only).
         """
+        # ---- 1. Render-backed candidates (unchanged from pre-P2.2) ----
         rows = self._conn.execute(
             """
             SELECT c.id AS case_id, c.abs_path, c.category,
@@ -174,10 +199,10 @@ class DeliveryGate:
             cid = row["case_id"]
             if cid in seen:
                 continue
-            seen.add(cid)
             output_path = row["output_path"]
             if not output_path or not Path(output_path).is_file():
                 continue
+            seen.add(cid)
             items.append(
                 DeliverableItem(
                     case_id=cid,
@@ -194,11 +219,76 @@ class DeliveryGate:
                     job_id=row["job_id"],
                 )
             )
+
+        # ---- 2. Simulation-backed candidates (P2.2 union) -------------
+        if simulation_gate is not None:
+            items.extend(self._simulation_deliverables(simulation_gate, exclude=seen))
+
         items.sort(key=lambda d: (d.customer, d.case_id))
         return items
 
+    def _simulation_deliverables(
+        self,
+        simulation_gate: "SimulationDeliveryGate",
+        *,
+        exclude: set[int],
+    ) -> list[DeliverableItem]:
+        """Surface simulation_jobs that pass the gate, skipping cases in
+        `exclude` (which already have a render-backed item)."""
+        rows = self._conn.execute(
+            """
+            SELECT s.id AS job_id, s.case_id, s.output_refs_json, s.audit_json,
+                   c.abs_path, c.category,
+                   COALESCE(c.template_tier, 'auto') AS template_tier
+            FROM simulation_jobs s
+            JOIN cases c ON c.id = s.case_id
+            WHERE c.trashed_at IS NULL
+              AND s.status IN ('done', 'done_with_issues')
+              AND s.can_publish = 1
+            ORDER BY c.id, s.updated_at DESC, s.id DESC
+            """
+        ).fetchall()
+
+        results: list[DeliverableItem] = []
+        seen_sim: set[int] = set()
+        for row in rows:
+            cid = row["case_id"]
+            if cid in exclude or cid in seen_sim:
+                continue
+            output_path = _simulation_primary_output_path(row["output_refs_json"])
+            if not output_path or not Path(output_path).is_file():
+                continue
+            decision = simulation_gate.evaluate(int(row["job_id"]))
+            if not decision.accepted:
+                continue
+            audit = _safe_audit(row["audit_json"])
+            score = _simulation_score(audit)
+            seen_sim.add(cid)
+            results.append(
+                DeliverableItem(
+                    case_id=cid,
+                    customer=_customer_name(row["abs_path"]),
+                    case_name=_case_display_name(row["abs_path"]),
+                    category=row["category"],
+                    template_tier=row["template_tier"] or SIMULATION_DEFAULT_TEMPLATE_TIER,
+                    quality_score=score,
+                    quality_status="done",
+                    artifact_mode=SIMULATION_ARTIFACT_MODE,
+                    blocking_count=0,
+                    warning_count=0,
+                    source_path=output_path,
+                    job_id=int(row["job_id"]),
+                )
+            )
+        return results
+
     # ------------------------------------------------------------------
     # Export
+    # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
+    # Module helpers (private to delivery_gate; kept on class scope for
+    # encapsulation and easier monkeypatch in tests).
     # ------------------------------------------------------------------
 
     def export(self, item: DeliverableItem, output_dir: Path, dry_run: bool = False) -> Path:
@@ -213,3 +303,75 @@ class DeliveryGate:
             customer_dir.mkdir(parents=True, exist_ok=True)
             shutil.copy2(item.source_path, str(dest_path))
         return dest_path
+
+
+# ---------------------------------------------------------------------------
+# Module-level helpers for simulation surfacing
+# ---------------------------------------------------------------------------
+
+
+def _safe_audit(blob) -> dict:
+    if isinstance(blob, dict):
+        return blob
+    if not isinstance(blob, (str, bytes)):
+        return {}
+    try:
+        loaded = json.loads(blob)
+    except (TypeError, ValueError):
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def _simulation_primary_output_path(output_refs_json) -> str | None:
+    """Return the canonical AI simulation output path from output_refs_json.
+
+    Preference: explicit `kind == 'ai_after_simulation'`, otherwise first
+    `kind == 'image'`, otherwise first ref with a non-empty path.
+    """
+    if not output_refs_json:
+        return None
+    try:
+        refs = json.loads(output_refs_json) if isinstance(output_refs_json, (str, bytes)) else output_refs_json
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(refs, list):
+        return None
+    preferred: str | None = None
+    fallback_image: str | None = None
+    fallback_any: str | None = None
+    for ref in refs:
+        if not isinstance(ref, dict):
+            continue
+        path = str(ref.get("path") or "")
+        kind = str(ref.get("kind") or "")
+        if not path:
+            continue
+        if kind == "ai_after_simulation" and preferred is None:
+            preferred = path
+        elif kind == "image" and fallback_image is None:
+            fallback_image = path
+        elif fallback_any is None:
+            fallback_any = path
+    return preferred or fallback_image or fallback_any
+
+
+def _simulation_score(audit: dict) -> float:
+    """Coerce a quality_score into the 0-100 surface used by render_quality.
+
+    audit_json.quality_score is typically 0-1; render_quality.quality_score
+    is 0-100. We rescale so the existing P0/P1 tiering logic still applies
+    sensibly downstream (a 0.92 simulation maps to ~92, comparable to a
+    92.0 render).
+    """
+    raw = audit.get("quality_score")
+    if raw is None:
+        nested = audit.get("qa_scores") if isinstance(audit.get("qa_scores"), dict) else None
+        if nested is not None:
+            raw = nested.get("quality_score")
+    if raw is None:
+        return 0.0
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return 0.0
+    return value * 100.0 if 0.0 <= value <= 1.0 else value
