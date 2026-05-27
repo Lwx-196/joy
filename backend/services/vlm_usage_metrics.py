@@ -168,7 +168,12 @@ def summarize_classifier_outputs(
 ) -> dict[str, Any]:
     """Distribution of phase/view/body_part/confidence for image_observations
     written by a given source. Default to ``vlm_classifier`` to inspect the
-    763 entries produced by the 2026-05-26 batch."""
+    763 entries produced by the 2026-05-26 batch.
+
+    P0.3a 扩展：confidence_buckets_calibrated（4 段校准刻度）+ bias_alerts
+    （由 detect_distribution_collapse 派生的 [{dimension, value, threshold,
+    severity}] 列表）。旧 confidence_buckets 字段保留 BC。
+    """
     rows = conn.execute(
         "SELECT phase, view, body_part, confidence FROM image_observations WHERE source = ?",
         (source,),
@@ -186,13 +191,22 @@ def summarize_classifier_outputs(
             "0.8-0.9": 0,
             "0.9-1.0": 0,
         },
+        # P0.3a: plan §100 校准刻度
+        "confidence_buckets_calibrated": {
+            "0.0-0.7": 0,
+            "0.7-0.85": 0,
+            "0.85-0.95": 0,
+            ">=0.95": 0,
+        },
         "confidence_mean": 0.0,
+        "bias_alerts": [],
     }
     if not rows:
         return distribution
 
     distribution["total"] = len(rows)
     confidences: list[float] = []
+    records: list[dict[str, Any]] = []
     for row in rows:
         ph = row["phase"] or "unknown"
         vw = row["view"] or "unknown"
@@ -210,5 +224,35 @@ def summarize_classifier_outputs(
             distribution["confidence_buckets"]["0.8-0.9"] += 1
         else:
             distribution["confidence_buckets"]["0.9-1.0"] += 1
+        # P0.3a 校准刻度
+        if cf < 0.7:
+            distribution["confidence_buckets_calibrated"]["0.0-0.7"] += 1
+        elif cf < 0.85:
+            distribution["confidence_buckets_calibrated"]["0.7-0.85"] += 1
+        elif cf < 0.95:
+            distribution["confidence_buckets_calibrated"]["0.85-0.95"] += 1
+        else:
+            distribution["confidence_buckets_calibrated"][">=0.95"] += 1
+        records.append({"phase": ph, "view": vw, "body_part": bp, "confidence": cf})
     distribution["confidence_mean"] = round(sum(confidences) / len(confidences), 4)
+    # P0.3a: 调用 calibration 检测库派生 bias_alerts。
+    from . import vlm_calibration as _vlm_calibration
+    cal = _vlm_calibration.detect_distribution_collapse(records)
+    distribution["bias_alerts"] = [
+        {
+            "dimension": alert.dimension,
+            "value": alert.dominant_ratio,
+            "threshold": (
+                _vlm_calibration.COLLAPSE_RATIO_THRESHOLD
+                if alert.severity == "uncalibrated"
+                else _vlm_calibration.WARN_RATIO_THRESHOLD
+            ),
+            "severity": alert.severity,
+            "dominant_class": alert.dominant_class,
+            "confidence_p50": alert.confidence_p50,
+        }
+        for alert in cal.evidence
+    ]
+    distribution["calibration_status"] = cal.status
+    distribution["calibration_recommendation"] = cal.recommendation
     return distribution
