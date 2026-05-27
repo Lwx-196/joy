@@ -37,7 +37,10 @@ def test_enqueue_single_400_for_bad_semantic_judge(client, seed_case, no_job_poo
 
 def test_enqueue_single_inserts_queued_row(client, seed_case, no_job_pool):
     case_id = seed_case()
-    resp = client.post(f"/api/cases/{case_id}/render", json={"brand": "fumei"})
+    # force=True bypasses pre_render_gate; seed_case has no real image files
+    # so the gate would block with no_real_source_photos. This test verifies
+    # enqueue mechanics, not gate behavior — gate has dedicated tests.
+    resp = client.post(f"/api/cases/{case_id}/render", json={"brand": "fumei", "force": True})
     assert resp.status_code == 200
     body = resp.json()
     job_id = body["job_id"]
@@ -84,7 +87,8 @@ def test_batch_enqueue_partial_success_returns_skipped_count(
     b = seed_case(abs_path="/tmp/case-b")
     resp = client.post(
         "/api/cases/render/batch",
-        json={"case_ids": [a, b, 9999]},
+        # force=True bypasses pre_render_gate (see test_enqueue_single comment)
+        json={"case_ids": [a, b, 9999], "force": True},
     )
     assert resp.status_code == 200
     body = resp.json()
@@ -104,7 +108,7 @@ def test_list_case_jobs_empty_then_populated(client, seed_case, no_job_pool):
     assert empty == []
 
     job_id = client.post(
-        f"/api/cases/{case_id}/render", json={"brand": "fumei"}
+        f"/api/cases/{case_id}/render", json={"brand": "fumei", "force": True}
     ).json()["job_id"]
     listing = client.get(f"/api/cases/{case_id}/render/jobs").json()
     assert len(listing) == 1
@@ -120,10 +124,10 @@ def test_latest_job_null_when_no_history(client, seed_case, no_job_pool):
 
 def test_latest_job_returns_most_recent(client, seed_case, no_job_pool):
     case_id = seed_case()
-    j1 = client.post(f"/api/cases/{case_id}/render", json={"brand": "fumei"}).json()[
+    j1 = client.post(f"/api/cases/{case_id}/render", json={"brand": "fumei", "force": True}).json()[
         "job_id"
     ]
-    j2 = client.post(f"/api/cases/{case_id}/render", json={"brand": "fumei"}).json()[
+    j2 = client.post(f"/api/cases/{case_id}/render", json={"brand": "fumei", "force": True}).json()[
         "job_id"
     ]
     assert j2 > j1
@@ -259,7 +263,7 @@ def test_get_batch_404(client, no_job_pool):
 def test_cancel_queued_job_then_cancel_again_409(client, seed_case, no_job_pool):
     case_id = seed_case()
     job_id = client.post(
-        f"/api/cases/{case_id}/render", json={"brand": "fumei"}
+        f"/api/cases/{case_id}/render", json={"brand": "fumei", "force": True}
     ).json()["job_id"]
 
     first = client.post(f"/api/render/jobs/{job_id}/cancel")

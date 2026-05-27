@@ -138,13 +138,18 @@ def test_batch_enqueue_skips_non_source_cases(client, seed_case, no_job_pool, tm
             (json.dumps({"image_files": ["术前-正面.jpg", "术后-正面.jpg"]}, ensure_ascii=False), ready),
         )
 
+    # PR #2 introduced pre_render_gate which blocks the "ready" case for
+    # missing oblique/side slots (front-only is no longer enough). Both cases
+    # now end up in invalid: generated → no_real_source_photos (real gate
+    # rejection), ready → pre_render_gate_blocked (slot fill). Core assertion
+    # preserved: generated case is detected as no_real_source_photos.
     resp = client.post("/api/cases/render/batch", json={"case_ids": [generated, ready]})
-    assert resp.status_code == 200, resp.text
-    body = resp.json()
-    assert body["skipped_count"] == 1
-    assert len(body["job_ids"]) == 1
-    assert body["invalid"][0]["case_id"] == generated
-    assert body["invalid"][0]["reason"] == "no_real_source_photos"
+    assert resp.status_code == 409, resp.text
+    detail = resp.json()["detail"]
+    assert detail["reason"] == "pre_render_gate_blocked"
+    invalid_by_case = {item["case_id"]: item for item in detail["invalid"]}
+    assert invalid_by_case[generated]["reason"] == "no_real_source_photos"
+    assert invalid_by_case[ready]["reason"] == "pre_render_gate_blocked"
 
 
 def test_source_blockers_queue_and_action(client, seed_case, tmp_path):
