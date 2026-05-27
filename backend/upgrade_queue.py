@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sqlite3
 import threading
 import uuid
@@ -164,10 +165,25 @@ class UpgradeQueue:
                 return False
             if row["status"] != "queued":
                 return False
-            conn.execute(
-                "UPDATE upgrade_jobs SET status = 'cancelled', finished_at = ? WHERE id = ?",
+            cancelled = conn.execute(
+                """
+                UPDATE upgrade_jobs
+                SET status = 'cancelled',
+                    finished_at = ?,
+                    recovery_token = NULL,
+                    recovery_claimed_at = NULL
+                WHERE id = ? AND status = 'queued'
+                """,
                 (_now_iso(), job_id),
-            )
+            ).rowcount
+            # CAS guard: if worker's _execute_upgrade claimed the row between
+            # our SELECT and this UPDATE, rowcount=0 and we must return False
+            # rather than silently overwriting 'running' with 'cancelled'
+            # (which would leak a job_pool slot to a subprocess that no longer
+            # has a DB row to write back to). Mirrors the pattern in
+            # _execute_upgrade lines 209-220.
+            if cancelled != 1:
+                return False
         self._publish(
             {
                 "type": "job_update",
@@ -198,10 +214,19 @@ class UpgradeQueue:
                 return
             if row["status"] != "queued":
                 return
-            conn.execute(
-                "UPDATE upgrade_jobs SET status = 'running', started_at = ? WHERE id = ?",
+            claimed = conn.execute(
+                """
+                UPDATE upgrade_jobs
+                SET status = 'running',
+                    started_at = ?,
+                    recovery_token = NULL,
+                    recovery_claimed_at = NULL
+                WHERE id = ? AND status = 'queued'
+                """,
                 (_now_iso(), job_id),
-            )
+            ).rowcount
+            if claimed != 1:
+                return
             case_id = row["case_id"]
             brand = row["brand"]
             batch_id = row["batch_id"]
@@ -341,13 +366,63 @@ class UpgradeQueue:
     # ------------------------------------------------------------------
 
     def recover(self) -> dict[str, int]:
+        token = f"upgrade-recover:{os.getpid()}:{uuid.uuid4().hex}"
         with db.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             running_to_queued = conn.execute(
-                "UPDATE upgrade_jobs SET status = 'queued', started_at = NULL WHERE status = 'running'"
+                """
+                UPDATE upgrade_jobs
+                SET status = 'queued',
+                    started_at = NULL,
+                    recovery_token = NULL,
+                    recovery_claimed_at = NULL
+                WHERE status = 'running'
+                """
             ).rowcount
+            # Reclaim orphans: queued rows tagged by a prior recover() whose
+            # process died between commit and _job_pool.submit(). Without this,
+            # the SELECT below (which requires recovery_token IS NULL) would
+            # skip them forever. julianday() is used (not lex TEXT compare)
+            # because recovery_claimed_at is written as Python ISO format
+            # ('2026-05-27T02:48:00.612930+00:00') while SQLite's datetime()
+            # emits space-separated format; lex compare on these silently
+            # fails within the same UTC day (T > space).
+            conn.execute(
+                """
+                UPDATE upgrade_jobs
+                SET recovery_token = NULL,
+                    recovery_claimed_at = NULL
+                WHERE status = 'queued'
+                  AND recovery_token IS NOT NULL
+                  AND julianday(recovery_claimed_at) < julianday('now', '-5 minutes')
+                """
+            )
             queued_rows: list[sqlite3.Row] = conn.execute(
-                "SELECT id FROM upgrade_jobs WHERE status = 'queued' ORDER BY enqueued_at"
+                """
+                SELECT id
+                FROM upgrade_jobs
+                WHERE status = 'queued'
+                  AND recovery_token IS NULL
+                ORDER BY enqueued_at
+                """
             ).fetchall()
+            if queued_rows:
+                placeholders = ",".join("?" for _ in queued_rows)
+                conn.execute(
+                    f"""
+                    UPDATE upgrade_jobs
+                    SET recovery_token = ?,
+                        recovery_claimed_at = ?
+                    WHERE id IN ({placeholders})
+                      AND status = 'queued'
+                      AND recovery_token IS NULL
+                    """,
+                    (token, _now_iso(), *[r["id"] for r in queued_rows]),
+                )
+                queued_rows = conn.execute(
+                    "SELECT id FROM upgrade_jobs WHERE recovery_token = ? ORDER BY enqueued_at",
+                    (token,),
+                ).fetchall()
         for r in queued_rows:
             _job_pool.submit(self._execute_safe, r["id"])
         return {"requeued_running": running_to_queued, "resubmitted_queued": len(queued_rows)}
