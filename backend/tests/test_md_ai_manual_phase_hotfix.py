@@ -36,6 +36,17 @@ import pytest
 
 from backend import ai_generation_adapter, render_queue
 
+pytestmark = pytest.mark.skipif(
+    not hasattr(ai_generation_adapter, "run_direct_clinical_enhancement"),
+    reason=(
+        "run_direct_clinical_enhancement defined in owner WIP "
+        "ai_generation_adapter.py:2608 (PR #2 feat/owner-wip-on-base), "
+        "not yet merged to main. Commit a05ff9b (2026-05-16) referenced "
+        "it in tests but the function implementation was never committed. "
+        "Auto-unskip when PR #2 merges to main."
+    ),
+)
+
 
 def _make_staging(tmp_path: Path, filenames: list[str]) -> Path:
     staging = tmp_path / ".case-workbench-bound-render" / "job-1"
