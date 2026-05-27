@@ -1,10 +1,18 @@
 """SQLite connection + schema initialization."""
 from __future__ import annotations
 
+import contextlib
 import os
 import sqlite3
+import time
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - non-POSIX fallback.
+    fcntl = None
 
 DB_PATH = Path(
     os.environ.get(
@@ -13,7 +21,26 @@ DB_PATH = Path(
     )
 ).expanduser().resolve()
 
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
+SQLITE_BUSY_TIMEOUT_MS = _env_int("CASE_WORKBENCH_SQLITE_BUSY_TIMEOUT_MS", 5000)
+SCHEMA_LOCK_TIMEOUT_SEC = _env_int("CASE_WORKBENCH_SCHEMA_LOCK_TIMEOUT_SEC", 30)
+SCHEMA_COMPONENT = "main"
+SCHEMA_VERSION = 5
+
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS schema_versions (
+  component    TEXT PRIMARY KEY,
+  version      INTEGER NOT NULL,
+  applied_at   TIMESTAMP NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS scans (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
   started_at    TIMESTAMP NOT NULL,
@@ -94,7 +121,9 @@ CREATE TABLE IF NOT EXISTS render_jobs (
   manifest_path TEXT,
   error_message TEXT,
   semantic_judge TEXT NOT NULL DEFAULT 'auto',
-  meta_json     TEXT
+  meta_json     TEXT,
+  recovery_token TEXT,
+  recovery_claimed_at TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_render_jobs_case   ON render_jobs(case_id, enqueued_at DESC);
 CREATE INDEX IF NOT EXISTS idx_render_jobs_status ON render_jobs(status, enqueued_at);
@@ -116,7 +145,9 @@ CREATE TABLE IF NOT EXISTS upgrade_jobs (
   started_at    TIMESTAMP,
   finished_at   TIMESTAMP,
   error_message TEXT,
-  meta_json     TEXT
+  meta_json     TEXT,
+  recovery_token TEXT,
+  recovery_claimed_at TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_upgrade_jobs_case   ON upgrade_jobs(case_id, enqueued_at DESC);
 CREATE INDEX IF NOT EXISTS idx_upgrade_jobs_status ON upgrade_jobs(status, enqueued_at);
@@ -153,6 +184,8 @@ CREATE TABLE IF NOT EXISTS case_image_overrides (
   manual_phase  TEXT,
   manual_view   TEXT,
   manual_transform_json TEXT,
+  reason_json   TEXT,
+  reviewer      TEXT,
   updated_at    TIMESTAMP NOT NULL,
   PRIMARY KEY (case_id, filename)
 );
@@ -236,6 +269,53 @@ CREATE TABLE IF NOT EXISTS render_quality (
 );
 CREATE INDEX IF NOT EXISTS idx_render_quality_status ON render_quality(quality_status);
 
+-- ComfyUI 灰度 A/B 反馈。只记录运营/审核反馈证据，不解锁发布。
+CREATE TABLE IF NOT EXISTS ab_feedback (
+  id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+  render_job_id          INTEGER NOT NULL REFERENCES render_jobs(id) ON DELETE CASCADE,
+  case_id                INTEGER REFERENCES cases(id) ON DELETE SET NULL,
+  baseline_job_id        INTEGER,
+  candidate_job_id       INTEGER,
+  simulation_job_id      INTEGER REFERENCES simulation_jobs(id) ON DELETE SET NULL,
+  workflow_profile       TEXT,
+  verdict                TEXT NOT NULL,
+  hard_defect_tags_json  TEXT NOT NULL DEFAULT '[]',
+  reviewer               TEXT NOT NULL,
+  note                   TEXT,
+  source                 TEXT NOT NULL DEFAULT 'gray_rollout',
+  created_at             TIMESTAMP NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_ab_feedback_render_job ON ab_feedback(render_job_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_ab_feedback_case ON ab_feedback(case_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_ab_feedback_workflow ON ab_feedback(workflow_profile, verdict, created_at);
+
+-- T74: 统一人工复核队列。ticket 只记录阻断与人工决策证据；
+-- 决策回写仍走 source_group_selection trace / accepted warnings / slot locks，
+-- 不直接改 render_quality.can_publish。
+CREATE TABLE IF NOT EXISTS review_tickets (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  case_id         INTEGER NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
+  render_job_id   INTEGER REFERENCES render_jobs(id) ON DELETE SET NULL,
+  ticket_type     TEXT NOT NULL,
+  stage           TEXT NOT NULL,
+  status          TEXT NOT NULL DEFAULT 'open',
+  blocks_render   INTEGER NOT NULL DEFAULT 0,
+  blocks_publish  INTEGER NOT NULL DEFAULT 0,
+  reason_code     TEXT NOT NULL,
+  slot            TEXT,
+  source_filename TEXT,
+  message         TEXT,
+  evidence_json   TEXT NOT NULL DEFAULT '{}',
+  decision_json   TEXT NOT NULL DEFAULT '{}',
+  dedupe_key      TEXT NOT NULL DEFAULT '',
+  created_at      TIMESTAMP NOT NULL,
+  updated_at      TIMESTAMP NOT NULL,
+  resolved_at     TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_review_tickets_status ON review_tickets(status, ticket_type, updated_at);
+CREATE INDEX IF NOT EXISTS idx_review_tickets_case ON review_tickets(case_id, status, ticket_type);
+CREATE INDEX IF NOT EXISTS idx_review_tickets_job ON review_tickets(render_job_id, status);
+
 -- AI 运行审计：默认只记录结构化摘要，不要求上传真实图像。
 CREATE TABLE IF NOT EXISTS ai_runs (
   id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -252,6 +332,26 @@ CREATE TABLE IF NOT EXISTS ai_runs (
   finished_at     TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_ai_runs_subject ON ai_runs(subject_kind, subject_id);
+
+-- VLM 调用用量审计。只追加真实 provider 调用摘要，不存图像内容。
+CREATE TABLE IF NOT EXISTS vlm_usage_log (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  purpose        TEXT NOT NULL,
+  provider       TEXT NOT NULL,
+  model          TEXT NOT NULL,
+  case_id        INTEGER REFERENCES cases(id),
+  input_tokens   INTEGER NOT NULL DEFAULT 0,
+  output_tokens  INTEGER NOT NULL DEFAULT 0,
+  cost_usd       REAL NOT NULL DEFAULT 0,
+  cost_source    TEXT NOT NULL DEFAULT 'unknown',
+  latency_ms     INTEGER NOT NULL DEFAULT 0,
+  status         TEXT NOT NULL,
+  error_detail   TEXT,
+  usage_raw_json TEXT NOT NULL DEFAULT '{}',
+  created_at     TIMESTAMP NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_vlm_usage_created ON vlm_usage_log(purpose, created_at);
+CREATE INDEX IF NOT EXISTS idx_vlm_usage_case ON vlm_usage_log(case_id, created_at);
 
 -- 术后 AI 增强/模拟任务，与真实 render_jobs 隔离。
 CREATE TABLE IF NOT EXISTS simulation_jobs (
@@ -316,53 +416,122 @@ CASE_TRASH_COLUMNS = [
 
 IMAGE_OVERRIDE_COLUMNS = [
     ("manual_transform_json", "TEXT"),
+    ("reason_json", "TEXT"),
+    ("reviewer", "TEXT"),
+]
+
+BEST_PAIR_SCHEMA = """
+CREATE TABLE IF NOT EXISTS case_best_pairs (
+  case_id         INTEGER PRIMARY KEY REFERENCES cases(id) ON DELETE CASCADE,
+  status          TEXT NOT NULL,
+  skipped_reason  TEXT,
+  candidates_json TEXT NOT NULL DEFAULT '[]',
+  candidates_fingerprint TEXT,
+  source_version  INTEGER NOT NULL DEFAULT 0,
+  scanned_at      TIMESTAMP NOT NULL,
+  updated_at      TIMESTAMP NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_case_best_pairs_status ON case_best_pairs(status);
+
+CREATE TABLE IF NOT EXISTS case_best_pair_selections (
+  id                          INTEGER PRIMARY KEY AUTOINCREMENT,
+  case_id                     INTEGER NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
+  before_filename             TEXT NOT NULL,
+  after_filename              TEXT NOT NULL,
+  delta_deg                   REAL NOT NULL,
+  candidates_fingerprint      TEXT,
+  candidates_fingerprint_snapshot TEXT,
+  before_override_before_json TEXT,
+  after_override_before_json  TEXT,
+  view                        TEXT,
+  selected_at                 TIMESTAMP NOT NULL,
+  selected_by                 TEXT,
+  selection_reason            TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_cbps_case_at ON case_best_pair_selections(case_id, selected_at DESC);
+"""
+
+BEST_PAIR_SELECTION_COLUMNS = [
+    ("view", "TEXT"),
+    ("selection_reason", "TEXT"),
+]
+
+RENDER_JOB_BEST_PAIR_COLUMNS = [
+    ("render_mode", "TEXT NOT NULL DEFAULT 'ai'"),
+    ("best_pair_selection_id", "INTEGER REFERENCES case_best_pair_selections(id)"),
+    ("candidates_fingerprint_snapshot", "TEXT"),
+    ("draft_preview", "INTEGER NOT NULL DEFAULT 0"),
+]
+
+RENDER_JOB_RECOVERY_COLUMNS = [
+    ("recovery_token", "TEXT"),
+    ("recovery_claimed_at", "TIMESTAMP"),
+]
+
+UPGRADE_JOB_RECOVERY_COLUMNS = [
+    ("recovery_token", "TEXT"),
+    ("recovery_claimed_at", "TIMESTAMP"),
 ]
 
 
-def _ensure_manual_columns(conn) -> None:
-    existing = {row[1] for row in conn.execute("PRAGMA table_info(cases)").fetchall()}
-    for col, kind in MANUAL_COLUMNS:
+def _ensure_table_columns(conn, table: str, columns: list[tuple[str, str]]) -> None:
+    existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    for col, kind in columns:
         if col not in existing:
-            conn.execute(f"ALTER TABLE cases ADD COLUMN {col} {kind}")
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {kind}")
+
+
+def _ensure_manual_columns(conn) -> None:
+    _ensure_table_columns(conn, "cases", MANUAL_COLUMNS)
 
 
 def _ensure_simulation_job_columns(conn) -> None:
-    existing = {row[1] for row in conn.execute("PRAGMA table_info(simulation_jobs)").fetchall()}
-    for col, kind in SIMULATION_JOB_COLUMNS:
-        if col not in existing:
-            conn.execute(f"ALTER TABLE simulation_jobs ADD COLUMN {col} {kind}")
+    _ensure_table_columns(conn, "simulation_jobs", SIMULATION_JOB_COLUMNS)
 
 
 def _ensure_case_trash_columns(conn) -> None:
-    existing = {row[1] for row in conn.execute("PRAGMA table_info(cases)").fetchall()}
-    for col, kind in CASE_TRASH_COLUMNS:
-        if col not in existing:
-            conn.execute(f"ALTER TABLE cases ADD COLUMN {col} {kind}")
+    _ensure_table_columns(conn, "cases", CASE_TRASH_COLUMNS)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_cases_trashed ON cases(trashed_at)")
 
 
 def _ensure_image_override_columns(conn) -> None:
-    existing = {row[1] for row in conn.execute("PRAGMA table_info(case_image_overrides)").fetchall()}
-    for col, kind in IMAGE_OVERRIDE_COLUMNS:
-        if col not in existing:
-            conn.execute(f"ALTER TABLE case_image_overrides ADD COLUMN {col} {kind}")
+    _ensure_table_columns(conn, "case_image_overrides", IMAGE_OVERRIDE_COLUMNS)
+
+
+def _ensure_best_pair_tables(conn) -> None:
+    _execute_schema_script(conn, BEST_PAIR_SCHEMA)
+    _ensure_table_columns(conn, "case_best_pair_selections", BEST_PAIR_SELECTION_COLUMNS)
+
+
+def _ensure_render_job_best_pair_columns(conn) -> None:
+    _ensure_table_columns(conn, "render_jobs", RENDER_JOB_BEST_PAIR_COLUMNS)
+
+
+def _ensure_job_recovery_columns(conn) -> None:
+    _ensure_table_columns(conn, "render_jobs", RENDER_JOB_RECOVERY_COLUMNS)
+    _ensure_table_columns(conn, "upgrade_jobs", UPGRADE_JOB_RECOVERY_COLUMNS)
 
 
 def init_schema() -> None:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with connect() as conn:
-        conn.executescript(SCHEMA)
-        _ensure_image_override_columns(conn)
-        _ensure_manual_columns(conn)
-        _ensure_simulation_job_columns(conn)
-        _ensure_case_trash_columns(conn)
+    with _schema_file_lock():
+        with connect() as conn:
+            conn.execute("BEGIN EXCLUSIVE")
+            _execute_schema_script(conn, SCHEMA)
+            _ensure_best_pair_tables(conn)
+            _ensure_render_job_best_pair_columns(conn)
+            _ensure_job_recovery_columns(conn)
+            _ensure_image_override_columns(conn)
+            _ensure_manual_columns(conn)
+            _ensure_simulation_job_columns(conn)
+            _ensure_case_trash_columns(conn)
+            _record_schema_version(conn)
 
 
 @contextmanager
 def connect():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
+    conn = sqlite3.connect(DB_PATH, timeout=max(SQLITE_BUSY_TIMEOUT_MS / 1000, 5.0))
+    _configure_connection(conn)
     try:
         yield conn
         conn.commit()
@@ -375,7 +544,59 @@ def connect():
 
 def get_conn() -> sqlite3.Connection:
     """For request-scoped use; caller must close."""
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
+    conn = sqlite3.connect(DB_PATH, timeout=max(SQLITE_BUSY_TIMEOUT_MS / 1000, 5.0))
+    _configure_connection(conn)
     return conn
+
+
+def _configure_connection(conn: sqlite3.Connection) -> None:
+    conn.row_factory = sqlite3.Row
+    conn.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS}")
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA synchronous = NORMAL")
+
+
+def _execute_schema_script(conn: sqlite3.Connection, script: str) -> None:
+    for statement in script.split(";"):
+        sql = statement.strip()
+        if sql:
+            conn.execute(sql)
+
+
+def _record_schema_version(conn: sqlite3.Connection) -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        """
+        INSERT INTO schema_versions (component, version, applied_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(component) DO UPDATE SET
+          version = excluded.version,
+          applied_at = excluded.applied_at
+        """,
+        (SCHEMA_COMPONENT, SCHEMA_VERSION, now),
+    )
+
+
+@contextmanager
+def _schema_file_lock():
+    lock_path = DB_PATH.with_name(f"{DB_PATH.name}.schema.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+", encoding="utf-8") as lock_file:
+        if fcntl is None:
+            yield
+            return
+        deadline = time.monotonic() + max(SCHEMA_LOCK_TIMEOUT_SEC, 1)
+        while True:
+            try:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(f"timed out waiting for schema lock: {lock_path}")
+                time.sleep(0.05)
+        try:
+            yield
+        finally:
+            with contextlib.suppress(OSError):
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)

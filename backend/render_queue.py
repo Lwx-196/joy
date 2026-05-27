@@ -1439,17 +1439,23 @@ class RenderQueue:
                 return False
             if row["status"] != "queued":
                 return False
-            conn.execute(
+            cancelled = conn.execute(
                 """
                 UPDATE render_jobs
                 SET status = 'cancelled',
                     finished_at = ?,
                     recovery_token = NULL,
                     recovery_claimed_at = NULL
-                WHERE id = ?
+                WHERE id = ? AND status = 'queued'
                 """,
                 (_now_iso(), job_id),
-            )
+            ).rowcount
+            # CAS guard: if worker's _execute_render claimed the row between
+            # our SELECT and this UPDATE, rowcount=0 and we must return False
+            # rather than silently overwriting 'running' with 'cancelled'.
+            # Mirrors the pattern in _execute_render claim UPDATE (1606-1613).
+            if cancelled != 1:
+                return False
         self._publish(
             {
                 "type": "job_update",
@@ -2220,6 +2226,24 @@ class RenderQueue:
                 WHERE status = 'running'
                 """
             ).rowcount
+            # Reclaim orphans: queued rows tagged by a prior recover() whose
+            # process died between commit and _job_pool.submit(). Without this,
+            # the SELECT below (which requires recovery_token IS NULL) would
+            # skip them forever. julianday() is used (not lex TEXT compare)
+            # because recovery_claimed_at is written as Python ISO format
+            # ('2026-05-27T02:48:00.612930+00:00') while SQLite's datetime()
+            # emits space-separated format; lex compare on these silently
+            # fails within the same UTC day (T > space).
+            conn.execute(
+                """
+                UPDATE render_jobs
+                SET recovery_token = NULL,
+                    recovery_claimed_at = NULL
+                WHERE status = 'queued'
+                  AND recovery_token IS NOT NULL
+                  AND julianday(recovery_claimed_at) < julianday('now', '-5 minutes')
+                """
+            )
             queued_rows: list[sqlite3.Row] = conn.execute(
                 """
                 SELECT id

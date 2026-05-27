@@ -92,7 +92,21 @@ jobs:
 
       - name: Install Playwright browsers
         working-directory: frontend
-        run: npx playwright install --with-deps chromium
+        timeout-minutes: 10
+        run: |
+          set -e
+          for i in 1 2 3; do
+            if npx playwright install --with-deps chromium; then
+              echo "Playwright install succeeded on attempt $i"
+              break
+            fi
+            if [ $i -eq 3 ]; then
+              echo "Playwright install failed after 3 attempts"
+              exit 1
+            fi
+            echo "Attempt $i failed (likely CDN throttle), sleeping 30s before retry..."
+            sleep 30
+          done
 
       - name: Stage fixture DB and patch case 126 abs_path
         run: ./tests/fixtures/setup.sh
