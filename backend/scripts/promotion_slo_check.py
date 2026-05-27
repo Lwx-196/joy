@@ -6,12 +6,21 @@ Usage:
     python -m backend.scripts.promotion_slo_check --format markdown
     python -m backend.scripts.promotion_slo_check --thresholds path/to/custom.json
 
-Exit codes:
-    0  within_slo OR insufficient_data (safe to keep current promotion_state)
-    1  violation found (caller — cron / launchd — should trigger rollback flow)
-    2  invalid argument / runtime error
+Exit codes (Wave 3 P0.5 H-5: aligned with the four-token recommendation
+vocabulary that ``promotion_slo_monitor.evaluate_window`` now emits):
+
+    0  ``continue``           — within SLO, keep current promotion_state.
+    0  ``insufficient_data``  — too few samples (shadow / rolled_back state),
+                               safe to keep current state and gather more data.
+    0  ``monitoring_paused``  — small sample under PROMOTED state (p10/p25/
+                               p50/p100); per P2.4 methodology we *do not*
+                               regress the state on the basis of <30 samples.
+    1  ``rollback``           — violation; caller (cron / launchd) should
+                               trigger the auto-rollback flow.
+    2  invalid argument / runtime error.
 
 Suitable for cron / launchd; example crontab line:
+
     */15 * * * * /path/to/.venv/bin/python -m backend.scripts.promotion_slo_check \\
          --format json --window 48 || /path/to/rollback_runner.sh
 """
@@ -25,10 +34,28 @@ from pathlib import Path
 
 from backend.services.promotion_slo_monitor import (
     DEFAULT_WINDOW_HOURS,
+    RECOMMENDATION_CONTINUE,
+    RECOMMENDATION_INSUFFICIENT_DATA,
+    RECOMMENDATION_MONITORING_PAUSED,
+    RECOMMENDATION_ROLLBACK,
     SLOReport,
     evaluate_window,
     load_default_thresholds,
 )
+
+EXIT_OK = 0
+EXIT_ROLLBACK = 1
+EXIT_USAGE_ERROR = 2
+
+
+def _format_within_slo(report: SLOReport) -> str:
+    """Wave 3 P0.5 H-5: ``within_slo`` is now ``None`` when recommendation
+    is ``monitoring_paused`` (small sample under promoted state — neither
+    pass nor fail). Render it explicitly so on-call doesn't read 'None' as
+    'False'."""
+    if report.within_slo is None:
+        return f"**N/A (monitoring_paused)** — note: {report.notes or 'small sample'}"
+    return f"**{report.within_slo}**"
 
 
 def _format_markdown(report: SLOReport) -> str:
@@ -37,8 +64,10 @@ def _format_markdown(report: SLOReport) -> str:
     lines.append("")
     lines.append(f"- window_hours: **{report.window_hours}**")
     lines.append(f"- sample_size: **{report.sample_size}**")
-    lines.append(f"- within_slo: **{report.within_slo}**")
+    lines.append(f"- within_slo: {_format_within_slo(report)}")
     lines.append(f"- recommendation: **{report.recommendation}**")
+    if report.notes:
+        lines.append(f"- notes: {report.notes}")
     lines.append("")
     lines.append("## Evidence")
     for dim_key, dim_data in report.evidence.items():
@@ -52,9 +81,31 @@ def _format_markdown(report: SLOReport) -> str:
         lines.append("")
         lines.append("## Violations")
         for v in report.violations:
-            lines.append(f"- **{v['dimension']}** — actual={v['actual']} "
-                         f"threshold={v['threshold']} (≤)")
+            lines.append(
+                f"- **{v['dimension']}** — actual={v['actual']} "
+                f"threshold={v['threshold']} (≤)"
+            )
     return "\n".join(lines) + "\n"
+
+
+def _exit_code_for(report: SLOReport) -> int:
+    """Map the SLO monitor's recommendation token to a cron-friendly exit
+    code. The four-token vocabulary collapses to {0, 1} so launchd / cron
+    `||` chains stay simple — only ``rollback`` is the alerting signal."""
+    if report.recommendation == RECOMMENDATION_ROLLBACK:
+        return EXIT_ROLLBACK
+    if report.recommendation in (
+        RECOMMENDATION_CONTINUE,
+        RECOMMENDATION_INSUFFICIENT_DATA,
+        RECOMMENDATION_MONITORING_PAUSED,
+    ):
+        return EXIT_OK
+    # Defensive: unknown token → treat as OK (don't trigger spurious
+    # rollback), but log via stderr so on-call notices the drift.
+    sys.stderr.write(
+        f"unknown recommendation {report.recommendation!r}; treating as exit 0\n"
+    )
+    return EXIT_OK
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -84,7 +135,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.window <= 0:
         sys.stderr.write("--window must be positive integer\n")
-        return 2
+        return EXIT_USAGE_ERROR
 
     try:
         threshold_override = None
@@ -96,7 +147,7 @@ def main(argv: list[str] | None = None) -> int:
         )
     except Exception as exc:  # pragma: no cover  (defensive — runtime errors)
         sys.stderr.write(f"SLO check failed: {exc}\n")
-        return 2
+        return EXIT_USAGE_ERROR
 
     if args.format == "markdown":
         sys.stdout.write(_format_markdown(report))
@@ -104,10 +155,7 @@ def main(argv: list[str] | None = None) -> int:
         json.dump(report.to_dict(), sys.stdout, ensure_ascii=False, indent=2, default=str)
         sys.stdout.write("\n")
 
-    # Exit code policy: only true violation → 1; insufficient_data → 0 (safe)
-    if report.recommendation == "rollback":
-        return 1
-    return 0
+    return _exit_code_for(report)
 
 
 if __name__ == "__main__":  # pragma: no cover

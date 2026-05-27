@@ -19,8 +19,9 @@ Usage::
 
 Exit codes (cron-friendly: stdout = JSON result, stderr = human log):
 
-    0   no rollback needed (within SLO / insufficient_data / monitoring_paused /
-        already rolled_back) — caller continues normal operation.
+    0   no rollback needed (recommendation ∈ {continue, insufficient_data,
+        monitoring_paused, no_rollback_needed, already_rolled_back,
+        concurrent_apply_in_progress}) — caller continues normal operation.
     2   rollback triggered (planned in --dry-run, applied with --apply) —
         caller can scrape stdout JSON to send the alert.
     1   error (invalid argument, manifest unreadable, DB write failure, etc.)

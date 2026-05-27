@@ -8,6 +8,7 @@ Real data discipline (per ~/.claude/CLAUDE.md):
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -19,6 +20,7 @@ from backend import db
 from backend.services.promotion_rollback_applier import (
     REASON_ALREADY_ROLLED_BACK,
     REASON_APPLIED,
+    REASON_CONCURRENT_APPLY,
     REASON_DRY_RUN,
     REASON_INSUFFICIENT_DATA,
     REASON_MISSING_BASELINE_BINDINGS,
@@ -29,6 +31,7 @@ from backend.services.promotion_rollback_applier import (
     REC_INSUFFICIENT,
     REC_MONITORING_PAUSED,
     REC_ROLLBACK,
+    ROLLBACK_LOCK_FILENAME,
     ROLLED_BACK_STATE,
     REVIEWER,
     apply_rollback_decision,
@@ -52,6 +55,7 @@ def _make_manifest(
     promotion_state: str = "p50",
     bindings: dict[str, str] | None = None,
     rollback_baseline: dict[str, Any] | None = None,
+    rollback_forensics: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     out: dict[str, Any] = {
         "schema_version": 1,
@@ -65,6 +69,8 @@ def _make_manifest(
     }
     if rollback_baseline is not None:
         out["rollback_baseline"] = rollback_baseline
+    if rollback_forensics is not None:
+        out["rollback_forensics"] = rollback_forensics
     return out
 
 
@@ -133,30 +139,48 @@ def test_rollback_apply_writes_manifest_and_audit(
     assert result["applied"] is True
     assert result["reason"] == REASON_APPLIED
     assert result["dry_run"] is False
+    # Wave 3 H-3: completed id is back-compat; full pair under audit_log_ids.
     assert result["audit_log_id"] >= 1
+    assert "audit_log_ids" in result
+    assert result["audit_log_ids"]["rollback_started"] >= 1
+    assert result["audit_log_ids"]["rollback_completed"] == result["audit_log_id"]
+    assert (
+        result["audit_log_ids"]["rollback_started"]
+        < result["audit_log_ids"]["rollback_completed"]
+    )
 
     # Manifest on disk should now be rolled_back.
     new_payload = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert new_payload["promotion_state"] == ROLLED_BACK_STATE
-    # Active bindings snapshotted into rollback_baseline.bindings.
-    assert new_payload["rollback_baseline"]["bindings"] == _VALID_BINDINGS
-    assert new_payload["rollback_baseline"]["rolled_back_at"]
-    assert new_payload["rollback_baseline"]["rolled_back_from_state"] == "p25"
+    # Wave 3 H-2: active bindings snapshotted into rollback_forensics.failed_snapshot,
+    # NOT rollback_baseline (which carries the revert target).
+    assert new_payload["rollback_forensics"]["failed_snapshot"]["bindings"] == _VALID_BINDINGS
+    assert new_payload["rollback_forensics"]["failed_snapshot"]["rolled_back_at"]
+    assert new_payload["rollback_forensics"]["failed_snapshot"]["from_state"] == "p25"
+    # Wave 3 H-2: rollback_baseline preserved (untouched by applier — it is
+    # the revert-target schema, reserved for revert tooling).
+    assert "rollback_baseline" not in new_payload
 
-    # Audit log row exists w/ correct reviewer + reason summary.
+    # Wave 3 H-3: audit-first → two rows share request_id correlation id.
     with db.connect() as conn:
-        row = conn.execute(
-            "SELECT reviewer, endpoint, reason, outcome, http_status, payload_json "
-            "FROM ops_audit_log WHERE id = ?",
-            (result["audit_log_id"],),
-        ).fetchone()
-    assert row is not None
-    assert row["reviewer"] == REVIEWER
-    assert row["endpoint"] == "promotion_rollback_applier.apply"
-    assert "comfyui_failure_rate" in row["reason"]
-    assert row["outcome"] == "ok"
-    assert row["http_status"] == 200
-    payload = json.loads(row["payload_json"])
+        rows = conn.execute(
+            "SELECT id, reviewer, endpoint, reason, outcome, http_status, "
+            "       payload_json, request_id "
+            "FROM ops_audit_log "
+            "WHERE request_id = ? ORDER BY id ASC",
+            (result["request_id"],),
+        ).fetchall()
+    assert len(rows) == 2, f"expected exactly 2 audit rows; got {len(rows)}"
+    started, completed = rows[0], rows[1]
+    assert started["outcome"] == "rollback_started"
+    assert started["http_status"] == 202
+    assert completed["outcome"] == "rollback_completed"
+    assert completed["http_status"] == 200
+    for row in (started, completed):
+        assert row["reviewer"] == REVIEWER
+        assert row["endpoint"] == "promotion_rollback_applier.apply"
+        assert "comfyui_failure_rate" in row["reason"]
+    payload = json.loads(completed["payload_json"])
     assert payload["decision_recommendation"] == REC_ROLLBACK
     assert payload["from_state"] == "p25"
 
@@ -227,12 +251,23 @@ def test_already_rolled_back_is_idempotent(
         manifest_path,
         _make_manifest(
             promotion_state=ROLLED_BACK_STATE,
+            # rollback_baseline preserved as the prior-approved-healthy
+            # revert target (Wave 3 H-2 semantic split).
             rollback_baseline={
                 "manifest_ref": "prior-sha",
                 "captured_at": "2026-05-20T00:00:00+00:00",
                 "bindings": _VALID_BINDINGS,
-                "rolled_back_at": "2026-05-20T00:00:00+00:00",
-                "rolled_back_from_state": "p100",
+            },
+            # rollback_forensics.failed_snapshot is what the *previous* apply
+            # would have written.
+            rollback_forensics={
+                "failed_snapshot": {
+                    "bindings": _VALID_BINDINGS,
+                    "from_state": "p100",
+                    "rolled_back_at": "2026-05-20T00:00:00+00:00",
+                    "manifest_ref": None,
+                    "captured_at": None,
+                },
             },
         ),
     )
@@ -533,7 +568,129 @@ def test_unknown_recommendation_is_noop_with_warning(
 
 
 # ---------------------------------------------------------------------------
-# 13) CLI smoke — script returns proper exit codes
+# 13) Wave 3 P0.5 H-3 — manifest write fails after audit-first → aborted row
+#     written, started row preserved, manifest untouched, OSError raised.
+# ---------------------------------------------------------------------------
+
+
+def test_audit_aborted_row_on_manifest_write_failure(
+    temp_db: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """audit-first invariant: when atomic manifest write fails AFTER the
+    rollback_started INSERT, we MUST insert a correlated rollback_aborted
+    row (so forensics can pair them by request_id) and leave the manifest
+    bytes untouched. The raise surface lets the caller exit 1."""
+    manifest_path = tmp_path / "manifest.json"
+    _write_manifest(manifest_path, _make_manifest(promotion_state="p25"))
+    pre_bytes = manifest_path.read_bytes()
+
+    def failing_replace(src: Any, dst: Any) -> None:
+        raise OSError("simulated ENOSPC during atomic rename")
+
+    monkeypatch.setattr(
+        "backend.services.promotion_rollback_applier.os.replace", failing_replace
+    )
+
+    with pytest.raises(OSError):
+        apply_rollback_decision(
+            _make_decision(recommendation=REC_ROLLBACK, violations=_rollback_violation()),
+            dry_run=False,
+            manifest_path=manifest_path,
+            request_id="test-req-aborted",
+        )
+
+    # Manifest untouched on disk (atomic guarantee).
+    assert manifest_path.read_bytes() == pre_bytes
+
+    # Audit table: exactly TWO rows with the correlation id, ordered
+    # started → aborted (no completed row).
+    with db.connect() as conn:
+        rows = conn.execute(
+            "SELECT outcome, http_status, response_json "
+            "FROM ops_audit_log WHERE request_id = ? ORDER BY id ASC",
+            ("test-req-aborted",),
+        ).fetchall()
+    assert [r["outcome"] for r in rows] == ["rollback_started", "rollback_aborted"]
+    assert rows[0]["http_status"] == 202
+    assert rows[1]["http_status"] == 500
+    aborted_response = json.loads(rows[1]["response_json"])
+    assert aborted_response["phase"] == "rollback_aborted"
+    assert "ENOSPC" in aborted_response["error"]
+    assert aborted_response["correlation_started_id"] >= 1
+
+
+# ---------------------------------------------------------------------------
+# 14) Wave 3 P0.5 H-4 — concurrent fcntl.flock holder defers cleanly
+# ---------------------------------------------------------------------------
+
+
+def test_concurrent_apply_in_progress_yields_clean_noop(
+    temp_db: Path, tmp_path: Path
+) -> None:
+    """Simulate another process holding the rollback sentinel lock: the
+    applier MUST return ``concurrent_apply_in_progress`` and write neither
+    the manifest nor any audit row (the holder owns the audit trail)."""
+    manifest_path = tmp_path / "manifest.json"
+    _write_manifest(manifest_path, _make_manifest(promotion_state="p50"))
+    pre_bytes = manifest_path.read_bytes()
+
+    lock_path = manifest_path.parent / ROLLBACK_LOCK_FILENAME
+    # Acquire the lock in this test process FD — applier in same process
+    # (POSIX advisory locks are per-FD), so the applier's separate fd will
+    # see the lock held.
+    fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+        result = apply_rollback_decision(
+            _make_decision(
+                recommendation=REC_ROLLBACK, violations=_rollback_violation()
+            ),
+            dry_run=False,
+            manifest_path=manifest_path,
+            request_id="test-req-locked",
+        )
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+
+    assert result["applied"] is False
+    assert result["reason"] == REASON_CONCURRENT_APPLY
+    assert result["error"]
+    # Manifest untouched.
+    assert manifest_path.read_bytes() == pre_bytes
+    # No audit row written under the deferred request_id.
+    with db.connect() as conn:
+        n = conn.execute(
+            "SELECT COUNT(*) AS n FROM ops_audit_log WHERE request_id = ?",
+            ("test-req-locked",),
+        ).fetchone()["n"]
+    assert n == 0
+
+
+def test_apply_creates_lock_file_in_manifest_dir(
+    temp_db: Path, tmp_path: Path
+) -> None:
+    """Sanity: a successful apply leaves the sentinel lock file on disk in
+    the manifest's parent directory (it is intentionally kept so subsequent
+    crons can lock it; flock state is per-FD, not persisted to inode)."""
+    manifest_path = tmp_path / "manifest.json"
+    _write_manifest(manifest_path, _make_manifest(promotion_state="p25"))
+
+    apply_rollback_decision(
+        _make_decision(recommendation=REC_ROLLBACK, violations=_rollback_violation()),
+        dry_run=False,
+        manifest_path=manifest_path,
+    )
+
+    expected_lock = manifest_path.parent / ROLLBACK_LOCK_FILENAME
+    assert expected_lock.exists()
+
+
+# ---------------------------------------------------------------------------
+# 15) CLI smoke — script returns proper exit codes
 # ---------------------------------------------------------------------------
 
 
