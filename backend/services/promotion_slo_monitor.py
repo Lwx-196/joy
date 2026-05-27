@@ -27,12 +27,16 @@
 from __future__ import annotations
 
 import json
+import logging
+import os
 import sqlite3
 import sys
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
+
+_logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Threshold / config 默认值（与 slo_thresholds.json 同源；JSON 为权威，本常量
@@ -77,6 +81,19 @@ RECOMMENDATION_MONITORING_PAUSED = "monitoring_paused"
 # `shadow` 与 `rolled_back` 是非灰度态（前者尚未发布，后者已撤回），均走
 # insufficient_data；fail-closed 默认 'shadow' 也走 insufficient_data。
 _PROMOTED_STATES: frozenset[str] = frozenset({"p10", "p25", "p50", "p100"})
+
+# Baseline provenance gate — eval-auditor C-2 (Wave 3 Agent C).
+# Required fields any thresholds JSON must carry; baseline > BASELINE_STALE_DAYS
+# old → `baseline_stale` SLO violation (signals operator to re-calibrate).
+BASELINE_STALE_DAYS = 60
+_REQUIRED_PROVENANCE_FIELDS: tuple[str, ...] = (
+    "measured_at",
+    "window_hours",
+    "sample_size",
+    "computed_by",
+    "computed_at_main_sha",
+)
+_SLO_TEST_MODE_ENV = "SLO_TEST_MODE"
 
 # Endpoint 关键字 — `ops_audit_log.endpoint` 匹配 delivery / gate / batch-rerun 三类
 _DELIVERY_GATE_ENDPOINT_KEYWORDS: tuple[str, ...] = (
@@ -123,21 +140,106 @@ class SLOReport:
 # ---------------------------------------------------------------------------
 
 
+def _is_test_mode() -> bool:
+    """Permissive mode for tests / dev. Production keeps fail-closed semantics."""
+    return os.environ.get(_SLO_TEST_MODE_ENV, "").strip() not in ("", "0", "false", "False")
+
+
+def _validate_baseline_provenance(provenance: Any) -> dict[str, Any]:
+    """Eval-auditor C-2: thresholds JSON must carry full provenance so baseline
+    numbers are auditable + falsifiable. Five required fields + types.
+
+    Production (`SLO_TEST_MODE` unset/0): missing/malformed → ValueError.
+    Test (`SLO_TEST_MODE=1`): warn + return empty dict so legacy fixtures don't
+    break. Callers downstream treat empty provenance as "stale unknown".
+    """
+    if not isinstance(provenance, dict):
+        msg = (
+            "invalid baseline_provenance: expected object, got "
+            f"{type(provenance).__name__}"
+        )
+        if _is_test_mode():
+            _logger.warning(msg)
+            return {}
+        raise ValueError(msg)
+
+    errors: list[str] = []
+    for field_name in _REQUIRED_PROVENANCE_FIELDS:
+        if field_name not in provenance:
+            errors.append(f"missing field '{field_name}'")
+
+    if not errors:
+        # Type checks
+        measured_at = provenance.get("measured_at")
+        if not isinstance(measured_at, str) or not measured_at:
+            errors.append("'measured_at' must be non-empty ISO8601 string")
+        else:
+            try:
+                parsed = datetime.fromisoformat(measured_at)
+            except ValueError as exc:
+                errors.append(f"'measured_at' is not ISO8601: {exc}")
+            else:
+                if parsed.tzinfo is None:
+                    errors.append("'measured_at' must be timezone-aware")
+
+        window_hours = provenance.get("window_hours")
+        if not isinstance(window_hours, int) or isinstance(window_hours, bool) or window_hours <= 0:
+            errors.append("'window_hours' must be positive int")
+
+        sample_size = provenance.get("sample_size")
+        if (
+            not isinstance(sample_size, int)
+            or isinstance(sample_size, bool)
+            or sample_size < 0
+        ):
+            errors.append("'sample_size' must be non-negative int")
+
+        computed_by = provenance.get("computed_by")
+        if not isinstance(computed_by, str) or not computed_by.strip():
+            errors.append("'computed_by' must be non-empty string")
+
+        computed_sha = provenance.get("computed_at_main_sha")
+        if not isinstance(computed_sha, str) or not computed_sha.strip():
+            errors.append("'computed_at_main_sha' must be non-empty string")
+
+    if errors:
+        msg = "invalid baseline_provenance: " + "; ".join(errors)
+        if _is_test_mode():
+            _logger.warning(msg)
+            return {}
+        raise ValueError(msg)
+
+    return dict(provenance)
+
+
 def load_default_thresholds(path: Path | None = None) -> dict[str, Any]:
     """Load thresholds JSON. Returns the full structure (thresholds + baseline +
-    sample size + window). Raises if file unreadable / malformed."""
+    baseline_provenance + sample size + window). Raises ValueError if file is
+    malformed or `baseline_provenance` is missing/invalid in production mode.
+    """
     target = Path(path) if path else _DEFAULT_THRESHOLDS_FILE
     if not target.exists():
+        # Pure code-default path. Provenance unknown; test-only fallback.
         return {
             "thresholds": dict(_DEFAULT_THRESHOLDS),
             "baseline": dict(_DEFAULT_BASELINE),
+            "baseline_provenance": {},
             "minimum_sample_size": DEFAULT_MINIMUM_SAMPLE_SIZE,
             "default_window_hours": DEFAULT_WINDOW_HOURS,
         }
-    raw = json.loads(target.read_text(encoding="utf-8"))
+    try:
+        raw = json.loads(target.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"invalid SLO thresholds JSON at {target}: {exc}") from exc
+    if not isinstance(raw, dict):
+        raise ValueError(
+            f"invalid SLO thresholds JSON at {target}: expected object root"
+        )
+    provenance = _validate_baseline_provenance(raw.get("baseline_provenance"))
     return {
         "thresholds": {**_DEFAULT_THRESHOLDS, **dict(raw.get("thresholds") or {})},
         "baseline": {**_DEFAULT_BASELINE, **dict(raw.get("baseline") or {})},
+        "baseline_provenance": provenance,
         "minimum_sample_size": int(
             raw.get("minimum_sample_size", DEFAULT_MINIMUM_SAMPLE_SIZE)
         ),
@@ -147,17 +249,54 @@ def load_default_thresholds(path: Path | None = None) -> dict[str, Any]:
     }
 
 
+def _check_baseline_stale(
+    provenance: dict[str, Any],
+    *,
+    now: datetime | None = None,
+    stale_days: int = BASELINE_STALE_DAYS,
+) -> dict[str, Any] | None:
+    """If provenance.measured_at is older than `stale_days`, return a violation
+    dict. Returns None when fresh or provenance unavailable (test mode)."""
+    if not provenance:
+        return None
+    measured_at_raw = provenance.get("measured_at")
+    if not isinstance(measured_at_raw, str) or not measured_at_raw:
+        return None
+    try:
+        measured_at = datetime.fromisoformat(measured_at_raw)
+    except ValueError:
+        return None
+    if measured_at.tzinfo is None:
+        measured_at = measured_at.replace(tzinfo=timezone.utc)
+    current = now or datetime.now(timezone.utc)
+    age = current - measured_at
+    if age <= timedelta(days=stale_days):
+        return None
+    return {
+        "dimension": "baseline_stale",
+        "actual_days": round(age.total_seconds() / 86400.0, 3),
+        "threshold_days": stale_days,
+        "comparator": "<=",
+        "context": {
+            "measured_at": measured_at_raw,
+            "computed_by": provenance.get("computed_by"),
+            "computed_at_main_sha": provenance.get("computed_at_main_sha"),
+        },
+    }
+
+
 def _merge_thresholds(
     user_thresholds: dict[str, Any] | None,
 ) -> dict[str, Any]:
     """Merge user override on top of file defaults. user_thresholds may carry the
-    full structure (`{thresholds, baseline, minimum_sample_size}`) OR a flat
-    map of threshold names (treated as `thresholds` overlay)."""
+    full structure (`{thresholds, baseline, baseline_provenance, ...}`) OR a
+    flat map of threshold names (treated as `thresholds` overlay)."""
     base = load_default_thresholds()
     if not user_thresholds:
         return base
     if "thresholds" in user_thresholds or "baseline" in user_thresholds:
         # Full structured override
+        overlay_provenance = user_thresholds.get("baseline_provenance")
         return {
             "thresholds": {
                 **base["thresholds"],
@@ -167,6 +306,11 @@ def _merge_thresholds(
                 **base["baseline"],
                 **dict(user_thresholds.get("baseline") or {}),
             },
+            "baseline_provenance": (
+                dict(overlay_provenance)
+                if isinstance(overlay_provenance, dict)
+                else dict(base.get("baseline_provenance") or {})
+            ),
             "minimum_sample_size": int(
                 user_thresholds.get("minimum_sample_size", base["minimum_sample_size"])
             ),
@@ -410,6 +554,7 @@ def evaluate_window(
     config = _merge_thresholds(thresholds)
     th = config["thresholds"]
     bl = config["baseline"]
+    provenance: dict[str, Any] = dict(config.get("baseline_provenance") or {})
     min_sample = int(config["minimum_sample_size"])
 
     cutoff = _cutoff_iso(window_hours)
@@ -451,6 +596,8 @@ def evaluate_window(
         + gate_evidence["blocker_count"]
     )
 
+    stale_violation = _check_baseline_stale(provenance)
+
     evidence = {
         "comfyui_failure": comfyui_evidence,
         "vlm_disagreement": vlm_evidence,
@@ -459,6 +606,7 @@ def evaluate_window(
         "cutoff_iso": cutoff,
         "thresholds": th,
         "baseline": bl,
+        "baseline_provenance": provenance,
         "minimum_sample_size": min_sample,
         "promotion_state": resolved_state,
     }
@@ -487,6 +635,8 @@ def evaluate_window(
         )
 
     violations: list[dict[str, Any]] = []
+    if stale_violation is not None:
+        violations.append(stale_violation)
 
     # 1) comfyui failure rate
     cr_max = float(th["comfyui_failure_rate_max"])
@@ -586,6 +736,7 @@ __all__ = [
     "SLOReport",
     "evaluate_window",
     "load_default_thresholds",
+    "BASELINE_STALE_DAYS",
     "DEFAULT_WINDOW_HOURS",
     "DEFAULT_MINIMUM_SAMPLE_SIZE",
     "RECOMMENDATION_CONTINUE",

@@ -3,6 +3,7 @@
   "thresholds": {
     "comfyui_failure_rate_max": 0.05,
     "vlm_disagreement_rate_max": 0.10,
+    "vlm_judge_missing_rate_max": 0.10,
     "delivery_gate_rejection_rate_multiplier_max": 1.05,
     "pre_render_gate_blocker_multiplier_max": 1.10
   },
@@ -10,7 +11,14 @@
     "delivery_gate_rejection_rate": 0.10,
     "pre_render_gate_blocker_count": 5
   },
+  "baseline_provenance": {
+    "measured_at": "2026-05-28T00:00:00+00:00",
+    "window_hours": 24,
+    "sample_size": 0,
+    "computed_by": "manual_seed",
+    "computed_at_main_sha": "d6dc5b1"
+  },
   "minimum_sample_size": 30,
   "default_window_hours": 48,
-  "notes": "Edit thresholds + baseline to tune SLO. Baseline should be measured during shadow period. Per plan §P2.4."
+  "notes": "Edit thresholds + baseline to tune SLO. Baseline should be measured during shadow period and refreshed via backend.scripts.calibrate_slo_baseline. baseline_provenance is REQUIRED for load_default_thresholds (fail-closed in prod, warning in SLO_TEST_MODE). Per plan §P2.4 + Wave 3 Agent C eval-auditor C-2."
 }
