@@ -3,9 +3,9 @@
 Five required cases per plan §P2.1:
   1. hash mismatch
   2. scope invalid
-  3. approver missing (when state != draft)
+  3. approver missing (when state != shadow)
   4. expired approved_at (older than TTL)
-  5. promotion_state invalid
+  5. promotion_state invalid (must be in shadow|p10|p25|p50|p100|rolled_back per plan §P2.4)
 
 Each test isolates the validator with a tmp manifest dict + injected `now` so
 no DB / FS state is touched.
@@ -43,7 +43,7 @@ def _good_manifest() -> dict:
         "scope": "production",
         "approver": "linweixiang0301@gmail.com",
         "approved_at": "2026-05-20T10:00:00+00:00",
-        "promotion_state": "approved",
+        "promotion_state": "p10",
         "bindings": deepcopy(bindings),
         "rollback_baseline": {
             "manifest_ref": None,
@@ -101,12 +101,10 @@ def test_boundary_scope_invalid_flagged():
     assert "scope_invalid" in codes
 
 
-def test_boundary_approver_missing_when_state_pending_review():
+def test_boundary_approver_missing_when_state_p10():
     manifest = _good_manifest()
     manifest["approver"] = ""  # empty string treated as missing
-    manifest["promotion_state"] = "pending_review"
-    # approved_at no longer required at pending_review — drop to keep test focused.
-    manifest["approved_at"] = None
+    manifest["promotion_state"] = "p10"  # rollout state — approver required
     issues = validate_manifest(
         manifest,
         expected_bindings=_good_expected(),
@@ -141,7 +139,7 @@ def test_boundary_approved_at_expired_beyond_ttl():
 
 def test_boundary_promotion_state_invalid_value():
     manifest = _good_manifest()
-    manifest["promotion_state"] = "kinda-approved"
+    manifest["promotion_state"] = "p15"  # not in {shadow,p10,p25,p50,p100,rolled_back}
     issues = validate_manifest(
         manifest,
         expected_bindings=_good_expected(),

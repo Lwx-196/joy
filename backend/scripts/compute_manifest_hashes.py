@@ -51,7 +51,11 @@ BINDING_NAMES: tuple[str, ...] = (
 
 VALID_SCOPES: frozenset[str] = frozenset({"production", "staging", "canary"})
 VALID_PROMOTION_STATES: frozenset[str] = frozenset(
-    {"draft", "pending_review", "approved", "rejected", "rolled_back"}
+    {"shadow", "p10", "p25", "p50", "p100", "rolled_back"}
+)
+# States that require an approver + non-expired approved_at (rollout levels).
+ROLLOUT_PROMOTION_STATES: frozenset[str] = frozenset(
+    {"p10", "p25", "p50", "p100"}
 )
 
 # Approvals older than this many days are considered stale / expired.
@@ -233,9 +237,9 @@ def validate_manifest(
             )
         )
 
-    # approver — required once leaving draft.
+    # approver — required for any rollout state (anything above shadow).
     approver = manifest.get("approver")
-    if state and state != "draft" and not (isinstance(approver, str) and approver.strip()):
+    if state and state != "shadow" and not (isinstance(approver, str) and approver.strip()):
         issues.append(
             ValidationIssue(
                 "approver_missing",
@@ -244,15 +248,15 @@ def validate_manifest(
             )
         )
 
-    # approved_at — required once approved; freshness checked.
+    # approved_at — required for rollout states (p10/p25/p50/p100); freshness checked.
     approved_at_raw = manifest.get("approved_at")
-    if state == "approved":
+    if state in ROLLOUT_PROMOTION_STATES:
         if not isinstance(approved_at_raw, str):
             issues.append(
                 ValidationIssue(
                     "approved_at_missing",
                     "approved_at",
-                    "approved_at must be ISO-8601 string when promotion_state='approved'",
+                    f"approved_at must be ISO-8601 string when promotion_state={state!r}",
                 )
             )
         else:
