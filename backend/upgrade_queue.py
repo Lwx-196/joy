@@ -165,17 +165,25 @@ class UpgradeQueue:
                 return False
             if row["status"] != "queued":
                 return False
-            conn.execute(
+            cancelled = conn.execute(
                 """
                 UPDATE upgrade_jobs
                 SET status = 'cancelled',
                     finished_at = ?,
                     recovery_token = NULL,
                     recovery_claimed_at = NULL
-                WHERE id = ?
+                WHERE id = ? AND status = 'queued'
                 """,
                 (_now_iso(), job_id),
-            )
+            ).rowcount
+            # CAS guard: if worker's _execute_upgrade claimed the row between
+            # our SELECT and this UPDATE, rowcount=0 and we must return False
+            # rather than silently overwriting 'running' with 'cancelled'
+            # (which would leak a job_pool slot to a subprocess that no longer
+            # has a DB row to write back to). Mirrors the pattern in
+            # _execute_upgrade lines 209-220.
+            if cancelled != 1:
+                return False
         self._publish(
             {
                 "type": "job_update",

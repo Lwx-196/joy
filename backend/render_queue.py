@@ -1439,17 +1439,23 @@ class RenderQueue:
                 return False
             if row["status"] != "queued":
                 return False
-            conn.execute(
+            cancelled = conn.execute(
                 """
                 UPDATE render_jobs
                 SET status = 'cancelled',
                     finished_at = ?,
                     recovery_token = NULL,
                     recovery_claimed_at = NULL
-                WHERE id = ?
+                WHERE id = ? AND status = 'queued'
                 """,
                 (_now_iso(), job_id),
-            )
+            ).rowcount
+            # CAS guard: if worker's _execute_render claimed the row between
+            # our SELECT and this UPDATE, rowcount=0 and we must return False
+            # rather than silently overwriting 'running' with 'cancelled'.
+            # Mirrors the pattern in _execute_render claim UPDATE (1606-1613).
+            if cancelled != 1:
+                return False
         self._publish(
             {
                 "type": "job_update",
