@@ -161,6 +161,14 @@ class SourceGroupWarningAcceptanceRequest(BaseModel):
     message_contains: str | None = Field(default=None, max_length=200)
     reviewer: str | None = Field(default="operator", max_length=64)
     note: str | None = Field(default=None, max_length=500)
+
+
+class ClassifyImagesRequest(BaseModel):
+    dry_run: bool | None = None  # legacy; when None, mode wins
+    mode: str | None = Field(default=None, description="dry-run / live-no-apply / apply")
+    max_items: int = Field(default=50, ge=1, le=500)
+    concurrency: int = Field(default=3, ge=1, le=10)
+    timeout_seconds: float = Field(default=30.0, ge=1.0, le=300.0)
 _IMAGE_REVIEW_META_KEY = "image_review_states"
 _IMAGE_REVIEW_VERDICT_LABEL = {
     "usable": "已确认可用",
@@ -5163,6 +5171,36 @@ def case_source_group(case_id: int) -> dict[str, Any]:
             "source_group_selection": selection_controls,
         },
     }
+
+
+@router.post("/{case_id}/classify-images")
+def classify_case_images(case_id: int, payload: ClassifyImagesRequest) -> dict[str, Any]:
+    # Resolve PLAN P0-2 三态 mode：mode 优先；legacy dry_run=True→dry-run; False→apply
+    if payload.mode:
+        resolved_mode = payload.mode
+    elif payload.dry_run is False:
+        resolved_mode = "apply"
+    else:
+        resolved_mode = "dry-run"
+    if resolved_mode not in {"dry-run", "live-no-apply", "apply"}:
+        raise HTTPException(400, f"invalid mode: {resolved_mode!r}")
+    with db.connect() as conn:
+        row = conn.execute(
+            "SELECT id FROM cases WHERE id = ? AND trashed_at IS NULL",
+            (case_id,),
+        ).fetchone()
+        if not row:
+            raise HTTPException(404, "case not found")
+        provider = None if resolved_mode == "dry-run" else VLMProvider(env=dict(os.environ))
+        return vlm_source_classifier.run_classification(
+            conn,
+            provider=provider,
+            case_id=case_id,
+            max_items=payload.max_items,
+            mode=resolved_mode,
+            concurrency=payload.concurrency,
+            timeout=payload.timeout_seconds,
+        )
 
 
 @router.post("/trash", response_model=CaseTrashResponse)

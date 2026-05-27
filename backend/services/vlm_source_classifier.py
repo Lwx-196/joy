@@ -177,7 +177,7 @@ def _parse_result(image_path: Path, response: VLMResponse) -> ClassificationResu
 
 def classify_image(image_path: Path, provider: VLMProvider, *, timeout: float = 30.0) -> ClassificationResult:
     path = Path(image_path)
-    response = provider.call_vision(CLASSIFICATION_PROMPT, [path], timeout=timeout)
+    response = provider.call_vision(CLASSIFICATION_PROMPT, [path], timeout=timeout, purpose="classifier")
     return _parse_result(path, response)
 
 
@@ -187,11 +187,27 @@ def classify_batch(
     *,
     concurrency: int = 3,
     timeout: float = 30.0,
-) -> list[ClassificationResult]:
+    return_exceptions: bool = False,
+) -> list[ClassificationResult] | list[ClassificationResult | BaseException]:
     paths = [Path(path) for path in image_paths]
     requests = [VLMRequest(prompt=CLASSIFICATION_PROMPT, images=[path], timeout=timeout, purpose="classifier") for path in paths]
-    responses = provider.call_vision_batch(requests, concurrency=max(1, int(concurrency or 1)))
-    return [_parse_result(path, response) for path, response in zip(paths, responses)]
+    responses = provider.call_vision_batch(
+        requests,
+        concurrency=max(1, int(concurrency or 1)),
+        return_exceptions=return_exceptions,
+    )
+    results: list[ClassificationResult | BaseException] = []
+    for path, response in zip(paths, responses):
+        if return_exceptions and isinstance(response, BaseException):
+            results.append(response)
+            continue
+        try:
+            results.append(_parse_result(path, response))
+        except (ValueError, TypeError, AttributeError) as exc:
+            if not return_exceptions:
+                raise
+            results.append(exc)
+    return results
 
 
 def _has_manual_override(conn: sqlite3.Connection, case_id: int | None, image_path: str) -> bool:
@@ -346,6 +362,9 @@ def _record_usage(
     )
 
 
+VALID_RUN_MODES = {"dry-run", "live-no-apply", "apply"}
+
+
 def run_classification(
     conn: sqlite3.Connection,
     *,
@@ -354,14 +373,19 @@ def run_classification(
     all_low_confidence: bool = False,
     max_items: int = 50,
     dry_run: bool = True,
+    mode: str | None = None,
     concurrency: int = 3,
     timeout: float = 30.0,
 ) -> dict[str, Any]:
     if case_id is None and not all_low_confidence:
         raise ValueError("case_id is required unless all_low_confidence is true")
+    resolved_mode = mode if mode is not None else ("dry-run" if dry_run else "apply")
+    if resolved_mode not in VALID_RUN_MODES:
+        raise ValueError(f"invalid mode: {resolved_mode!r}; expected one of {sorted(VALID_RUN_MODES)}")
     queue = fetch_classification_queue(conn, case_id=case_id, max_items=max_items)
     report: dict[str, Any] = {
-        "run_status": "dry_run" if dry_run else "pending",
+        "run_status": "dry_run" if resolved_mode == "dry-run" else "pending",
+        "mode": resolved_mode,
         "case_id": case_id,
         "all_low_confidence": bool(all_low_confidence),
         "candidate_count": len(queue),
@@ -381,28 +405,66 @@ def run_classification(
             for item in queue
         ],
     }
-    if dry_run:
+    if resolved_mode == "dry-run":
         return report
     if provider is None:
         report["run_status"] = "blocked_missing_vlm_provider"
         return report
     paths = [item.image_abs_path for item in queue]
     try:
-        results = classify_batch(paths, provider, concurrency=concurrency, timeout=timeout)
+        results = classify_batch(
+            paths,
+            provider,
+            concurrency=concurrency,
+            timeout=timeout,
+            return_exceptions=True,
+        )
     except (VLMRequestError, ValueError, OSError) as exc:
         report["run_status"] = "blocked_vlm_classification_failed"
         report["error_count"] = len(queue)
         report["errors"] = [{"reason": str(exc)}]
         return report
+
     classified = 0
     skipped = 0
+    errors: list[dict[str, Any]] = []
+    previews: list[dict[str, Any]] = []
     for item, result in zip(queue, results):
+        if isinstance(result, BaseException):
+            errors.append({
+                "observation_id": item.observation_id,
+                "case_id": item.case_id,
+                "image_path": item.image_path,
+                "reason": f"{type(result).__name__}: {result}",
+            })
+            continue
         try:
-            updated = apply_classification_result(conn, item, result)
-            _record_usage(conn, item, result, status="success")
+            if resolved_mode == "apply":
+                updated = apply_classification_result(conn, item, result)
+                _record_usage(conn, item, result, status="success")
+            else:
+                updated = False
+                previews.append({
+                    "observation_id": item.observation_id,
+                    "case_id": item.case_id,
+                    "image_path": item.image_path,
+                    "predicted_phase": result.phase,
+                    "predicted_view": result.view,
+                    "predicted_body_part": result.body_part,
+                    "predicted_confidence": result.confidence,
+                    "would_apply": result.confidence >= MIN_VLM_APPLY_CONFIDENCE,
+                    "current_phase": item.phase,
+                    "current_view": item.view,
+                    "current_confidence": item.confidence,
+                })
+                _record_usage(conn, item, result, status="live_no_apply")
         except (sqlite3.Error, ValueError) as exc:
-            report.setdefault("errors", []).append({"observation_id": item.observation_id, "reason": str(exc)})
-            report["error_count"] += 1
+            errors.append({
+                "observation_id": item.observation_id,
+                "case_id": item.case_id,
+                "image_path": item.image_path,
+                "reason": str(exc),
+            })
             _record_usage(conn, item, result, status="error", error_detail=str(exc))
             continue
         if updated:
@@ -411,5 +473,14 @@ def run_classification(
             skipped += 1
     report["classified_count"] = classified
     report["skipped_count"] = skipped
-    report["run_status"] = "completed_vlm_classification" if classified or skipped else "blocked_no_classification_candidates"
+    report["error_count"] = len(errors)
+    if errors:
+        report["errors"] = errors
+    if resolved_mode == "live-no-apply":
+        report["previews"] = previews
+        would_apply_count = sum(1 for p in previews if p["would_apply"])
+        report["would_apply_count"] = would_apply_count
+        report["run_status"] = "completed_vlm_classification_live_no_apply" if previews else "blocked_no_classification_candidates"
+    else:
+        report["run_status"] = "completed_vlm_classification" if classified or skipped else "blocked_no_classification_candidates"
     return report
