@@ -1,15 +1,92 @@
 """Pre-render source gate for formal render enqueue."""
 from __future__ import annotations
 
+import json
 import sqlite3
 from typing import Any
 
 from .. import db, render_queue, source_images
+from .. import source_selection
 from . import review_ticket_service as tickets
 
 STAGE = "pre_render_gate"
 REQUIRED_SLOTS = ("front", "oblique", "side")
 SLOT_LABELS = {"front": "正面", "oblique": "45°", "side": "侧面"}
+
+
+# ---------------------------------------------------------------------------
+# P0.2-B accepted_warnings 精确匹配（与 source_selection warning 维度对齐）
+# ---------------------------------------------------------------------------
+
+
+def _ticket_matching_dims(ticket: dict[str, Any]) -> dict[str, Any]:
+    """从 ticket 抽出匹配维度。warning-path dims 在 evidence.warning，
+    component-path dims 在 evidence.component；优先 component。"""
+    evidence = ticket.get("evidence") if isinstance(ticket.get("evidence"), dict) else {}
+    component = evidence.get("component") if isinstance(evidence.get("component"), dict) else {}
+    warning = evidence.get("warning") if isinstance(evidence.get("warning"), dict) else {}
+    dim_source = component or warning or {}
+    return {
+        "code": str(ticket.get("reason_code") or ""),
+        "slot": ticket.get("slot") or dim_source.get("slot") or evidence.get("slot"),
+        "selected_files": dim_source.get("selected_files") or [],
+        "message_contains": dim_source.get("message_contains") or "",
+        "message": str(ticket.get("message") or ""),
+    }
+
+
+def _accepted_warning_matches(ticket_dims: dict[str, Any], accepted: dict[str, Any]) -> bool:
+    """slot+code 必匹配 + (selected_files 交集非空 OR message_contains 子串)；
+    accepted 仅给 code+slot 时退化为广义接受。"""
+    if str(accepted.get("code") or "") != str(ticket_dims.get("code") or ""):
+        return False
+    if str(accepted.get("slot") or "") != str(ticket_dims.get("slot") or ""):
+        return False
+    accepted_files = list(accepted.get("selected_files") or [])
+    ticket_files = list(ticket_dims.get("selected_files") or [])
+    mc = str(accepted.get("message_contains") or "")
+    if not accepted_files and not mc:
+        return True  # broad accept by code+slot
+    files_intersect = bool(set(accepted_files) & set(ticket_files)) if accepted_files and ticket_files else False
+    msg_match = bool(mc) and mc in (ticket_dims.get("message") or "")
+    return files_intersect or msg_match
+
+
+def _apply_accepted_warnings(
+    tickets_in: list[dict[str, Any]],
+    accepted_warnings: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    """对 ticket 列表应用 accepted_warnings 过滤：被精确匹配的 ticket 丢弃。"""
+    if not accepted_warnings:
+        return tickets_in
+    accepted = [a for a in accepted_warnings if isinstance(a, dict)]
+    if not accepted:
+        return tickets_in
+    out: list[dict[str, Any]] = []
+    for ticket in tickets_in:
+        dims = _ticket_matching_dims(ticket)
+        if any(_accepted_warning_matches(dims, a) for a in accepted):
+            continue
+        out.append(ticket)
+    return out
+
+
+def _read_accepted_warnings_from_meta(meta_raw: Any) -> list[dict[str, Any]]:
+    """从 cases.meta_json 抽 source_group_selection.accepted_warnings；缺失返 []。"""
+    if isinstance(meta_raw, str):
+        try:
+            meta = json.loads(meta_raw or "{}")
+        except (json.JSONDecodeError, TypeError):
+            meta = {}
+    elif isinstance(meta_raw, dict):
+        meta = meta_raw
+    else:
+        meta = {}
+    controls = source_selection.selection_controls_from_meta(meta)
+    accepted = controls.get("accepted_warnings") if isinstance(controls, dict) else None
+    if not isinstance(accepted, list):
+        return []
+    return [item for item in accepted if isinstance(item, dict)]
 
 
 def _case_rows(conn: sqlite3.Connection, case_id: int) -> tuple[dict[str, Any], list[dict[str, Any]]]:
@@ -283,7 +360,9 @@ def _pair_tickets(selection_plan: dict[str, Any]) -> list[dict[str, Any]]:
                 continue
             code = str(warning.get("code") or "")
             severity = str(warning.get("severity") or "")
-            if severity == "block" and code not in {"identity_embedding_mismatch", "crop_touches_frame"}:
+            # P0.2-B: 移除 crop_touches_frame 硬排除，让 warning-path 也能产 ticket；
+            # 下方 dedup 会处理与 _component_ticket 的重复，accepted_warnings 会做精确豁免。
+            if severity == "block" and code != "identity_embedding_mismatch":
                 out.append(
                     _ticket(
                         ticket_type="source_quality_review",
@@ -355,8 +434,11 @@ def evaluate_pre_render_gate(
     template: str = "tri-compare",
     semantic_judge: str = "auto",
     persist_tickets: bool = False,
+    accepted_warnings: list[dict[str, Any]] | None = None,
     conn: sqlite3.Connection | None = None,
 ) -> dict[str, Any]:
+    """P0.2-B: accepted_warnings 可显式注入；为 None 时自动从 cases.meta_json 读取
+    source_group_selection.accepted_warnings（兼容已有 operator 接受流程）。"""
     owns_conn = conn is None
     active = conn or db.get_conn()
     try:
@@ -387,6 +469,13 @@ def evaluate_pre_render_gate(
             t for t in planned_tickets
             if (str(t.get("reason_code")), t.get("slot")) not in resolved_keys
         ]
+
+        # P0.2-B: 应用 operator 已接受的 warnings（slot+code+selected_files/message_contains 精确匹配）。
+        # 显式入参优先；否则从 cases.meta_json 自动读取以保持 operator UI 既有流程兼容。
+        if accepted_warnings is None:
+            accepted_warnings = _read_accepted_warnings_from_meta(primary.get("meta_json"))
+        if accepted_warnings:
+            planned_tickets = _apply_accepted_warnings(planned_tickets, accepted_warnings)
 
         persisted: list[dict[str, Any]] = []
         if persist_tickets:
