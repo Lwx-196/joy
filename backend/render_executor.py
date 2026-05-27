@@ -541,6 +541,8 @@ def _composition_alert_layers(manifest):
     if not isinstance(render_plan, dict):
         return {"active": alerts, "accepted_review": accepted_alerts}
     selected_files_by_slot = _selected_slot_files_map(manifest) if "_selected_slot_files_map" in globals() else {}
+    # P0.2-C: 显式从 selection_plan 抽 accepted_warnings 传入，不再靠 free var。
+    _acc_warnings = selection_plan.get("accepted_warnings") if isinstance(selection_plan, dict) else []
     for record in render_plan.get("slots") or []:
         if not isinstance(record, dict):
             continue
@@ -559,7 +561,7 @@ def _composition_alert_layers(manifest):
                 "recommended_action": alert.get("recommended_action"),
                 "metrics": diagnostic.get("metrics") or {},
             }
-            accepted = _accepted_warning_match(str(normalized.get("message") or ""), selected_files_by_slot)
+            accepted = _accepted_warning_match(str(normalized.get("message") or ""), selected_files_by_slot, _acc_warnings)
             if accepted:
                 accepted_alert = dict(accepted)
                 accepted_alert["message"] = normalized.get("message")
@@ -1229,9 +1231,11 @@ def _warning_selected_slot(text, selected_slot_by_file):
             return slot
     return None
 
-def _accepted_warning_match(text, selected_files_by_slot):
-    accepted = selection_plan.get("accepted_warnings") if isinstance(selection_plan, dict) else []
-    if not isinstance(accepted, list):
+def _accepted_warning_match(text, selected_files_by_slot, accepted_warnings):
+    # P0.2-C: 改用显式入参，不再依赖隐式 selection_plan 自由变量；可测、可移植、
+    # 不受函数定义顺序影响。
+    accepted = accepted_warnings if isinstance(accepted_warnings, list) else []
+    if not accepted:
         return None
     slot = _warning_slot(text)
     for item in accepted:
@@ -1277,6 +1281,8 @@ def _build_warning_layers(manifest):
         for item in (manifest.get("render_selection_dropped_slots") or [])
         if isinstance(item, dict) and item.get("view")
     }
+    # P0.2-C: 显式从 selection_plan 抽 accepted_warnings 传入，不再靠 free var。
+    _acc_warnings = selection_plan.get("accepted_warnings") if isinstance(selection_plan, dict) else []
     layers = {
         "selected_actionable": [],
         "selected_expected_profile": [],
@@ -1299,7 +1305,7 @@ def _build_warning_layers(manifest):
         if slot and slot in dropped_slot_set:
             layers["dropped_slot_noise"].append(text)
             continue
-        accepted = _accepted_warning_match(text, selected_files_by_slot)
+        accepted = _accepted_warning_match(text, selected_files_by_slot, _acc_warnings)
         if accepted:
             layers["accepted_review"].append(accepted)
             continue
@@ -1307,7 +1313,7 @@ def _build_warning_layers(manifest):
             pose_delta = pose_by_slot.get(slot or "")
             current_pose_warning = current_pose_warnings.get(slot or "") if slot else None
             if current_pose_warning:
-                accepted_current = _accepted_warning_match(current_pose_warning, selected_files_by_slot)
+                accepted_current = _accepted_warning_match(current_pose_warning, selected_files_by_slot, _acc_warnings)
                 if accepted_current:
                     layers["accepted_review"].append(accepted_current)
                 elif slot not in emitted_current_pose_slots:
@@ -1333,7 +1339,7 @@ def _build_warning_layers(manifest):
     for slot, current_pose_warning in current_pose_warnings.items():
         if slot in emitted_current_pose_slots:
             continue
-        accepted_current = _accepted_warning_match(current_pose_warning, selected_files_by_slot)
+        accepted_current = _accepted_warning_match(current_pose_warning, selected_files_by_slot, _acc_warnings)
         if accepted_current:
             layers["accepted_review"].append(accepted_current)
         else:

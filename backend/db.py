@@ -347,6 +347,9 @@ CREATE TABLE IF NOT EXISTS vlm_usage_log (
   latency_ms     INTEGER NOT NULL DEFAULT 0,
   status         TEXT NOT NULL,
   error_detail   TEXT,
+  -- P0.1: 结构化 per-image 失败上下文 {provider, attempt, error_class,
+  -- error_message, traceback}；与 error_detail 互补（后者保留 4000 char 摘要）
+  error_json     TEXT,
   usage_raw_json TEXT NOT NULL DEFAULT '{}',
   created_at     TIMESTAMP NOT NULL
 );
@@ -406,6 +409,11 @@ SIMULATION_JOB_COLUMNS = [
     ("review_note", "TEXT"),
     ("reviewed_at", "TIMESTAMP"),
     ("can_publish", "INTEGER NOT NULL DEFAULT 0"),
+]
+
+# P0.1: vlm_usage_log 加结构化 per-image 失败上下文（旧库 migration）。
+VLM_USAGE_LOG_COLUMNS = [
+    ("error_json", "TEXT"),
 ]
 
 CASE_TRASH_COLUMNS = [
@@ -489,6 +497,10 @@ def _ensure_simulation_job_columns(conn) -> None:
     _ensure_table_columns(conn, "simulation_jobs", SIMULATION_JOB_COLUMNS)
 
 
+def _ensure_vlm_usage_log_columns(conn) -> None:
+    _ensure_table_columns(conn, "vlm_usage_log", VLM_USAGE_LOG_COLUMNS)
+
+
 def _ensure_case_trash_columns(conn) -> None:
     _ensure_table_columns(conn, "cases", CASE_TRASH_COLUMNS)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_cases_trashed ON cases(trashed_at)")
@@ -524,6 +536,7 @@ def init_schema() -> None:
             _ensure_image_override_columns(conn)
             _ensure_manual_columns(conn)
             _ensure_simulation_job_columns(conn)
+            _ensure_vlm_usage_log_columns(conn)
             _ensure_case_trash_columns(conn)
             _record_schema_version(conn)
 

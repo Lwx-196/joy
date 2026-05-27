@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import traceback as _traceback
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -27,6 +28,15 @@ MIN_VLM_APPLY_CONFIDENCE = 0.85
 VALID_PHASES = {"before", "intraop", "after"}
 VALID_VIEWS = {"front", "oblique", "side", "back"}
 VALID_BODY_PARTS = {"face", "body", "unknown"}
+
+# P0.5 (review H-2): cap traceback size to avoid multi-MB blobs landing in DB rows.
+TRACEBACK_MAX_CHARS = 16384
+
+
+def _truncate_tb(tb: str) -> str:
+    if len(tb) <= TRACEBACK_MAX_CHARS:
+        return tb
+    return tb[:TRACEBACK_MAX_CHARS] + f"\n... [truncated {len(tb) - TRACEBACK_MAX_CHARS} chars]"
 
 
 @dataclass(frozen=True)
@@ -344,6 +354,7 @@ def _record_usage(
     *,
     status: str,
     error_detail: str | None = None,
+    error_json: dict[str, Any] | None = None,
 ) -> None:
     record_vlm_usage(
         conn,
@@ -358,6 +369,7 @@ def _record_usage(
         latency_ms=(result.latency_ms if result else 0),
         status=status,
         error_detail=error_detail,
+        error_json=error_json,
         usage_raw=(result.usage_raw if result else {}),
     )
 
@@ -386,6 +398,9 @@ def run_classification(
     report: dict[str, Any] = {
         "run_status": "dry_run" if resolved_mode == "dry-run" else "pending",
         "mode": resolved_mode,
+        # P0.5: 保留原始解析的 mode，让 caller 区分"用户要 apply + 系统降级"
+        # 与"用户直接要 live-no-apply"。fail-closed 改写 mode 不改 requested_mode。
+        "requested_mode": resolved_mode,
         "case_id": case_id,
         "all_low_confidence": bool(all_low_confidence),
         "candidate_count": len(queue),
@@ -425,18 +440,80 @@ def run_classification(
         report["errors"] = [{"reason": str(exc)}]
         return report
 
+    # P0.3-b: fail-closed 守门 — 在 apply 之前先看整批分布是否坍缩；如坍缩则
+    # 强制把 mode 从 apply 降到 live-no-apply，不写 image_observations，但保留
+    # vlm_usage_log 留证。即便 confidence ≥ 0.85 也不放行。
+    from . import vlm_calibration as _vlm_calibration
+
+    batch_records = [
+        {
+            "phase": r.phase,
+            "view": r.view,
+            "body_part": r.body_part,
+            "confidence": float(r.confidence or 0.0),
+        }
+        for r in results
+        if not isinstance(r, BaseException)
+    ]
+    # P0.5 (review H-1)：空 batch_records → status="insufficient_data" 而非误报 "ok"。
+    # 用 detect_distribution_collapse 对空列表返 status="ok" 会让 ops dashboard 看起来
+    # "一切正常"，但实际上 0 个分类成功。明确降级 + fail_closed=True 留证。
+    report["fail_closed"] = False
+    if not batch_records:
+        report["calibration_status"] = "insufficient_data"
+        report["calibration_recommendation"] = (
+            "0 successful classifications in batch; cannot evaluate distribution."
+        )
+        if resolved_mode == "apply":
+            resolved_mode = "live-no-apply"
+            report["mode"] = resolved_mode
+            report["fail_closed"] = True
+            report["fail_closed_reason"] = "insufficient_data: 0 successful classifications"
+    else:
+        calibration = _vlm_calibration.detect_distribution_collapse(batch_records)
+        report["calibration_status"] = calibration.status
+        report["calibration_recommendation"] = calibration.recommendation
+        if calibration.status == "uncalibrated" and resolved_mode == "apply":
+            resolved_mode = "live-no-apply"
+            report["mode"] = resolved_mode
+            report["fail_closed"] = True
+            report["fail_closed_reason"] = (
+                "distribution_collapse: " + calibration.recommendation
+            )
+
     classified = 0
     skipped = 0
     errors: list[dict[str, Any]] = []
     previews: list[dict[str, Any]] = []
     for item, result in zip(queue, results):
         if isinstance(result, BaseException):
+            error_class = type(result).__name__
+            error_message = str(result)
+            tb_text = _truncate_tb(
+                "".join(_traceback.format_exception(type(result), result, result.__traceback__))
+            )
             errors.append({
                 "observation_id": item.observation_id,
                 "case_id": item.case_id,
                 "image_path": item.image_path,
-                "reason": f"{type(result).__name__}: {result}",
+                "reason": f"{error_class}: {error_message}",
             })
+            _record_usage(
+                conn,
+                item,
+                None,
+                status="error",
+                error_detail=f"{error_class}: {error_message}"[:4000],
+                error_json={
+                    "provider": getattr(provider, "name", "unknown"),
+                    "attempt": 1,
+                    "error_class": error_class,
+                    "error_message": error_message,
+                    "traceback": tb_text,
+                    "image_path": item.image_path,
+                    "observation_id": item.observation_id,
+                },
+            )
             continue
         try:
             if resolved_mode == "apply":
@@ -459,13 +536,30 @@ def run_classification(
                 })
                 _record_usage(conn, item, result, status="live_no_apply")
         except (sqlite3.Error, ValueError) as exc:
+            error_class = type(exc).__name__
+            tb_text = _truncate_tb(_traceback.format_exc())
             errors.append({
                 "observation_id": item.observation_id,
                 "case_id": item.case_id,
                 "image_path": item.image_path,
                 "reason": str(exc),
             })
-            _record_usage(conn, item, result, status="error", error_detail=str(exc))
+            _record_usage(
+                conn,
+                item,
+                result,
+                status="error",
+                error_detail=str(exc)[:4000],
+                error_json={
+                    "provider": result.provider if result else "unknown",
+                    "attempt": 1,
+                    "error_class": error_class,
+                    "error_message": str(exc),
+                    "traceback": tb_text,
+                    "image_path": item.image_path,
+                    "observation_id": item.observation_id,
+                },
+            )
             continue
         if updated:
             classified += 1
