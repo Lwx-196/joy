@@ -76,6 +76,8 @@ class ImageOverridePayload(BaseModel):
     manual_phase: str | None = None
     manual_view: str | None = None
     manual_transform: ManualTransform | None = None
+    reason: str | None = None
+    reviewer: str | None = None
 
 
 class ImageOverride(BaseModel):
@@ -85,6 +87,8 @@ class ImageOverride(BaseModel):
     manual_phase: str | None = None
     manual_view: str | None = None
     manual_transform: dict[str, Any] | None = None
+    reason: str | None = None
+    reviewer: str | None = None
     updated_at: str
 
 
@@ -202,6 +206,7 @@ class SimulateAfterRequest(BaseModel):
     focus_targets: list[str] = Field(default_factory=list)
     focus_regions: list[FocusRegion] = Field(default_factory=list)
     ai_generation_authorized: bool = False
+    brand: str = "fumei"
     provider: str = "ps_model_router"
     model_name: str | None = None
     note: str | None = None
@@ -236,8 +241,12 @@ class PsImageModelOption(BaseModel):
     value: str
     label: str
     source: str
+    group: str | None = None
+    group_label: str | None = None
     description: str | None = None
     is_default: bool = False
+    candidate_only: bool = False
+    promotion_note: str | None = None
 
 
 class PsImageModelOptionsResponse(BaseModel):
@@ -267,6 +276,11 @@ class SimulationJob(BaseModel):
     review_note: str | None = None
     reviewed_at: str | None = None
     can_publish: bool = False
+    legacy_can_publish: bool = False
+    effective_can_publish: bool = False
+    publish_gate_status: str | None = None
+    blocking_reasons: list[str] = Field(default_factory=list)
+    policy_snapshot: dict[str, Any] = Field(default_factory=dict)
     created_at: str
     updated_at: str
 
@@ -274,6 +288,12 @@ class SimulationJob(BaseModel):
 class SimulationJobReviewRequest(BaseModel):
     verdict: Literal["approved", "needs_recheck", "rejected"]
     reviewer: str
+    note: str | None = None
+
+
+class LegacySimulationQuarantineRequest(BaseModel):
+    dry_run: bool = True
+    reviewer: str = "system-legacy-quarantine"
     note: str | None = None
 
 
