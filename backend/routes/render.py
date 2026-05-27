@@ -2235,3 +2235,243 @@ def ops_ab_sample(
         outcome="ok", http_status=200,
     )
     return resp
+
+
+# ---------------------------------------------------------------------------
+# P1.1.C /api/render/ops/vlm-shadow — 收编 vlm_classify_batch.py --live-no-apply
+# ---------------------------------------------------------------------------
+
+
+class OpsVlmShadowRequest(BaseModel):
+    all_low_confidence: bool = Field(default=False)
+    case_ids: list[int] | None = Field(default=None, max_length=MAX_OPS_VLM_SHADOW_SAMPLE)
+    max_items: int = Field(default=50, ge=1, le=MAX_OPS_VLM_SHADOW_SAMPLE)
+    confidence_threshold: float = Field(default=0.85, ge=0.0, le=1.0)
+    dry_run: bool = Field(default=True)
+    reviewer: str = Field(..., min_length=1, max_length=128)
+    reason: str | None = Field(default=None, max_length=1000)
+
+
+@router.post("/api/render/ops/vlm-shadow")
+def ops_vlm_shadow(
+    payload: OpsVlmShadowRequest,
+    x_request_id: str | None = Header(default=None, alias="X-Request-Id"),
+) -> dict[str, Any]:
+    """P1.4 每日 VLM shadow / `vlm_classify_batch.py --live-no-apply` 收编。
+
+    dry_run=true（默认）：扫描候选 image_observations，返回 candidate_count + 截断
+    candidates（按 max_items），不发任何 VLM 请求；mode='dry-run' 给 cron / UI 判
+    断当日 shadow 工作量。dry_run=false：暂返 501，等 owner 把 VLMProvider 真
+    classifier purpose 跑批路径合 main 后再开。
+
+    target 来源（至少一个）：
+      - all_low_confidence=true → 选 source='vlm_classifier' AND confidence
+        < confidence_threshold（默认 0.85）
+      - case_ids=[...] → 该 case 集合下所有 image_observations
+
+    审计：所有结果（含 error / 501）落 ops_audit_log。
+    """
+    request_id = _gen_request_id(x_request_id)
+    endpoint = "POST /api/render/ops/vlm-shadow"
+    payload_dump = payload.model_dump()
+
+    has_target = payload.all_low_confidence or bool(payload.case_ids)
+    if not has_target:
+        resp = {
+            "request_id": request_id,
+            "error": "must supply at least one of: all_low_confidence=true, case_ids=[...]",
+        }
+        _write_ops_audit_log(
+            request_id=request_id, endpoint=endpoint,
+            reviewer=payload.reviewer, reason=payload.reason,
+            payload=payload_dump, response=resp,
+            outcome="error", http_status=400,
+        )
+        raise HTTPException(400, resp)
+
+    if not payload.dry_run:
+        resp = {
+            "request_id": request_id,
+            "error": (
+                "live VLM shadow fire is pending owner integration; use dry_run=true "
+                "to get the candidate list and have cron drive vlm_classify_batch "
+                "--live-no-apply for now."
+            ),
+        }
+        _write_ops_audit_log(
+            request_id=request_id, endpoint=endpoint,
+            reviewer=payload.reviewer, reason=payload.reason,
+            payload=payload_dump, response=resp,
+            outcome="error", http_status=501,
+        )
+        raise HTTPException(501, resp)
+
+    # dry-run path: count + sample
+    conditions: list[str] = []
+    args: list[Any] = []
+    if payload.all_low_confidence:
+        conditions.append("(source = ? AND confidence < ?)")
+        args.extend(["vlm_classifier", payload.confidence_threshold])
+    if payload.case_ids:
+        placeholders = ",".join("?" * len(payload.case_ids))
+        conditions.append(f"case_id IN ({placeholders})")
+        args.extend(payload.case_ids)
+    where_clause = " OR ".join(conditions) if conditions else "1=0"
+
+    with db.connect() as conn:
+        count_row = conn.execute(
+            f"SELECT COUNT(*) AS n FROM image_observations WHERE {where_clause}",
+            tuple(args),
+        ).fetchone()
+        candidate_count = int(count_row["n"] if count_row else 0)
+        sample_rows = conn.execute(
+            f"""
+            SELECT id, group_id, case_id, image_path, source, confidence,
+                   phase, view, body_part
+            FROM image_observations
+            WHERE {where_clause}
+            ORDER BY confidence ASC, id ASC
+            LIMIT ?
+            """,
+            (*args, payload.max_items),
+        ).fetchall()
+    candidates = [
+        {
+            "image_observation_id": int(r["id"]),
+            "group_id": int(r["group_id"]) if r["group_id"] is not None else None,
+            "case_id": int(r["case_id"]) if r["case_id"] is not None else None,
+            "image_path": r["image_path"],
+            "source": r["source"],
+            "confidence": float(r["confidence"] or 0),
+            "phase": r["phase"],
+            "view": r["view"],
+            "body_part": r["body_part"],
+        }
+        for r in sample_rows
+    ]
+    shadow_run_id = f"shadow-{uuid.uuid4().hex[:12]}"
+    resp = {
+        "request_id": request_id,
+        "shadow_run_id": shadow_run_id,
+        "mode": "dry-run",
+        "dry_run": True,
+        "candidate_count": candidate_count,
+        "max_items": payload.max_items,
+        "confidence_threshold": payload.confidence_threshold,
+        "candidates": candidates,
+        "note": (
+            "Shadow candidates listed for dry-run; consumer can fire "
+            "vlm_classify_batch.py --live-no-apply with this list."
+        ),
+    }
+    _write_ops_audit_log(
+        request_id=request_id, endpoint=endpoint,
+        reviewer=payload.reviewer, reason=payload.reason,
+        payload=payload_dump, response=resp,
+        outcome="dry_run", http_status=200,
+    )
+    return resp
+
+
+# ---------------------------------------------------------------------------
+# P1.1.D /api/render/ops/repair-queue — identity / tone 修复批入口
+# ---------------------------------------------------------------------------
+
+
+ALLOWED_REPAIR_TYPES = {"identity", "tone", "both"}
+
+
+class OpsRepairQueueRequest(BaseModel):
+    case_ids: list[int] = Field(..., min_length=1, max_length=MAX_OPS_BATCH_CASE_IDS)
+    repair_type: str = Field(..., min_length=1, max_length=32)
+    dry_run: bool = Field(default=True)
+    reviewer: str = Field(..., min_length=1, max_length=128)
+    reason: str | None = Field(default=None, max_length=1000)
+
+
+@router.post("/api/render/ops/repair-queue")
+def ops_repair_queue(
+    payload: OpsRepairQueueRequest,
+    x_request_id: str | None = Header(default=None, alias="X-Request-Id"),
+) -> dict[str, Any]:
+    """P1.1.D identity / tone 修复批入口（dry_run 主能力 + audit-only fire stub）。
+
+    repair_type:
+      - identity: face identity drift 修复（VLM judge identity_match < threshold 触发）
+      - tone:     skin tone / brightness 漂移修复
+      - both:     依次跑 identity 再跑 tone
+
+    dry_run=true（默认）：仅生成 planned_case_ids（去重 + DB-validate case 存在），
+    invalid 列出未找到的 case_ids。0 入队，落审计。
+
+    dry_run=false：当前返 501 — 真实 repair pipeline 走 owner T90 路径，
+    待 ai_generation_adapter + render_executor repair 模式合 main 后开放。
+    本 endpoint 提供 dry_run 让 oncall 提前确认 case 范围。
+    """
+    request_id = _gen_request_id(x_request_id)
+    endpoint = "POST /api/render/ops/repair-queue"
+    payload_dump = payload.model_dump()
+
+    if payload.repair_type not in ALLOWED_REPAIR_TYPES:
+        # Branch lets us audit-log the 422 attempt (Pydantic Literal would also
+        # work but Pydantic 422 path doesn't run our route body, so we'd lose
+        # the audit row).
+        resp = {
+            "request_id": request_id,
+            "error": f"repair_type must be one of {sorted(ALLOWED_REPAIR_TYPES)}",
+        }
+        _write_ops_audit_log(
+            request_id=request_id, endpoint=endpoint,
+            reviewer=payload.reviewer, reason=payload.reason,
+            payload=payload_dump, response=resp,
+            outcome="error", http_status=422,
+        )
+        raise HTTPException(422, resp)
+
+    seen: set[int] = set()
+    deduped: list[int] = []
+    duplicate_count = 0
+    for cid in payload.case_ids:
+        if cid in seen:
+            duplicate_count += 1
+            continue
+        seen.add(cid)
+        deduped.append(cid)
+    valid_ids, invalid = _batch_preview_rows(deduped)
+
+    if not payload.dry_run:
+        resp = {
+            "request_id": request_id,
+            "error": (
+                "real repair fire is pending owner render_executor + ai_generation_adapter "
+                "T90 integration. dry_run=true is the only supported mode currently; "
+                "use it to record planned cases, then fire via existing render endpoints "
+                "or wait for owner WIP to merge to main."
+            ),
+        }
+        _write_ops_audit_log(
+            request_id=request_id, endpoint=endpoint,
+            reviewer=payload.reviewer, reason=payload.reason,
+            payload=payload_dump, response=resp,
+            outcome="error", http_status=501,
+        )
+        raise HTTPException(501, resp)
+
+    resp = {
+        "request_id": request_id,
+        "dry_run": True,
+        "repair_type": payload.repair_type,
+        "planned_case_ids": valid_ids,
+        "enqueued_job_ids": [],
+        "planned_count": len(valid_ids),
+        "invalid": invalid,
+        "duplicate_count": duplicate_count,
+        "note": "dry_run plan recorded; no jobs enqueued",
+    }
+    _write_ops_audit_log(
+        request_id=request_id, endpoint=endpoint,
+        reviewer=payload.reviewer, reason=payload.reason,
+        payload=payload_dump, response=resp,
+        outcome="dry_run", http_status=200,
+    )
+    return resp
