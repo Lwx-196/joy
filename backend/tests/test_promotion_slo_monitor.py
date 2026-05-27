@@ -1828,3 +1828,351 @@ def test_k6_evaluate_window_unreadable_sidecar_emits_violation(
     # Conservative: surface as stop-loss halt (audit alert) rather than
     # silently green-lighting.
     assert report.recommendation == RECOMMENDATION_STOP_LOSS_HALT
+
+
+# ---------------------------------------------------------------------------
+# Wave 5 followup #1 — paused_stale_days configurable (eval-M1)
+# ---------------------------------------------------------------------------
+#
+# The Wave 4 W4-2 stop-loss window (`PAUSED_STALE_DAYS = 7`) was a module
+# constant requiring code edit + redeploy for any operator tuning. Wave 5
+# follow-up #1 promotes it to a top-level field in
+# `case-workbench-ai/promotion/slo_thresholds.json` so operators can drop the
+# 7-day window to 3d (e.g. mid-incident "we need faster stop-loss") without
+# touching code. The module constant remains as the fallback default for
+# back-compat + import-time semantics.
+
+
+def test_paused_stale_days_default_from_json(tmp_path: Path) -> None:
+    """Wave 5 #1: the checked-in slo_thresholds.json now carries
+    `paused_stale_days: 7`. load_default_thresholds must surface it on the
+    returned dict so callers see the JSON-driven value (not the module
+    constant) by default."""
+    from backend.services.promotion_slo_monitor import load_default_thresholds
+
+    config = load_default_thresholds()  # default path → on-disk JSON
+    assert "paused_stale_days" in config
+    assert config["paused_stale_days"] == 7
+    assert isinstance(config["paused_stale_days"], int)
+
+
+def test_paused_stale_days_overridable_via_thresholds_kwarg(
+    temp_db: Path,
+    tmp_path: Path,
+) -> None:
+    """Wave 5 #1: operator can shrink the stop-loss window to 3 days via the
+    structured `thresholds` kwarg (mirrors what JSON edit would do). With a
+    paused_since 4 days ago + paused_stale_days=3, we must escalate to
+    STOP_LOSS_HALT; the same fixture under the legacy 7-day default would
+    still be `monitoring_paused`."""
+    sidecar = tmp_path / "paused_state.json"
+    four_days_ago = (datetime.now(timezone.utc) - timedelta(days=4)).isoformat()
+    sidecar.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "paused_since": four_days_ago,
+                "promotion_state_at_pause": "p10",
+                "last_sample_size": 5,
+                "minimum_sample_size": 30,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with db.connect() as conn:
+        for _ in range(5):  # below min_sample=30
+            _insert_simulation_job(conn, status="done")
+        conn.commit()
+
+        # Override to 3 days — paused_since=4d ago now exceeds the window.
+        override_3d = _measured_thresholds_override()
+        override_3d["paused_stale_days"] = 3
+        report_3d = evaluate_window(
+            window_hours=48,
+            conn=conn,
+            promotion_state="p10",
+            paused_state_path=sidecar,
+            thresholds=override_3d,
+        )
+
+    assert report_3d.recommendation == RECOMMENDATION_STOP_LOSS_HALT, (
+        f"with paused_stale_days=3 + paused_since 4d ago, expected "
+        f"STOP_LOSS_HALT; got {report_3d.recommendation}"
+    )
+    dims_3d = {v["dimension"] for v in report_3d.violations}
+    assert "monitoring_paused_stale" in dims_3d
+    stale_v = next(
+        v for v in report_3d.violations if v["dimension"] == "monitoring_paused_stale"
+    )
+    assert stale_v["threshold_days"] == 3, (
+        "violation must echo the operator-supplied stale_days, not the "
+        "module default 7"
+    )
+
+    # Same fixture, different paused_since 1d ago + paused_stale_days=3 →
+    # still within window → monitoring_paused (no stop-loss).
+    one_day_ago = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+    sidecar.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "paused_since": one_day_ago,
+                "promotion_state_at_pause": "p10",
+                "last_sample_size": 5,
+                "minimum_sample_size": 30,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with db.connect() as conn:
+        report_within = evaluate_window(
+            window_hours=48,
+            conn=conn,
+            promotion_state="p10",
+            paused_state_path=sidecar,
+            thresholds=override_3d,
+        )
+
+    assert report_within.recommendation == RECOMMENDATION_MONITORING_PAUSED
+    assert report_within.violations == []
+
+
+def test_paused_stale_days_evidence_echoes_effective_value(
+    temp_db: Path,
+    tmp_path: Path,
+) -> None:
+    """Wave 5 #1: the evaluate_window evidence dict must surface the
+    effective stop-loss window so operators inspecting an SLO report can
+    confirm config-driven override actually took effect (not silently
+    fallen back to the module constant)."""
+    sidecar = tmp_path / "paused_state.json"
+
+    with db.connect() as conn:
+        for _ in range(3):
+            _insert_simulation_job(conn, status="done")
+        conn.commit()
+
+        override = _measured_thresholds_override()
+        override["paused_stale_days"] = 5
+        report = evaluate_window(
+            window_hours=48,
+            conn=conn,
+            promotion_state="p10",
+            paused_state_path=sidecar,
+            thresholds=override,
+        )
+
+    assert report.evidence.get("paused_stale_days") == 5, (
+        f"evidence must echo effective paused_stale_days; got "
+        f"{report.evidence.get('paused_stale_days')!r}"
+    )
+
+
+def test_paused_stale_days_invalid_type_raises_in_prod(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Wave 5 #1: production mode (SLO_TEST_MODE unset) must reject a JSON
+    `paused_stale_days` whose type is wrong (string / float / bool). This
+    closes a footgun where an operator typo (`"seven"` instead of `7`)
+    would silently revert to a default value mid-incident."""
+    monkeypatch.delenv("SLO_TEST_MODE", raising=False)
+    from backend.services.promotion_slo_monitor import load_default_thresholds
+
+    bad_json_path = tmp_path / "slo_thresholds.json"
+    bad_json_path.write_text(
+        json.dumps(
+            {
+                "thresholds": {
+                    "comfyui_failure_rate_max": 0.05,
+                    "vlm_disagreement_rate_max": 0.10,
+                    "vlm_judge_missing_rate_max": 0.10,
+                    "delivery_gate_rejection_rate_multiplier_max": 1.05,
+                    "pre_render_gate_blocker_multiplier_max": 1.10,
+                },
+                "baseline": {
+                    "delivery_gate_rejection_rate": 0.10,
+                    "pre_render_gate_blocker_count": 5,
+                },
+                "baseline_provenance": {
+                    "measured_at": datetime.now(timezone.utc).isoformat(),
+                    "window_hours": 24,
+                    "sample_size": 100,
+                    "computed_by": "calibrate_cli",
+                    "computed_at_main_sha": "wave5-test",
+                },
+                "minimum_sample_size": 30,
+                "default_window_hours": 48,
+                "paused_stale_days": "seven",  # ← invalid type
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match=r"paused_stale_days.*must be positive int"):
+        load_default_thresholds(bad_json_path)
+
+
+def test_paused_stale_days_invalid_test_mode_warns_and_fallbacks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Wave 5 #1: test mode (SLO_TEST_MODE=1) must warn but NOT raise on a
+    bad paused_stale_days; load must fall back to the module default 7 so
+    legacy fixtures don't break CI. This is the parity-with-baseline_provenance
+    escape hatch documented across W4 hardening."""
+    monkeypatch.setenv("SLO_TEST_MODE", "1")
+    import logging as _logging
+
+    from backend.services.promotion_slo_monitor import (
+        PAUSED_STALE_DAYS,
+        load_default_thresholds,
+    )
+
+    bad_json_path = tmp_path / "slo_thresholds.json"
+    bad_json_path.write_text(
+        json.dumps(
+            {
+                "thresholds": {},
+                "baseline": {},
+                "baseline_provenance": {
+                    "measured_at": datetime.now(timezone.utc).isoformat(),
+                    "window_hours": 24,
+                    "sample_size": 100,
+                    "computed_by": "calibrate_cli",
+                    "computed_at_main_sha": "wave5-test",
+                },
+                "paused_stale_days": 3.5,  # ← float (not int)
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with caplog.at_level(_logging.WARNING):
+        config = load_default_thresholds(bad_json_path)
+
+    assert config["paused_stale_days"] == PAUSED_STALE_DAYS
+    assert any(
+        "paused_stale_days" in rec.message for rec in caplog.records
+    ), f"expected paused_stale_days warning in caplog; got {[r.message for r in caplog.records]}"
+
+
+def test_paused_stale_days_negative_raises_in_prod(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Wave 5 #1: zero / negative paused_stale_days is nonsensical (a
+    stop-loss window of 0 days would fire on first paused episode, an
+    accidental anti-pattern). Production must reject; test mode warns."""
+    monkeypatch.delenv("SLO_TEST_MODE", raising=False)
+    from backend.services.promotion_slo_monitor import load_default_thresholds
+
+    for bad_value in (0, -1):
+        bad_json_path = tmp_path / f"slo_thresholds_{bad_value}.json"
+        bad_json_path.write_text(
+            json.dumps(
+                {
+                    "thresholds": {},
+                    "baseline": {},
+                    "baseline_provenance": {
+                        "measured_at": datetime.now(timezone.utc).isoformat(),
+                        "window_hours": 24,
+                        "sample_size": 100,
+                        "computed_by": "calibrate_cli",
+                        "computed_at_main_sha": "wave5-test",
+                    },
+                    "paused_stale_days": bad_value,
+                }
+            ),
+            encoding="utf-8",
+        )
+        with pytest.raises(
+            ValueError, match=r"paused_stale_days.*must be positive int"
+        ):
+            load_default_thresholds(bad_json_path)
+
+
+def test_paused_stale_days_bool_rejected_in_prod(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Wave 5 #1: Python booleans are technically `int` subclasses (True == 1,
+    False == 0) — without an explicit `isinstance(v, bool)` rejection a JSON
+    `true` would silently parse as `paused_stale_days=1`. Operator intent is
+    nonsensical, so we reject explicitly. Mirrors the same defensive check in
+    `_validate_baseline_provenance` for window_hours / sample_size."""
+    monkeypatch.delenv("SLO_TEST_MODE", raising=False)
+    from backend.services.promotion_slo_monitor import load_default_thresholds
+
+    bad_json_path = tmp_path / "slo_thresholds.json"
+    bad_json_path.write_text(
+        json.dumps(
+            {
+                "thresholds": {},
+                "baseline": {},
+                "baseline_provenance": {
+                    "measured_at": datetime.now(timezone.utc).isoformat(),
+                    "window_hours": 24,
+                    "sample_size": 100,
+                    "computed_by": "calibrate_cli",
+                    "computed_at_main_sha": "wave5-test",
+                },
+                "paused_stale_days": True,  # ← bool, not int
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(
+        ValueError, match=r"paused_stale_days.*must be positive int"
+    ):
+        load_default_thresholds(bad_json_path)
+
+
+def test_paused_stale_days_missing_falls_back_to_module_default(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Wave 5 #1: BC — a thresholds JSON omitting `paused_stale_days`
+    entirely (pre-Wave 5 file) must still load successfully and surface the
+    module default PAUSED_STALE_DAYS=7 (no warning, no raise)."""
+    monkeypatch.delenv("SLO_TEST_MODE", raising=False)
+    from backend.services.promotion_slo_monitor import (
+        PAUSED_STALE_DAYS,
+        load_default_thresholds,
+    )
+
+    legacy_json_path = tmp_path / "slo_thresholds.json"
+    legacy_json_path.write_text(
+        json.dumps(
+            {
+                "thresholds": {
+                    "comfyui_failure_rate_max": 0.05,
+                    "vlm_disagreement_rate_max": 0.10,
+                    "vlm_judge_missing_rate_max": 0.10,
+                    "delivery_gate_rejection_rate_multiplier_max": 1.05,
+                    "pre_render_gate_blocker_multiplier_max": 1.10,
+                },
+                "baseline": {
+                    "delivery_gate_rejection_rate": 0.10,
+                    "pre_render_gate_blocker_count": 5,
+                },
+                "baseline_provenance": {
+                    "measured_at": datetime.now(timezone.utc).isoformat(),
+                    "window_hours": 24,
+                    "sample_size": 100,
+                    "computed_by": "calibrate_cli",
+                    "computed_at_main_sha": "wave5-test",
+                },
+                "minimum_sample_size": 30,
+                "default_window_hours": 48,
+                # ← no paused_stale_days key
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_default_thresholds(legacy_json_path)
+    assert config["paused_stale_days"] == PAUSED_STALE_DAYS
