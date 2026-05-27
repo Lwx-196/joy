@@ -176,3 +176,47 @@ def test_upgrade_recover_empty_db_returns_zero(temp_db, no_job_pool):
 
     counts = UPGRADE_QUEUE.recover()
     assert counts == {"requeued_running": 0, "resubmitted_queued": 0}
+
+
+# ----------------------------------------------------------------------
+# orphan recovery (bug_003): queued rows tagged by a prior recover() that
+# crashed before _job_pool.submit() must be reclaimed on next recover()
+# ----------------------------------------------------------------------
+
+
+def test_render_recover_reclaims_orphan_with_stale_token(
+    temp_db, seed_case, no_job_pool
+):
+    """Simulates: prior process committed recovery_token then died before
+    submitting to _job_pool. Without orphan reclaim, next recover()'s SELECT
+    `AND recovery_token IS NULL` would skip the row forever.
+    """
+    from backend import db
+    from backend.render_queue import RENDER_QUEUE
+
+    case_id = seed_case()
+    with db.connect() as conn:
+        queued_id = _insert_render_row(conn, case_id, "queued")
+        # Stale tag: claimed > 5 minutes ago by a dead process
+        conn.execute(
+            """
+            UPDATE render_jobs
+            SET recovery_token = ?,
+                recovery_claimed_at = datetime('now', '-10 minutes')
+            WHERE id = ?
+            """,
+            ("render-recover:99999:deadbeef", queued_id),
+        )
+
+    counts = RENDER_QUEUE.recover()
+    assert counts["resubmitted_queued"] == 1, "orphan must be reclaimed"
+
+    with db.connect() as conn:
+        row = conn.execute(
+            "SELECT status, recovery_token FROM render_jobs WHERE id = ?",
+            (queued_id,),
+        ).fetchone()
+    assert row["status"] == "queued"
+    # New recover() re-tagged with this process's token (non-NULL but fresh)
+    assert row["recovery_token"] is not None
+    assert "deadbeef" not in row["recovery_token"], "stale token must be replaced"

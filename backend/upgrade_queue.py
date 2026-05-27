@@ -371,6 +371,20 @@ class UpgradeQueue:
                 WHERE status = 'running'
                 """
             ).rowcount
+            # Reclaim orphans: queued rows tagged by a prior recover() whose
+            # process died between commit and _job_pool.submit(). Without this,
+            # the SELECT below (which requires recovery_token IS NULL) would
+            # skip them forever.
+            conn.execute(
+                """
+                UPDATE upgrade_jobs
+                SET recovery_token = NULL,
+                    recovery_claimed_at = NULL
+                WHERE status = 'queued'
+                  AND recovery_token IS NOT NULL
+                  AND recovery_claimed_at < datetime('now', '-5 minutes')
+                """
+            )
             queued_rows: list[sqlite3.Row] = conn.execute(
                 """
                 SELECT id
