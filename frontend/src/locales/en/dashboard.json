@@ -76,5 +76,32 @@
     "sourceManual": "auto + manual",
     "sourceAuto": "Auto"
   },
-  "loading": "Loading…"
+  "loading": "Loading…",
+  "wizard": {
+    "trigger": "Start working",
+    "close": "Close",
+    "steps": {
+      "pick": "Pick & render",
+      "wait": "Wait",
+      "review": "Review"
+    },
+    "pick": {
+      "title": "Batch render",
+      "desc": "{{count}} cases ready to render (brand: {{brand}}). Includes cases with warnings that can be force-rendered.",
+      "render": "Render ({{count}})",
+      "submitting": "Submitting…"
+    },
+    "wait": {
+      "title": "Rendering in progress",
+      "desc": "Jobs enqueued — see progress in the bottom-right toast. Turns green when done — click \"Go to review\". Batch",
+      "titleDone": "Render complete",
+      "descDone": "All jobs finished. Click \"Go to review\" to inspect results. Batch",
+      "goReview": "Go to review"
+    },
+    "review": {
+      "title": "Done — review quality",
+      "desc": "Open the quality review page to approve or re-render results.",
+      "go": "Go to review"
+    }
+  }
 }
