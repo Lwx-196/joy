@@ -428,6 +428,33 @@ def run_classification(
         report["errors"] = [{"reason": str(exc)}]
         return report
 
+    # P0.3-b: fail-closed 守门 — 在 apply 之前先看整批分布是否坍缩；如坍缩则
+    # 强制把 mode 从 apply 降到 live-no-apply，不写 image_observations，但保留
+    # vlm_usage_log 留证。即便 confidence ≥ 0.85 也不放行。
+    from . import vlm_calibration as _vlm_calibration
+
+    batch_records = [
+        {
+            "phase": r.phase,
+            "view": r.view,
+            "body_part": r.body_part,
+            "confidence": float(r.confidence or 0.0),
+        }
+        for r in results
+        if not isinstance(r, BaseException)
+    ]
+    calibration = _vlm_calibration.detect_distribution_collapse(batch_records)
+    report["calibration_status"] = calibration.status
+    report["calibration_recommendation"] = calibration.recommendation
+    report["fail_closed"] = False
+    if calibration.status == "uncalibrated" and resolved_mode == "apply":
+        resolved_mode = "live-no-apply"
+        report["mode"] = resolved_mode
+        report["fail_closed"] = True
+        report["fail_closed_reason"] = (
+            "distribution_collapse: " + calibration.recommendation
+        )
+
     classified = 0
     skipped = 0
     errors: list[dict[str, Any]] = []
