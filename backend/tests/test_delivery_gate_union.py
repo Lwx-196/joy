@@ -195,7 +195,7 @@ def test_simulation_accepted_appears_in_list(
     assert items[0].case_id == case_id
     assert items[0].source_path == out
     # tag simulation-origin so downstream consumers can branch:
-    assert items[0].artifact_mode == "ai_simulation"
+    assert items[0].artifact_mode == "ai_after_simulation"
 
 
 def test_simulation_rejected_does_not_appear(
@@ -233,7 +233,7 @@ def test_mixed_render_and_simulation_both_visible(
     assert cids == {case_render, case_sim}
     by_case = {it.case_id: it for it in items}
     assert by_case[case_render].artifact_mode == "real_layout"
-    assert by_case[case_sim].artifact_mode == "ai_simulation"
+    assert by_case[case_sim].artifact_mode == "ai_after_simulation"
 
 
 def test_render_wins_when_both_present_for_same_case(
@@ -283,3 +283,34 @@ def test_list_deliverables_signature_keeps_zero_arg_form(
         items = DeliveryGate(conn).list_deliverables()
     assert len(items) == 1
     assert items[0].case_id == case_id
+
+
+def test_simulation_highest_quality_wins_when_multiple_sims(
+    temp_db: Path, seed_case, tmp_path: Path, repo_root: Path
+) -> None:
+    """H-3 hardening (nyquist M-3): same case has multiple sim_jobs —
+    ORDER BY quality_score DESC must surface the highest-quality candidate,
+    not the most-recently-updated one. Pre-hardening bug shipped the
+    latest-but-lower-quality (e.g. 0.71 over 0.95).
+    """
+    case_id = seed_case(abs_path="/cases/customer-q/multi-sim")
+    out_high = _make_output_file(tmp_path, "high.jpg")
+    out_latest_low = _make_output_file(tmp_path, "low.jpg")
+    manifest_path = _write_real_manifest(tmp_path, repo_root)
+    with db.connect() as conn:
+        # Insert highest-quality FIRST (older updated_at), then lower-quality (newer).
+        _seed_simulation(
+            conn, case_id=case_id, output_path=out_high, quality_score=0.95
+        )
+        _seed_simulation(
+            conn, case_id=case_id, output_path=out_latest_low, quality_score=0.71
+        )
+        sim_gate = SimulationDeliveryGate(
+            conn, manifest_path=manifest_path, repo_root=repo_root
+        )
+        items = DeliveryGate(conn).list_deliverables(simulation_gate=sim_gate)
+    assert len(items) == 1
+    assert items[0].source_path == out_high, (
+        f"Expected highest-quality sim ({out_high}) to win; "
+        f"got {items[0].source_path} — ORDER BY regression"
+    )

@@ -29,7 +29,7 @@ P0_THRESHOLD = 90.0
 P1_THRESHOLD = 78.0
 
 # ComfyUI / AI simulation surfacing in `list_deliverables`:
-SIMULATION_ARTIFACT_MODE = "ai_simulation"
+SIMULATION_ARTIFACT_MODE = "ai_after_simulation"
 SIMULATION_DEFAULT_TEMPLATE_TIER = "ai_candidate"
 
 
@@ -245,7 +245,15 @@ class DeliveryGate:
             WHERE c.trashed_at IS NULL
               AND s.status IN ('done', 'done_with_issues')
               AND s.can_publish = 1
-            ORDER BY c.id, s.updated_at DESC, s.id DESC
+            ORDER BY c.id,
+                     COALESCE(
+                       CAST(json_extract(s.audit_json, '$.quality_score') AS REAL),
+                       CAST(json_extract(s.audit_json, '$.qa_scores.quality_score') AS REAL),
+                       CAST(json_extract(s.audit_json, '$.review_decision.quality_score') AS REAL),
+                       -1.0
+                     ) DESC,
+                     s.updated_at DESC,
+                     s.id DESC
             """
         ).fetchall()
 

@@ -19,6 +19,7 @@ from backend.services.delivery_gate import (
     P0_THRESHOLD,
     P1_THRESHOLD,
 )
+from backend.services.simulation_delivery_gate import SimulationDeliveryGate
 
 DB_PATH = Path(__file__).resolve().parent.parent.parent / "case-workbench.db"
 DEFAULT_OUTPUT = Path(__file__).resolve().parent.parent.parent / "delivery"
@@ -56,7 +57,8 @@ def export(output_dir: Path, dry_run: bool = False, db_path: Path = DB_PATH) -> 
     conn = _connect(db_path)
     try:
         gate = DeliveryGate(conn)
-        items = gate.list_deliverables()
+        sim_gate = SimulationDeliveryGate(conn)
+        items = gate.list_deliverables(simulation_gate=sim_gate)
 
         if not items:
             print("❌ No deliverable cases found.")
