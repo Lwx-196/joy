@@ -40,6 +40,7 @@ from pathlib import Path
 from typing import Any, AsyncIterator, Callable
 
 from . import _job_pool, ai_generation_adapter, audit, db, render_executor, render_quality, skill_bridge, source_images, source_selection, stress
+from .services import vlm_source_classifier as _vlm_source_classifier
 
 DEFAULT_TEMPLATE = "tri-compare"
 DEFAULT_SEMANTIC_JUDGE = "auto"
@@ -274,6 +275,80 @@ def _state_for_filename(states: dict[str, dict[str, Any]], filename: str) -> dic
     return states.get(filename) or states.get(Path(filename).name)
 
 
+_VLM_PHASES_ALLOWED = {"before", "intraop", "after"}
+_VLM_VIEWS_ALLOWED = {"front", "oblique", "side"}
+
+
+def _vlm_classifier_observations_by_filename(
+    conn: sqlite3.Connection, case_id: int
+) -> dict[str, dict[str, Any]]:
+    """Read high-confidence vlm_classifier observations for a case keyed by filename.
+
+    Mirrors `routes/cases._vlm_classifier_observations_for_case` but lives in
+    render_queue so the selection-plan path also benefits from VLM classification
+    (P0 image_observations → render_queue bridge). Only observations with
+    confidence >= MIN_VLM_APPLY_CONFIDENCE are returned to match the apply gate.
+    """
+    rows = conn.execute(
+        """
+        SELECT image_path, phase, body_part, view, confidence
+        FROM image_observations
+        WHERE case_id = ?
+          AND source = 'vlm_classifier'
+          AND confidence >= ?
+        ORDER BY confidence DESC, updated_at DESC, id DESC
+        """,
+        (int(case_id), float(_vlm_source_classifier.MIN_VLM_APPLY_CONFIDENCE)),
+    ).fetchall()
+    out: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        path = str(row["image_path"] or "").strip()
+        if not path:
+            continue
+        obs = {
+            "phase": row["phase"],
+            "view": row["view"],
+            "body_part": row["body_part"],
+            "confidence": float(row["confidence"] or 0.0),
+        }
+        for key in (path, Path(path).name):
+            out.setdefault(key, obs)
+    return out
+
+
+def _apply_vlm_observation_to_metadata(
+    metadata: dict[str, Any] | None,
+    observation: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Inject high-confidence vlm_classifier observation into per-filename metadata.
+
+    Only fills phase / view_bucket / body_part when they are missing or invalid;
+    manual overrides flow through `_selection_phase_view` and take precedence
+    independently. `classification_source` is set so candidates can surface the
+    VLM provenance even when phase/view ultimately resolve from another source.
+    """
+    if not isinstance(observation, dict):
+        return metadata
+    merged = dict(metadata) if isinstance(metadata, dict) else {}
+    obs_phase = observation.get("phase")
+    if obs_phase in _VLM_PHASES_ALLOWED and merged.get("phase") not in _VLM_PHASES_ALLOWED:
+        merged["phase"] = obs_phase
+        merged["phase_source"] = "vlm_classifier"
+    obs_view = observation.get("view")
+    if obs_view in _VLM_VIEWS_ALLOWED and (
+        merged.get("view_bucket") not in _VLM_VIEWS_ALLOWED
+        and merged.get("angle") not in _VLM_VIEWS_ALLOWED
+    ):
+        merged["view_bucket"] = obs_view
+        merged["angle_source"] = "vlm_classifier"
+        if merged.get("angle_confidence") in (None, "", 0):
+            merged["angle_confidence"] = round(float(observation.get("confidence") or 0.0), 4)
+    if not merged.get("body_part") and observation.get("body_part"):
+        merged["body_part"] = observation.get("body_part")
+    merged["classification_source"] = "vlm_classifier"
+    return merged
+
+
 def _skill_metadata_by_file(raw: str | None) -> dict[str, dict[str, Any]]:
     data = []
     if raw:
@@ -500,6 +575,7 @@ def _selection_plan_candidate(candidate: dict[str, Any] | None) -> dict[str, Any
         "render_feedback": candidate.get("render_feedback"),
         "source_group_lock": candidate.get("source_group_lock"),
         "selection_metadata_source": candidate.get("selection_metadata_source"),
+        "classification_source": candidate.get("classification_source"),
         "pose": candidate.get("pose"),
         "direction": candidate.get("direction"),
         "sharpness_score": candidate.get("sharpness_score"),
@@ -552,6 +628,7 @@ def _build_render_selection_context(
             if source_images.is_source_image_file(str(item))
         ]
         metadata_by_file = _skill_metadata_by_file(str(source_row.get("skill_image_metadata_json") or ""))
+        vlm_obs_by_file = _vlm_classifier_observations_by_filename(conn, case_id)
         review_states = _image_review_states(meta_json)
         manual_overrides = _fetch_case_image_overrides(conn, case_id)
         for filename in existing_files:
@@ -561,6 +638,8 @@ def _build_render_selection_context(
                 overrides_by_render_name[render_filename] = {"render_excluded": True, "review_verdict": "excluded"}
                 continue
             metadata = metadata_by_file.get(filename) or metadata_by_file.get(Path(filename).name)
+            observation = vlm_obs_by_file.get(filename) or vlm_obs_by_file.get(Path(filename).name)
+            metadata = _apply_vlm_observation_to_metadata(metadata, observation)
             fallback_metadata = (
                 primary_render_metadata.get(render_filename)
                 or primary_render_metadata.get(Path(render_filename).name)
@@ -612,6 +691,7 @@ def _build_render_selection_context(
                 "face_count": (metadata or {}).get("face_count") if isinstance(metadata, dict) else None,
                 "identity_provider": (metadata or {}).get("identity_provider") if isinstance(metadata, dict) else None,
                 "selection_metadata_source": (metadata or {}).get("selection_metadata_source") if isinstance(metadata, dict) else None,
+                "classification_source": (metadata or {}).get("classification_source") if isinstance(metadata, dict) else None,
             }
             if isinstance(manual_override, dict) and isinstance(manual_override.get("transform"), dict):
                 candidate["manual_transform"] = manual_override["transform"]

@@ -483,22 +483,8 @@ def test_source_group_uses_vlm_classifier_observation_without_manual_override(cl
     assert image_payload["angle_confidence"] == 0.92
 
 
-@pytest.mark.xfail(
-    reason=(
-        "Pending follow-up: image_observations → render_queue bridge. "
-        "`_apply_vlm_observation_to_source_image` exists in routes/cases.py:3997 "
-        "and is wired into the /source-group endpoint (line 3888), but the "
-        "equivalent enrichment is NOT applied inside "
-        "render_queue._build_render_selection_context — it only reads "
-        "skill_image_metadata_json. This test asserts the (not-yet-implemented) "
-        "image_observations → render selection plan bridge. PR #1 ships the "
-        "classifier + API + usage metrics infra; the bridge into render "
-        "selection is a separate integration story tracked as a follow-up. "
-        "Remove this xfail when the bridge lands."
-    ),
-    strict=True,
-)
 def test_render_selection_context_uses_vlm_classifier_observations(temp_db: Path, tmp_path: Path) -> None:
+    """P0 bridge: image_observations.vlm_classifier rows enrich render selection plan."""
     from backend import db, render_queue
 
     _write_tiny_png(tmp_path / "before.png")
