@@ -1702,3 +1702,149 @@ def get_failure_trace(job_id: int) -> dict[str, Any]:
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
     }
+
+
+# ---------------------------------------------------------------------------
+# P0.4 ops status — VLM/ComfyUI/Gate 聚合面板（一个 endpoint 看全局）
+# ---------------------------------------------------------------------------
+
+
+def _ops_top_k(counter: dict[str, int], k: int = 10) -> list[dict[str, Any]]:
+    return [
+        {"key": key, "count": cnt}
+        for key, cnt in sorted(counter.items(), key=lambda kv: -kv[1])[:k]
+    ]
+
+
+def _ops_vlm_section(conn, cutoff_iso: str) -> dict[str, Any]:
+    from ..services import vlm_usage_metrics
+
+    summary = vlm_usage_metrics.summarize_classifier_outputs(conn)
+    rows = conn.execute(
+        "SELECT status, created_at FROM vlm_usage_log WHERE created_at >= ?",
+        (cutoff_iso,),
+    ).fetchall()
+    total = len(rows)
+    failed = sum(1 for r in rows if r["status"] == "error")
+    last_shadow = conn.execute(
+        "SELECT MAX(created_at) FROM vlm_usage_log WHERE status IN ('live_no_apply', 'live-no-apply')"
+    ).fetchone()
+    return {
+        "calibration_status": summary.get("calibration_status", "ok"),
+        "calibration_recommendation": summary.get("calibration_recommendation"),
+        "confidence_distribution": summary.get("confidence_buckets_calibrated", {}),
+        "bias_alerts": summary.get("bias_alerts", []),
+        "total_calls_7d": total,
+        "fail_rate": round(failed / total, 4) if total else 0.0,
+        "last_shadow_run": last_shadow[0] if last_shadow else None,
+    }
+
+
+def _ops_comfyui_section(conn, cutoff_iso: str) -> dict[str, Any]:
+    rows = conn.execute(
+        """
+        SELECT status, audit_json, model_plan_json, can_publish, created_at
+        FROM simulation_jobs
+        WHERE created_at >= ?
+        """,
+        (cutoff_iso,),
+    ).fetchall()
+    done = 0
+    failed = 0
+    by_workflow_counter: dict[str, int] = {}
+    failure_stages_counter: dict[str, int] = {}
+    candidate_only_pending = 0
+    for row in rows:
+        try:
+            audit = json.loads(row["audit_json"] or "{}")
+        except (json.JSONDecodeError, TypeError):
+            audit = {}
+        try:
+            plan = json.loads(row["model_plan_json"] or "{}")
+        except (json.JSONDecodeError, TypeError):
+            plan = {}
+        wf = (
+            (audit.get("workflow_name") if isinstance(audit, dict) else None)
+            or (audit.get("model_name") if isinstance(audit, dict) else None)
+            or (plan.get("workflow_name") if isinstance(plan, dict) else None)
+            or "unknown"
+        )
+        by_workflow_counter[str(wf)] = by_workflow_counter.get(str(wf), 0) + 1
+        if row["status"] == "done":
+            done += 1
+            if not int(row["can_publish"] or 0):
+                candidate_only_pending += 1
+        elif row["status"] == "failed":
+            failed += 1
+            failure = audit.get("failure") if isinstance(audit, dict) else None
+            if isinstance(failure, dict):
+                stage = str(failure.get("failure_stage") or "unknown")
+                failure_stages_counter[stage] = failure_stages_counter.get(stage, 0) + 1
+    return {
+        "simulation_jobs_7d": {
+            "done": done,
+            "failed": failed,
+            "by_workflow": _ops_top_k(by_workflow_counter, 20),
+        },
+        "candidate_only_pending": candidate_only_pending,
+        "failure_breakdown": _ops_top_k(failure_stages_counter, 10),
+    }
+
+
+def _ops_gate_section(conn) -> dict[str, Any]:
+    pre_rows = conn.execute(
+        """
+        SELECT reason_code, COUNT(*) AS n
+        FROM review_tickets
+        WHERE status = 'open' AND blocks_render = 1 AND stage = 'pre_render_gate'
+        GROUP BY reason_code
+        ORDER BY n DESC
+        LIMIT 10
+        """
+    ).fetchall()
+    deliv_rows = conn.execute(
+        """
+        SELECT reason_code, COUNT(*) AS n
+        FROM review_tickets
+        WHERE status = 'open' AND blocks_publish = 1 AND stage = 'delivery_gate'
+        GROUP BY reason_code
+        ORDER BY n DESC
+        LIMIT 10
+        """
+    ).fetchall()
+    # accepted_warnings_pending = cases.meta_json.source_group_selection.accepted_warnings
+    # has ≥1 entry。SQLite 不能直查嵌套 JSON 数组长度，扫表 + Python 数。
+    case_rows = conn.execute(
+        "SELECT meta_json FROM cases WHERE trashed_at IS NULL AND meta_json IS NOT NULL"
+    ).fetchall()
+    accepted_pending = 0
+    for cr in case_rows:
+        try:
+            meta = json.loads(cr["meta_json"] or "{}")
+        except (json.JSONDecodeError, TypeError):
+            continue
+        sgs = meta.get("source_group_selection") if isinstance(meta, dict) else None
+        accepted = sgs.get("accepted_warnings") if isinstance(sgs, dict) else None
+        if isinstance(accepted, list) and accepted:
+            accepted_pending += 1
+    return {
+        "pre_render_blockers_top10": [{"key": r["reason_code"], "count": r["n"]} for r in pre_rows],
+        "delivery_gate_blockers_top10": [{"key": r["reason_code"], "count": r["n"]} for r in deliv_rows],
+        "accepted_warnings_pending": accepted_pending,
+    }
+
+
+@router.get("/api/render/ops/vlm-comfyui/status")
+def ops_vlm_comfyui_status(days: int = Query(default=7, ge=1, le=90)) -> dict[str, Any]:
+    """P0.4 oncall 聚合面板 — VLM 校准+调用量 / ComfyUI 任务分布 / Gate 阻断 top10。"""
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    with db.connect() as conn:
+        vlm = _ops_vlm_section(conn, cutoff)
+        comfyui = _ops_comfyui_section(conn, cutoff)
+        gate = _ops_gate_section(conn)
+    return {
+        "days": days,
+        "vlm": vlm,
+        "comfyui": comfyui,
+        "gate": gate,
+    }
