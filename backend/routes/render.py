@@ -2109,3 +2109,129 @@ def ops_batch_rerun(
         outcome=outcome, http_status=200,
     )
     return resp
+
+
+# ---------------------------------------------------------------------------
+# P1.1.B /api/render/ops/ab-sample — 接管 comfyui_ab_runner.py
+# ---------------------------------------------------------------------------
+
+
+class OpsAbSampleRequest(BaseModel):
+    workflow_a: str = Field(..., min_length=1, max_length=160)
+    workflow_b: str = Field(..., min_length=1, max_length=160)
+    sample_size: int = Field(..., ge=1, le=MAX_OPS_AB_SAMPLE_SIZE)
+    source_pool: str = Field(default="recent_done")
+    case_ids: list[int] | None = Field(default=None, max_length=MAX_OPS_AB_SAMPLE_SIZE)
+    reviewer: str = Field(..., min_length=1, max_length=128)
+    reason: str | None = Field(default=None, max_length=1000)
+
+
+def _pick_ab_sample_case_ids(source_pool: str, sample_size: int,
+                             explicit_case_ids: list[int] | None) -> list[int]:
+    """Pick up to `sample_size` distinct case_ids for A/B comparison.
+
+    source_pool semantics:
+      - case_ids: caller-supplied explicit list (truncated to sample_size)
+      - recent_done: most recent simulation_jobs.status='done' case_ids
+      - candidate_layer: simulation_jobs.status='done' AND can_publish=0
+    """
+    if source_pool == "case_ids":
+        if not explicit_case_ids:
+            return []
+        seen: set[int] = set()
+        out: list[int] = []
+        for cid in explicit_case_ids:
+            if cid not in seen:
+                seen.add(cid)
+                out.append(cid)
+            if len(out) >= sample_size:
+                break
+        return out
+    if source_pool not in {"recent_done", "candidate_layer"}:
+        return []
+    where_can_publish = " AND can_publish = 0" if source_pool == "candidate_layer" else ""
+    with db.connect() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT DISTINCT case_id
+            FROM simulation_jobs
+            WHERE status = 'done' AND case_id IS NOT NULL{where_can_publish}
+            ORDER BY case_id DESC
+            LIMIT ?
+            """,
+            (sample_size,),
+        ).fetchall()
+    return [int(r["case_id"]) for r in rows]
+
+
+@router.post("/api/render/ops/ab-sample")
+def ops_ab_sample(
+    payload: OpsAbSampleRequest,
+    x_request_id: str | None = Header(default=None, alias="X-Request-Id"),
+) -> dict[str, Any]:
+    """P1.1 收编 comfyui_ab_runner.py。
+
+    记录 A/B 抽样规格 + 候选 case_ids 计划入 ops_audit_log，返回
+    `ab_sample_run_id` + `plan`。实际 ComfyUI 双 workflow 出图触发仍需 owner
+    `ai_generation_adapter` 整合（candidate_lineage 同时由 owner 写入路径补全）。
+    本 endpoint 是"规格 + 候选选定"的合约层，让前端/cron 可生成可审计计划。
+    """
+    request_id = _gen_request_id(x_request_id)
+    endpoint = "POST /api/render/ops/ab-sample"
+    payload_dump = payload.model_dump()
+
+    if payload.source_pool not in ALLOWED_OPS_AB_SOURCE_POOLS:
+        resp = {
+            "request_id": request_id,
+            "error": f"source_pool must be one of {sorted(ALLOWED_OPS_AB_SOURCE_POOLS)}",
+        }
+        _write_ops_audit_log(
+            request_id=request_id, endpoint=endpoint,
+            reviewer=payload.reviewer, reason=payload.reason,
+            payload=payload_dump, response=resp,
+            outcome="error", http_status=400,
+        )
+        raise HTTPException(400, resp)
+    if payload.workflow_a == payload.workflow_b:
+        resp = {
+            "request_id": request_id,
+            "error": "workflow_a and workflow_b must differ",
+        }
+        _write_ops_audit_log(
+            request_id=request_id, endpoint=endpoint,
+            reviewer=payload.reviewer, reason=payload.reason,
+            payload=payload_dump, response=resp,
+            outcome="error", http_status=400,
+        )
+        raise HTTPException(400, resp)
+
+    picked = _pick_ab_sample_case_ids(
+        payload.source_pool, payload.sample_size, payload.case_ids
+    )
+    ab_run_id = f"absamp-{uuid.uuid4().hex[:12]}"
+    plan = {
+        "ab_sample_run_id": ab_run_id,
+        "workflow_a": payload.workflow_a,
+        "workflow_b": payload.workflow_b,
+        "sample_size_requested": payload.sample_size,
+        "source_pool": payload.source_pool,
+        "picked_case_ids": picked,
+        "picked_count": len(picked),
+    }
+    resp = {
+        "request_id": request_id,
+        "status": "plan_recorded",
+        "note": (
+            "Sample plan recorded in ops_audit_log. Actual A/B fire is pending "
+            "owner ai_generation_adapter integration; consumer scripts should "
+            "read this plan and fire via POST /api/cases/{id}/simulate-after."
+        ),
+        **plan,
+    }
+    _write_ops_audit_log(
+        request_id=request_id, endpoint=endpoint,
+        reviewer=payload.reviewer, reason=payload.reason,
+        payload=payload_dump, response=resp,
+        outcome="ok", http_status=200,
+    )
+    return resp
