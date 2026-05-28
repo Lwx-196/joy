@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -16,6 +17,8 @@ from urllib import parse, request
 
 from . import stress
 from .services.promotion_manifest_loader import should_promote
+
+LOGGER = logging.getLogger(__name__)
 
 SIMULATION_ROOT = stress.simulation_root(
     Path(__file__).resolve().parent.parent / "case-workbench-ai" / "simulation_jobs"
@@ -2656,6 +2659,83 @@ def run_direct_clinical_enhancement(
         pass
 
     return image_path
+
+
+def run_comfyui_inline_enhance(
+    image_path: Path,
+    *,
+    focus_targets: list[str] | None = None,
+    brand: str = "fumei",
+    case_id: int | None = None,
+    model_name: str | None = None,
+    output_dir: Path | None = None,
+) -> Path:
+    """G1.A.i — inline ComfyUI enhancement (lightweight P2 swap path).
+
+    Calls _run_comfyui_workflow directly (the same core HTTP flow used by
+    run_comfyui_local_after_simulation) but **skips watermark / qa_scores /
+    difference_heatmap / audit.json / simulation_jobs DB row**. Designed for
+    pre-render staging inline replacement where the heavier simulation-after
+    pipeline is overkill.
+
+    Returns:
+        - On success: Path to the ComfyUI-generated PNG (caller os.replace into staging)
+        - On any failure: returns input `image_path` unchanged (silent — caller
+          detects success by checking `result != image_path`)
+
+    Failure modes covered (per G1.A.i contract — render done + ComfyUI fail audit only):
+        - _run_comfyui_workflow raises (ConnectionError / TimeoutError / RuntimeError)
+        - run_result missing `generated_path` key
+        - generated_path string returned but file doesn't exist on disk
+        - LOGGER.warning emitted in all silent-fail branches for grep audit
+
+    Args:
+        image_path: source image (typically an "after" image in staging dir)
+        focus_targets: anatomical keywords (e.g. ["面部", "下颌线"]); informational
+            only at this layer — the workflow itself controls focus regions
+        brand: render brand (md_ai / meiji_ai); informational
+        case_id: render case_id (for LOGGER context); informational
+        model_name: ComfyUI workflow identifier (e.g.
+            "local_region_enhance_v1@conservative"). Defaults to
+            COMFYUI_DEFAULT_CANDIDATE_WORKFLOW.
+        output_dir: optional temp dir for ComfyUI output. Defaults to a
+            timestamp+pid-namespaced subdir under image_path.parent.
+    """
+    try:
+        profile = _resolve_comfyui_workflow_profile(model_name)
+        workflow_name = str(profile["workflow_name"])
+        if output_dir is None:
+            output_dir = image_path.parent / f".comfyui-inline-{int(time.time())}-{os.getpid()}"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        run_result = _run_comfyui_workflow(
+            image_path,
+            output_dir=output_dir,
+            workflow_name=workflow_name,
+            workflow_parameters=profile.get("parameters") or {},
+        )
+        generated_path_str = run_result.get("generated_path")
+        if not generated_path_str:
+            LOGGER.warning(
+                "ComfyUI inline enhance: no generated_path in run_result for %s "
+                "(case_id=%s brand=%s, run_result keys=%s)",
+                image_path.name, case_id, brand, list(run_result.keys()),
+            )
+            return image_path
+        generated_path = Path(generated_path_str)
+        if not generated_path.is_file():
+            LOGGER.warning(
+                "ComfyUI inline enhance: generated_path %s does not exist on disk "
+                "(case_id=%s brand=%s)",
+                generated_path, case_id, brand,
+            )
+            return image_path
+        return generated_path
+    except Exception as exc:  # noqa: BLE001 - silent fail per G1.A.i contract (render done + audit only)
+        LOGGER.warning(
+            "ComfyUI inline enhance failed for %s (case_id=%s brand=%s): %s: %s",
+            image_path.name, case_id, brand, type(exc).__name__, exc,
+        )
+        return image_path
 
 
 def _build_comfyui_policy(

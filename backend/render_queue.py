@@ -41,6 +41,15 @@ from typing import Any, AsyncIterator, Callable
 
 from . import _job_pool, ai_generation_adapter, audit, db, render_executor, render_quality, skill_bridge, source_images, source_selection, stress
 from .services import vlm_source_classifier as _vlm_source_classifier
+from .services.promotion_manifest_loader import should_promote
+
+# G1.A.i — env flag controlling render-flow ComfyUI inline enhance swap.
+# Default false → preserves pre-G1 behavior (P1 Node.js PS path via
+# run_direct_clinical_enhancement). Set to "true" / "1" / "yes" to opt in.
+# Two-tier gate: flag must be true AND should_promote(case_id) must be true
+# (per user 2026-05-28 G1.A decision: "flag AND promotion_state 双保险").
+_RENDER_AUTO_AI_ENABLED = os.environ.get("RENDER_AUTO_AI_ENABLED", "false").strip().lower() in ("true", "1", "yes")
+
 
 DEFAULT_TEMPLATE = "tri-compare"
 DEFAULT_SEMANTIC_JUDGE = "auto"
@@ -1576,12 +1585,19 @@ class RenderQueue:
         brand: str,
         case_tags_json: str | None,
         manual_phase_lookup: dict[str, str] | None = None,
+        render_job_id: int | None = None,
+        case_id: int | None = None,
     ) -> None:
         """Scan render_case_dir for 'after' images and trigger AI enhancement for md_ai.
 
         Phase resolution priority:
           1. manual_phase_lookup[entry.name] — operator override from case_image_overrides
           2. source_images._phase_from_filename(entry.name) — filename token fallback
+
+        G1.A.i dispatch logic (per 2026-05-28 design doc):
+          - default (flag false) → P1 run_direct_clinical_enhancement (Node.js PS + external API)
+          - flag true + should_promote(case_id) → P2 run_comfyui_inline_enhance (ComfyUI local)
+          - flag true + shadow / not-promoted → P1 fallback (preserves BC for unpromoted cases)
         """
         if brand not in ("md_ai", "meiji_ai"):
             return
@@ -1605,6 +1621,13 @@ class RenderQueue:
         # Deduplicate
         focus_targets = list(dict.fromkeys(focus_targets))
 
+        # G1.A.i: decide ComfyUI path eligibility once per render (case-level)
+        use_comfyui_inline = (
+            _RENDER_AUTO_AI_ENABLED
+            and case_id is not None
+            and should_promote(int(case_id))
+        )
+
         # Scan for 'after' images in the staging directory
         staging_path = Path(render_case_dir)
         if not staging_path.is_dir():
@@ -1623,14 +1646,26 @@ class RenderQueue:
             if phase is None:
                 phase = source_images._phase_from_filename(entry.name)
             if phase == "after":
-                LOGGER.info("Triggering automated MD-AI clinical enhancement for %s", entry.name)
+                LOGGER.info(
+                    "Triggering automated MD-AI clinical enhancement for %s (path=%s)",
+                    entry.name, "comfyui-inline" if use_comfyui_inline else "ps-direct",
+                )
                 try:
-                    # Enhance image (returns path to enhanced file)
-                    enhanced_path = ai_generation_adapter.run_direct_clinical_enhancement(
-                        entry,
-                        brand=brand,
-                        focus_targets=focus_targets,
-                    )
+                    if use_comfyui_inline:
+                        # G1.A.i — ComfyUI local inline enhance (lightweight P2 swap)
+                        enhanced_path = ai_generation_adapter.run_comfyui_inline_enhance(
+                            entry,
+                            focus_targets=focus_targets,
+                            brand=brand,
+                            case_id=case_id,
+                        )
+                    else:
+                        # P1 default — Node.js PS direct (external API)
+                        enhanced_path = ai_generation_adapter.run_direct_clinical_enhancement(
+                            entry,
+                            brand=brand,
+                            focus_targets=focus_targets,
+                        )
                     if enhanced_path != entry and enhanced_path.is_file():
                         # Replace original in staging with enhanced version
                         temp_enhanced = staging_path / f"enhanced_{entry.name}"
@@ -1934,6 +1969,8 @@ class RenderQueue:
                 brand=brand,
                 case_tags_json=row["case_tags_json"],
                 manual_phase_lookup=manual_phase_lookup,
+                render_job_id=job_id,
+                case_id=case_id,
             )
 
         # 2. Run the heavy subprocess.
