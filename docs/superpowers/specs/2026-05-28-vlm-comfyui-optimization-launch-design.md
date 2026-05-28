@@ -86,53 +86,93 @@ main 上 `promotion_state="shadow"`，`approver=null`，从未启动灰度。
 
 ---
 
-## 4. Phase A — Retrospective 盲评（1-2 天）
+## 4. Phase A — Fresh-pair 盲评（1-2 天，pivoted 2026-05-28）
+
+### 4.0 数据前提修订（pivot record）
+原 4.x 设计假设"用现有数据 0 新 render"，2026-05-28 实施 A.1 时普查发现：
+- `render_jobs` 表里 best-pair / ai 共享 output_path（`<brand>/tri-compare/render/final-board.jpg`），后写覆盖前写
+- 全 DB only `case_id=126 brand=fumei` 同时有 best-pair（3 jobs）+ ai（33 jobs）历史
+- 所有 best-pair `finished_at` 都晚于 ai → fumei 上 ai 产物已被全部覆盖，磁盘无 same-brand 成对样本
+→ User 决策（路径 3）：**备份当前 best-pair 产物 + 重渲 fresh ai → 形成 1 对 same-brand same-template fresh 成对样本**。consume 1 ai quota。
 
 ### 4.1 目标
-用**现有数据**（0 新 render）获取 best-pair vs ai 的**质量方向信号**（directional signal）。
+获取 best-pair vs ai **fresh** same-brand same-template 产物的**质量方向信号**（directional signal）。
 
 ### 4.2 范围
-- 数据源：`case_id=126` 的 3 条 best-pair render_jobs（id=164/165/166，2026-05-10）+ 同 case 的 ai render_jobs（≤6 条历史产物）
-- 评估方式：用户人眼盲评配对图（A vs B，标 winner）
-- 样本量：≤6 对（不扩，用尽现有）
+- 数据源：`case_id=126 brand=fumei template=tri-compare` 上：
+  - best-pair side：当前磁盘 `final-board.jpg`（best-pair job 166，2026-05-10 21:54 写入）→ 立即 `cp` 到 `delivery/phase-a/best-pair-fumei-job166.jpg` 备份
+  - ai side：备份完成后，触发 1 次 fresh ai render（消耗 1 quota）→ 完成后 `cp` 到 `delivery/phase-a/ai-fumei-fresh.jpg`
+- 评估方式：用户人眼盲评 A vs B，标 winner
+- 样本量：1 对（极小样本，directional 信号弱 — Phase A 只问"有没有方向"，不问"统计显著"）
 
 ### 4.3 Execution steps
 
 | # | What | Owner | 时间 |
 |---|---|---|---|
-| 1 | 拉 case_id=126 best-pair + ai render 产物路径（from main DB） | Claude | 5 min |
+| 1a | 备份 best-pair job 166 当前磁盘产物到 `delivery/phase-a/` | Claude | 1 min |
+| 1b | 触发 fresh ai render（POST `/api/v1/render-queue` 或脚本入队）→ 等 worker drain | Claude | ~5 min |
+| 1c | 验证 fresh ai 产物落盘 mtime > best-pair 备份时刻 + cp 到 `delivery/phase-a/` | Claude | 1 min |
 | 2 | 生成盲评包：markdown 表 + A/B 列**乱序** image refs + 评分 column；filename 不暗示 mode | Claude | 10 min |
-| 3 | 你打开盲评包看图 + 标 winner | User | 10-15 min |
-| 4 | 解析评分 + 写 ab_feedback 表（写前先 `.schema ab_feedback` audit） + 计算胜负 | Claude | 5 min |
-| 5 | 出 first-signal report（赢/输/平 + 方向建议） | Claude | 10 min |
+| 3 | 你打开盲评包看图 + 标 winner | User | 5 min |
+| 4 | 解析评分 + 写 ab_feedback 表（写前先 `.schema ab_feedback` audit） + 记录胜负 | Claude | 5 min |
+| 5 | 出 first-signal report（赢/输/平 + 方向建议 + 极小样本免责声明） | Claude | 10 min |
 
 ### 4.4 Deliverables
+- `delivery/phase-a/best-pair-fumei-job166.jpg`（best-pair 备份）
+- `delivery/phase-a/ai-fumei-fresh.jpg`（fresh ai 产物副本）
+- `delivery/phase-a-render-pairs.json`（pair manifest：file_path / job_id / mode / brand / mtime / sha256）
 - `delivery/phase-a-blind-review-package.md`（盲评包）
 - `delivery/phase-a-signal-report.md`（first-signal report）
-- `ab_feedback` 表新增 ≤6 行（Claude 写前 `.schema` audit）
+- `ab_feedback` 表新增 1 行（Claude 写前 `.schema` audit）
 
 ### 4.5 Phase A → Phase B 决策门
 
 | Phase A 结果 | 决策 |
 |---|---|
-| best-pair 赢 ≥ 4/6（67%+） | ✅ 进 Phase B 扩量到 30+ 样本 |
-| 混合 3-3 / 2-2-2 | ⚠️ 进 Phase B with caution（加 case 到 10+ 后再决） |
-| ai 赢 ≥ 4/6 | ⛔ STOP，不走 Phase B；进 retrospective debrief — best-pair 设计假设需要 revisit |
+| best-pair 赢 1/1 | ✅ 进 Phase B 扩量到 5-10 样本验证方向 |
+| 平 / 无明显差异 | ⚠️ 进 Phase B 扩量决策（1 对样本不足以判断） |
+| ai 赢 1/1 | ⚠️ 不立刻 STOP；进 Phase B with 加强样本（≥5 对）+ debrief 假设；如 Phase B ai 持续赢 → 走 retrospective debrief |
+
+注：1 对样本决策门必然弱信号，与原 6 对设计的 67% 阈值不可直接换算。Phase B 才是真决策门。
 
 ### 4.6 风险评估
 
 | 风险 | 缓解 |
 |---|---|
-| 样本量 ≤6 不足统计严谨 | 接受（Phase A 设计目标是 directional 不是统计；统计交给 Phase B） |
+| 样本量 1 对极小，directional 信号弱 | 接受（Phase A 目标降级为"建立 fresh 成对样本基线 + 摸盲评流程"，统计交给 Phase B） |
 | 评图 bias（user 知道哪个是新方案 → expectation bias） | image ref 真乱序 + filename hash 不暗示 mode + Claude 生成包时自检 |
-| best-pair 仅 case_id=126 一个 case，可能不具代表性 | Phase A 只问"有没有 directional signal"，代表性不是这一步要解决的 |
+| fresh ai render 失败（quota 用尽 / worker hang / API 错误） | 检测 finished_at + status；如失败 STOP 报告，不强续 |
+| ai render 覆盖当前 best-pair 磁盘产物 | step 1a 备份必须先于 1b 触发；备份验证 cp 完成 + size / sha256 比对后再触发 ai |
 | ab_feedback 表 schema 不熟可能写错 | step 4 写表前 Claude 先 `.schema ab_feedback` audit |
+
+### 4.7 Closure record（2026-05-28，user 决策 P1）
+
+Phase A 实施 1c step 后实证发现：
+- best-pair job 166 与 fresh ai job 633 的 `final-board.jpg` **byte-identical**（sha256 `e39bd3c28a05...`，501897 bytes）
+- job 633 `ai_usage.used_after_enhancement / used_ai_padfill` 均 `false`，`semantic_judge_effective="off"`
+- `manifest.final.json.semantic_summary.pair_calls / final_calls` 均 `0`
+- `vlm_usage_log` 在 fresh render 时间窗 `2026-05-28 02:39-02:41` **0 行**
+
+**实证结论**：production "ai" render mode **未真接 AI 图像生成 / VLM / ComfyUI**，与 best-pair mode 在像素层 byte-identical。`render_mode` + `best_pair_selection_id` 是 metadata，对最终输出零影响。
+
+**决策门 4.5 表外 outcome**：两边 byte-identical → Phase A finding 已 deliver；Phase B/C **CANCELLED**（盲评无差可比）。
+
+**Deliverables shipped**：
+- `delivery/phase-a-evidence-report.md`（finding report）
+- `delivery/phase-a-render-pairs.json`（机器可读 pair manifest）
+- `delivery/phase-a/best-pair-fumei-job166.jpg` + `.manifest.json`
+- `delivery/phase-a/ai-fumei-fresh-job633.jpg` + `.manifest.json`
+
+**Next plan**（不在本 spec 范围）：
+- 审 4 个 WIP worktree（best-pair-routing / vlm-judge / vlm-phase2 / vlm-calibration）哪一份最接近"AI gen 真接入"
+- backend/ai_generation_adapter / render_executor / ComfyUI 接入点 audit
+- 新 plan 在 ComfyUI 真接入后重启盲评
 
 ---
 
-## 5. Phase B — Shadow A/B with new renders（3-5 天）
+## 5. Phase B — Shadow A/B with new renders（CANCELLED 2026-05-28 per §4.7）
 
-**前提**：Phase A 通过决策门（best-pair 赢 ≥ 4/6）
+**前提**（不再适用）：~~Phase A 通过决策门（best-pair 赢 ≥ 4/6）~~ — Phase A finding 实证 ai mode 未真接 AI，盲评无差可比，本节作废。保留作历史参考。
 
 ### 5.1 目标
 扩样本到 30-40 对，做**统计严谨判定**（不再是 directional signal），决定是否值得推 Phase C（真 p10 上线）。
