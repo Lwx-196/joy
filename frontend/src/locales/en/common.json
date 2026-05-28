@@ -8,7 +8,8 @@
     "evaluations": "Evaluations",
     "quality": "QA",
     "dict": "Customer Dictionary",
-    "images": "Images"
+    "images": "Images",
+    "ops": "Ops"
   },
   "brand": {
     "title": "Case Workbench",

@@ -17,6 +17,7 @@ import caseGroups from "../locales/zh/caseGroups.json";
 import imageWorkbench from "../locales/zh/imageWorkbench.json";
 import qualityReview from "../locales/zh/qualityReview.json";
 import sourceBlockers from "../locales/zh/sourceBlockers.json";
+import opsConsole from "../locales/zh/opsConsole.json";
 
 declare module "i18next" {
   interface CustomTypeOptions {
@@ -40,6 +41,7 @@ declare module "i18next" {
       imageWorkbench: typeof imageWorkbench;
       qualityReview: typeof qualityReview;
       sourceBlockers: typeof sourceBlockers;
+      opsConsole: typeof opsConsole;
     };
   }
 }

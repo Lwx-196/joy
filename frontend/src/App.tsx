@@ -16,6 +16,7 @@ const Dict = lazy(() => import("./pages/Dict"));
 const Evaluations = lazy(() => import("./pages/Evaluations"));
 const QualityReview = lazy(() => import("./pages/QualityReview"));
 const JobBatch = lazy(() => import("./pages/JobBatch"));
+const OpsConsole = lazy(() => import("./pages/OpsConsole"));
 
 /** Permanent redirect from the legacy /render/batches/:batchId path to the
  * unified /jobs/batches/:batchId?type=render. Bookmarks and old links keep
@@ -42,6 +43,7 @@ export default function App() {
           <Route path="evaluations" element={<Evaluations />} />
           <Route path="quality" element={<QualityReview />} />
           <Route path="jobs/batches/:batchId" element={<JobBatch />} />
+          <Route path="ops" element={<OpsConsole />} />
           <Route
             path="render/batches/:batchId"
             element={<LegacyRenderBatchRedirect />}

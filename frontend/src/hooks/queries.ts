@@ -68,6 +68,7 @@ import {
   fetchAiReviewPolicy,
   fetchQualityReport,
   fetchSimulationQualityQueue,
+  fetchOpsStatus,
   fetchScanLatest,
   fetchSourceBindingCandidates,
   fetchSourceBlockers,
@@ -147,6 +148,10 @@ import { useUndoStore } from "../lib/undo-toast";
 export const QK = {
   stats: ["stats"] as const,
   scanLatest: ["scan", "latest"] as const,
+  opsStatus: (params?: { sloWindowHours?: number; probeComfyui?: boolean }) =>
+    params && Object.keys(params).length > 0
+      ? (["ops", "status", params] as const)
+      : (["ops", "status"] as const),
   cases: (params?: Parameters<typeof fetchCases>[0]) =>
     params && Object.keys(params).length > 0
       ? (["cases", params] as const)
@@ -296,6 +301,24 @@ export function useCasesPage(params: CaseListParams) {
     queryFn: () => fetchCases(params),
     placeholderData: (prev) => prev,
     staleTime: 5_000,
+  });
+}
+
+export function useOpsStatus(params: {
+  sloWindowHours?: number;
+  probeComfyui?: boolean;
+} = {}) {
+  return useQuery({
+    queryKey: QK.opsStatus(params),
+    queryFn: () =>
+      fetchOpsStatus({
+        slo_window_hours: params.sloWindowHours,
+        probe_comfyui: params.probeComfyui,
+      }),
+    staleTime: 10_000,
+    // Auto-refresh every 30s so the dashboard stays current without manual
+    // refresh — operators leave this page open during P10/P25 soak.
+    refetchInterval: 30_000,
   });
 }
 

@@ -1,0 +1,94 @@
+{
+  "header": {
+    "title": "Ops Console",
+    "subtitle": "ComfyUI/VLM promotion dashboard — manifest state, SLO recommendation, blockers",
+    "refresh": "Refresh",
+    "refreshing": "Refreshing…",
+    "lastUpdated": "Last updated {{when}}"
+  },
+  "states": {
+    "loading": "Loading…",
+    "loadError": "Failed to load status",
+    "errorRetry": "Retry"
+  },
+  "manifest": {
+    "sectionTitle": "Manifest state",
+    "stateLabel": "Promotion state",
+    "exposureLabel": "Bucket exposure",
+    "approver": "Approver",
+    "approvedAt": "Approved at",
+    "expiresAt": "Expires at",
+    "bindingsPresent": "Bindings populated",
+    "bindingsMissing": "Bindings missing",
+    "rollbackBaselineAge": "Rollback baseline age {{days}} d",
+    "rollbackBaselineMissing": "Rollback baseline not captured",
+    "stateNotSet": "(unset)",
+    "exposureSuffix": "%"
+  },
+  "slo": {
+    "sectionTitle": "SLO recommendation",
+    "recommendationLabel": "Recommendation",
+    "sampleLabel": "Sample size",
+    "windowLabel": "Window",
+    "windowSuffix": "h",
+    "generatedAt": "Generated at",
+    "sampleVsMin": "{{sample}} / min {{min}}",
+    "errorBlock": "SLO eval failed: {{message}}",
+    "violations": "Violations ({{count}})",
+    "noViolations": "No violations in window",
+    "withinSlo_true": "Within SLO",
+    "withinSlo_false": "Outside SLO",
+    "withinSlo_null": "Hold for sample"
+  },
+  "comfyui": {
+    "sectionTitle": "ComfyUI live probe",
+    "baseUrl": "URL",
+    "reachableTrue": "Reachable",
+    "reachableFalse": "Unreachable",
+    "reachableSkipped": "Skipped",
+    "queueRunning": "Running {{n}}",
+    "queuePending": "Pending {{n}}",
+    "probedAt": "Probed at",
+    "errorBlock": "Error: {{message}}",
+    "httpStatus": "HTTP {{status}}"
+  },
+  "latency": {
+    "sectionTitle": "Render latency (24h)",
+    "renderMode": "Render mode",
+    "count": "Samples",
+    "p50": "P50",
+    "p95": "P95",
+    "seconds": "s",
+    "empty": "No completed render jobs in window",
+    "errorBlock": "Latency query failed: {{message}}"
+  },
+  "silentFail": {
+    "sectionTitle": "Silent failures (24h)",
+    "count": "Count: {{n}}",
+    "errorBlock": "Silent-fail query failed: {{message}}",
+    "windowSuffix": "h window"
+  },
+  "applier": {
+    "sectionTitle": "Last applier event",
+    "lastOutcome": "Outcome",
+    "lastRunAt": "Run at",
+    "lastReason": "Reason",
+    "lastRequestId": "Request ID",
+    "empty": "No applier events yet",
+    "errorBlock": "Query failed: {{message}}"
+  },
+  "controls": {
+    "probeOn": "ComfyUI probe: ON",
+    "probeOff": "ComfyUI probe: OFF",
+    "slo24h": "24h",
+    "slo48h": "48h",
+    "slo72h": "72h"
+  },
+  "recommendation": {
+    "continue": "Continue rollout",
+    "rollback": "Rollback now",
+    "insufficient_data": "Insufficient data",
+    "monitoring_paused": "Monitoring paused",
+    "stop_loss_halt": "Stop-loss halt"
+  }
+}
