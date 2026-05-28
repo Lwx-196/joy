@@ -28,7 +28,7 @@ from pydantic import BaseModel, Field
 
 from .. import audit, db, render_executor, render_quality, source_images, stress
 from ..render_queue import RENDER_QUEUE
-from ..services import ops_readiness, pre_render_gate
+from ..services import ops_alerting, ops_readiness, pre_render_gate
 
 router = APIRouter(tags=["render"])
 
@@ -2501,3 +2501,169 @@ def ops_repair_queue(
         outcome="dry_run", http_status=200,
     )
     return resp
+
+
+# ---------------------------------------------------------------------------
+# C3.0.3 — Alerting endpoints. The SLOReport + applier result are the *only*
+# allowed alert event sources; this surface compiles a synthetic version of
+# one of those two payloads (for tests / dry-runs) OR replays an in-process
+# result, then writes alert_fired / alert_acked / alert_resolved rows into
+# ops_audit_log sharing one correlation_id. No new schema; the audit log is
+# the lifecycle store.
+# ---------------------------------------------------------------------------
+
+
+class OpsAlertFireRequest(BaseModel):
+    source: str = Field(..., description="Must be one of ALLOWED_SOURCES.")
+    # Operator either provides a synthetic SLO report dict OR a synthetic
+    # applier-result dict — never both. The compile fn dispatches on `source`.
+    slo_report: dict[str, Any] | None = Field(default=None)
+    applier_result: dict[str, Any] | None = Field(default=None)
+    correlation_id: str | None = Field(default=None, max_length=128)
+    reviewer: str = Field(..., min_length=1, max_length=128)
+    reason: str | None = Field(default=None, max_length=1000)
+    dispatch: bool = Field(
+        default=False,
+        description=(
+            "When True, send through configured channels; when False (default)"
+            " only the audit row is written. Synthetic / smoke runs should "
+            "leave this False to avoid paging on-call."
+        ),
+    )
+
+
+class OpsAlertLifecycleRequest(BaseModel):
+    operator: str = Field(..., min_length=1, max_length=128)
+    note: str | None = Field(default=None, max_length=1000)
+
+
+@router.post("/api/render/ops/alerts/fire")
+def ops_alerts_fire(
+    payload: OpsAlertFireRequest,
+    x_request_id: str | None = Header(default=None, alias="X-Request-Id"),
+) -> dict[str, Any]:
+    """C3.0.3 — Compile an AlertEvent from either an SLO report or an
+    applier result, then write ``alert_fired`` to ops_audit_log. Channel
+    dispatch is OFF by default (``dispatch=true`` to actually send)."""
+    request_id = _gen_request_id(x_request_id)
+    endpoint = "POST /api/render/ops/alerts/fire"
+    payload_dump = payload.model_dump()
+
+    if payload.source not in ops_alerting.ALLOWED_SOURCES:
+        resp = {
+            "request_id": request_id,
+            "error": (
+                f"source must be one of {sorted(ops_alerting.ALLOWED_SOURCES)}; "
+                f"got {payload.source!r}"
+            ),
+        }
+        _write_ops_audit_log(
+            request_id=request_id, endpoint=endpoint,
+            reviewer=payload.reviewer, reason=payload.reason,
+            payload=payload_dump, response=resp,
+            outcome="error", http_status=400,
+        )
+        raise HTTPException(400, resp)
+
+    if payload.source == ops_alerting.SOURCE_SLO:
+        if not payload.slo_report:
+            resp = {"request_id": request_id, "error": "slo_report required for source=slo_report"}
+            _write_ops_audit_log(
+                request_id=request_id, endpoint=endpoint,
+                reviewer=payload.reviewer, reason=payload.reason,
+                payload=payload_dump, response=resp,
+                outcome="error", http_status=400,
+            )
+            raise HTTPException(400, resp)
+        event = ops_alerting.compile_alert_from_slo_report(
+            payload.slo_report, correlation_id=payload.correlation_id
+        )
+    else:  # SOURCE_APPLIER (already validated above)
+        if not payload.applier_result:
+            resp = {
+                "request_id": request_id,
+                "error": "applier_result required for source=rollback_applier",
+            }
+            _write_ops_audit_log(
+                request_id=request_id, endpoint=endpoint,
+                reviewer=payload.reviewer, reason=payload.reason,
+                payload=payload_dump, response=resp,
+                outcome="error", http_status=400,
+            )
+            raise HTTPException(400, resp)
+        event = ops_alerting.compile_alert_from_applier_result(
+            payload.applier_result, correlation_id=payload.correlation_id
+        )
+
+    if event is None:
+        # Benign payload — no alert needed. Audit-only so the operator can
+        # see the synthetic input was accepted without paging anyone.
+        resp = {
+            "request_id": request_id,
+            "alert_compiled": False,
+            "note": "input recommendation/reason is benign — no AlertEvent produced",
+        }
+        _write_ops_audit_log(
+            request_id=request_id, endpoint=endpoint,
+            reviewer=payload.reviewer, reason=payload.reason,
+            payload=payload_dump, response=resp,
+            outcome="ok", http_status=200,
+        )
+        return resp
+
+    with db.connect() as conn:
+        fire_response = ops_alerting.fire_alert(
+            event,
+            conn=conn,
+            dispatch=payload.dispatch,
+        )
+    resp = {
+        "request_id": request_id,
+        "alert_compiled": True,
+        "correlation_id": event.correlation_id,
+        "event": event.to_dict(),
+        "fire_response": fire_response,
+    }
+    _write_ops_audit_log(
+        request_id=request_id, endpoint=endpoint,
+        reviewer=payload.reviewer, reason=payload.reason,
+        payload=payload_dump, response=resp,
+        outcome="ok", http_status=200,
+    )
+    return resp
+
+
+@router.post("/api/render/ops/alerts/{correlation_id}/ack")
+def ops_alerts_ack(
+    correlation_id: str,
+    payload: OpsAlertLifecycleRequest,
+) -> dict[str, Any]:
+    """C3.0.3 — Record an alert_acked row for the given correlation_id."""
+    if not correlation_id or len(correlation_id) > 128:
+        raise HTTPException(400, {"error": "correlation_id required (≤128 chars)"})
+    with db.connect() as conn:
+        result = ops_alerting.ack_alert(
+            conn=conn,
+            correlation_id=correlation_id,
+            operator=payload.operator,
+            note=payload.note,
+        )
+    return result
+
+
+@router.post("/api/render/ops/alerts/{correlation_id}/resolve")
+def ops_alerts_resolve(
+    correlation_id: str,
+    payload: OpsAlertLifecycleRequest,
+) -> dict[str, Any]:
+    """C3.0.3 — Record an alert_resolved row for the given correlation_id."""
+    if not correlation_id or len(correlation_id) > 128:
+        raise HTTPException(400, {"error": "correlation_id required (≤128 chars)"})
+    with db.connect() as conn:
+        result = ops_alerting.resolve_alert(
+            conn=conn,
+            correlation_id=correlation_id,
+            operator=payload.operator,
+            note=payload.note,
+        )
+    return result
