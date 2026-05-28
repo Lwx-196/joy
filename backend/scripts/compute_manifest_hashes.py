@@ -42,11 +42,20 @@ REPO_ROOT_DEFAULT = Path(__file__).resolve().parents[2]
 
 MANIFEST_RELPATH = Path("case-workbench-ai/promotion/manifest.json")
 
+# C0.5.3: bindings now include the three canonical evidence-report files in
+# addition to the original four source/sample hashes. The new bindings are
+# additive — older manifests missing them are flagged via ``binding_missing``
+# by ``validate_manifest`` so operators can populate them via ``--write``.
 BINDING_NAMES: tuple[str, ...] = (
     "vlm_calibration_hash",
     "production_gate_hash",
     "ab_report_hash",
     "render_quality_baseline_hash",
+    # C0.5.3 additions — bound to the three canonical evidence files
+    # documented in ``docs/contracts/ab-validation-schema.md``.
+    "ab_validation_report_hash",
+    "vlm_guardrail_report_hash",
+    "production_gate_report_hash",
 )
 
 VALID_SCOPES: frozenset[str] = frozenset({"production", "staging", "canary"})
@@ -71,6 +80,20 @@ PRODUCTION_GATE_SOURCES: tuple[Path, ...] = (
 )
 AB_RUNS_DIR = Path("case-workbench-ai/ab_runs")
 RENDER_QUALITY_SAMPLES_DIR = Path("case-workbench-ai/render_quality_samples")
+
+# C0.5.3: canonical evidence file paths consumed by the promotion gate.
+# Keep in sync with ``docs/contracts/ab-validation-schema.md`` and with
+# ``backend.scripts.validate_ab_validation_reports``.
+CANONICAL_AB_VALIDATION_REPORT = AB_RUNS_DIR / "t47_comfyui_ab_report.json"
+CANONICAL_VLM_GUARDRAIL_REPORT = AB_RUNS_DIR / "vlm_guardrail_report.json"
+CANONICAL_PRODUCTION_GATE_REPORT = AB_RUNS_DIR / "comfyui_production_gate.json"
+
+# Sentinel hashes emitted when a canonical evidence file has not been
+# produced yet. The gate refuses to flip ``promote_to_default`` while a
+# binding still equals the sentinel, so promotion fails closed.
+_AB_REPORT_MISSING_SENTINEL = b"<no-ab-validation-report>"
+_VLM_GUARDRAIL_MISSING_SENTINEL = b"<no-vlm-guardrail-report>"
+_PRODUCTION_GATE_MISSING_SENTINEL = b"<no-production-gate-report>"
 
 HASH_PREFIX = "sha256:"
 
@@ -133,6 +156,13 @@ def compute_production_gate_hash(repo_root: Path) -> str:
 
 
 def _latest_ab_summary(repo_root: Path) -> Path | None:
+    """Legacy lookup retained for backward compatibility — historical AB
+    runs landed under ``case-workbench-ai/ab_runs/<timestamp>/summary.json``.
+
+    Prefer the canonical ``ab_validation_report_hash`` binding (C0.5.3) for
+    promotion decisions; this helper exists only to keep the legacy
+    ``ab_report_hash`` binding computable when no canonical report exists.
+    """
     ab_dir = repo_root / AB_RUNS_DIR
     if not ab_dir.is_dir():
         return None
@@ -145,12 +175,59 @@ def _latest_ab_summary(repo_root: Path) -> Path | None:
 
 
 def compute_ab_report_hash(repo_root: Path) -> str:
+    """C0.5.3: hash the **canonical** AB validation report.
+
+    The legacy behaviour (hashing the most recent ``<timestamp>/summary.json``
+    under ``ab_runs/``) is kept as a fallback only when the canonical file
+    is absent, so existing CI pipelines that never created
+    ``t47_comfyui_ab_report.json`` still produce a deterministic hash.
+
+    .. note::
+       Once the canonical file exists, ``ab_report_hash`` and
+       ``ab_validation_report_hash`` are bound to the **same** file and
+       therefore hold the same sha256. They differ only in their *fallback*
+       semantics when the canonical file is missing — ``ab_report_hash``
+       falls back to the legacy timestamped summary (BC), while
+       ``ab_validation_report_hash`` emits the
+       ``<no-ab-validation-report>`` sentinel so the gate's manifest
+       binding check fails closed. The legacy binding is retained for
+       backwards compatibility; new gate logic should consume
+       ``ab_validation_report_hash`` instead.
+    """
+    canonical = repo_root / CANONICAL_AB_VALIDATION_REPORT
+    if canonical.is_file():
+        return _sha256_file(canonical)
     summary = _latest_ab_summary(repo_root)
     if summary is None:
-        # No AB runs locally: emit a stable empty marker so the manifest is
-        # still computable. Downstream gate decides whether to refuse.
         return _sha256_bytes(b"<no-ab-runs>")
     return _sha256_file(summary)
+
+
+def compute_ab_validation_report_hash(repo_root: Path) -> str:
+    """Hash the canonical ``t47_comfyui_ab_report.json`` evidence file.
+
+    Unlike ``compute_ab_report_hash``, this never falls back to the legacy
+    timestamped summary — a missing canonical file produces a sentinel hash
+    so the promotion gate's manifest-binding double-check fails closed.
+    """
+    canonical = repo_root / CANONICAL_AB_VALIDATION_REPORT
+    if not canonical.is_file():
+        return _sha256_bytes(_AB_REPORT_MISSING_SENTINEL)
+    return _sha256_file(canonical)
+
+
+def compute_vlm_guardrail_report_hash(repo_root: Path) -> str:
+    canonical = repo_root / CANONICAL_VLM_GUARDRAIL_REPORT
+    if not canonical.is_file():
+        return _sha256_bytes(_VLM_GUARDRAIL_MISSING_SENTINEL)
+    return _sha256_file(canonical)
+
+
+def compute_production_gate_report_hash(repo_root: Path) -> str:
+    canonical = repo_root / CANONICAL_PRODUCTION_GATE_REPORT
+    if not canonical.is_file():
+        return _sha256_bytes(_PRODUCTION_GATE_MISSING_SENTINEL)
+    return _sha256_file(canonical)
 
 
 def compute_render_quality_baseline_hash(repo_root: Path) -> str:
@@ -169,6 +246,9 @@ def compute_all_bindings(repo_root: Path) -> dict[str, str]:
         "production_gate_hash": compute_production_gate_hash(repo_root),
         "ab_report_hash": compute_ab_report_hash(repo_root),
         "render_quality_baseline_hash": compute_render_quality_baseline_hash(repo_root),
+        "ab_validation_report_hash": compute_ab_validation_report_hash(repo_root),
+        "vlm_guardrail_report_hash": compute_vlm_guardrail_report_hash(repo_root),
+        "production_gate_report_hash": compute_production_gate_report_hash(repo_root),
     }
 
 

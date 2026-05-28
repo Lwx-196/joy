@@ -152,6 +152,38 @@ def test_boundary_promotion_state_invalid_value():
 # --------- additional structural assertions (cheap, share fixture) ---------
 
 
+def test_null_new_binding_emits_hash_mismatch_not_missing():
+    """C0.5.3 backwards-compat lock: when an upgraded code path computes
+    real hashes for the three new bindings but the on-disk manifest still
+    has them as ``null`` (the initial state before the operator runs
+    ``--write``), validation must emit ``hash_mismatch`` — never
+    ``binding_missing``. ``binding_missing`` is reserved for the key being
+    absent from the bindings object entirely; ``null`` is *present but
+    unset*, which the gate already treats as fail-closed via the manifest
+    binding check.
+    """
+    manifest = _good_manifest()
+    for name in (
+        "ab_validation_report_hash",
+        "vlm_guardrail_report_hash",
+        "production_gate_report_hash",
+    ):
+        manifest["bindings"][name] = None
+    issues = validate_manifest(
+        manifest,
+        expected_bindings=_good_expected(),
+        now=FROZEN_NOW,
+    )
+    codes = [(i.code, i.field) for i in issues]
+    for name in (
+        "ab_validation_report_hash",
+        "vlm_guardrail_report_hash",
+        "production_gate_report_hash",
+    ):
+        assert ("hash_mismatch", f"bindings.{name}") in codes
+        assert ("binding_missing", f"bindings.{name}") not in codes
+
+
 def test_compute_production_gate_hash_is_deterministic(tmp_path: Path):
     """Production-gate hash should depend only on file content, not order
     or working directory."""
@@ -205,7 +237,7 @@ def test_write_manifest_bindings_preserves_approval_fields(tmp_path: Path):
     assert result == on_disk
 
 
-def test_compute_all_bindings_returns_all_four(tmp_path: Path):
+def test_compute_all_bindings_returns_full_set(tmp_path: Path):
     repo = tmp_path / "repo"
     (repo / "backend" / "services").mkdir(parents=True)
     (repo / "backend" / "services" / "vlm_calibration.py").write_text(
@@ -222,3 +254,92 @@ def test_compute_all_bindings_returns_all_four(tmp_path: Path):
     for v in bindings.values():
         assert v.startswith("sha256:")
         assert len(v) == len("sha256:") + 64
+
+
+# ----------------------- C0.5.3 canonical-path bindings --------------------
+
+
+def _write_canonical_reports(repo: Path) -> tuple[Path, Path, Path]:
+    """Helper: drop sample report files at the canonical paths."""
+    from backend.scripts.compute_manifest_hashes import (
+        CANONICAL_AB_VALIDATION_REPORT,
+        CANONICAL_PRODUCTION_GATE_REPORT,
+        CANONICAL_VLM_GUARDRAIL_REPORT,
+    )
+
+    ab_path = repo / CANONICAL_AB_VALIDATION_REPORT
+    vlm_path = repo / CANONICAL_VLM_GUARDRAIL_REPORT
+    pg_path = repo / CANONICAL_PRODUCTION_GATE_REPORT
+    ab_path.parent.mkdir(parents=True, exist_ok=True)
+    ab_path.write_text(json.dumps({"id": "ab"}), encoding="utf-8")
+    vlm_path.write_text(json.dumps({"id": "vlm"}), encoding="utf-8")
+    pg_path.write_text(json.dumps({"id": "pg"}), encoding="utf-8")
+    return ab_path, vlm_path, pg_path
+
+
+def test_ab_validation_report_hash_targets_canonical_path(tmp_path: Path):
+    from backend.scripts.compute_manifest_hashes import (
+        compute_ab_validation_report_hash,
+    )
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    # Missing canonical → sentinel hash.
+    sentinel = compute_ab_validation_report_hash(repo)
+    assert sentinel.startswith("sha256:")
+
+    ab_path, _, _ = _write_canonical_reports(repo)
+    actual = compute_ab_validation_report_hash(repo)
+    assert actual != sentinel
+    # Direct content hash must equal the helper's output.
+    expected = "sha256:" + __import__("hashlib").sha256(
+        ab_path.read_bytes()
+    ).hexdigest()
+    assert actual == expected
+
+
+def test_legacy_ab_report_hash_prefers_canonical_over_summary(tmp_path: Path):
+    """C0.5.3: the legacy ``ab_report_hash`` binding must prefer the
+    canonical evidence file when it exists, falling back to the timestamped
+    summary only when the canonical path is empty."""
+    from backend.scripts.compute_manifest_hashes import (
+        AB_RUNS_DIR,
+        compute_ab_report_hash,
+    )
+
+    repo = tmp_path / "repo"
+    legacy_dir = repo / AB_RUNS_DIR / "2026-05-01T00-00-00"
+    legacy_dir.mkdir(parents=True)
+    (legacy_dir / "summary.json").write_text('{"id":"legacy"}', encoding="utf-8")
+
+    legacy_hash = compute_ab_report_hash(repo)
+    assert legacy_hash.startswith("sha256:")
+
+    _write_canonical_reports(repo)
+    canonical_hash = compute_ab_report_hash(repo)
+    assert canonical_hash != legacy_hash, (
+        "compute_ab_report_hash must switch to the canonical file when present"
+    )
+
+
+def test_new_bindings_present_in_all_bindings(tmp_path: Path):
+    repo = tmp_path / "repo"
+    (repo / "backend" / "services").mkdir(parents=True)
+    (repo / "backend" / "services" / "vlm_calibration.py").write_text(
+        "a = 1\n", encoding="utf-8"
+    )
+    (repo / "backend" / "services" / "pre_render_gate.py").write_text(
+        "b = 1\n", encoding="utf-8"
+    )
+    (repo / "backend" / "simulation_quality.py").write_text(
+        "c = 1\n", encoding="utf-8"
+    )
+    _write_canonical_reports(repo)
+    bindings = compute_all_bindings(repo)
+    for name in (
+        "ab_validation_report_hash",
+        "vlm_guardrail_report_hash",
+        "production_gate_report_hash",
+    ):
+        assert name in bindings
+        assert bindings[name].startswith("sha256:")

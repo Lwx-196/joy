@@ -16,7 +16,7 @@ from typing import Any
 from urllib import parse, request
 
 from . import stress
-from .services.promotion_manifest_loader import should_promote
+from .services.promotion_manifest_loader import load_manifest, should_promote
 
 LOGGER = logging.getLogger(__name__)
 
@@ -65,6 +65,13 @@ COMFYUI_ALLOWED_CANDIDATE_WORKFLOWS = {
     "local_region_enhance_v3@conservative",
 }
 COMFYUI_DEFAULT_CANDIDATE_WORKFLOW = "local_region_enhance_v1@conservative"
+
+# C0.5.4 (Data Contract Freeze) — GA-approved workflow scope.
+# Locked to ``portrait_focal_enhance_v1`` to match the W11 production focal
+# runtime. Sub-plan examples that referenced ``local_region_enhance_v1`` are
+# obsolete; the gate's ``approved_workflows`` check uses this constant as
+# the canonical workflow name. See ``docs/contracts/ga-workflow-scope.md``.
+GA_APPROVED_WORKFLOW: str = "portrait_focal_enhance_v1"
 COMFYUI_MAX_CONCURRENCY = int(os.environ.get("CASE_WORKBENCH_COMFYUI_MAX_CONCURRENCY", "1"))
 COMFYUI_MIN_FREE_MEMORY_MB = int(os.environ.get("CASE_WORKBENCH_COMFYUI_MIN_FREE_MEMORY_MB", "1024"))
 COMFYUI_TIMEOUT_SEC = int(os.environ.get("CASE_WORKBENCH_COMFYUI_TIMEOUT_SEC", "300"))
@@ -691,6 +698,55 @@ def _production_gate_blockers(report: dict[str, Any]) -> list[str]:
     return blockers
 
 
+def _manifest_binding_blockers(
+    *,
+    ab_validation_report_path: Path | None,
+    vlm_guardrail_report_path: Path | None,
+    production_gate_report_path: Path | None,
+) -> list[str]:
+    """C0.5.3 — second-layer evidence-hash check against the promotion manifest.
+
+    The approval signature inside ``t47_comfyui_ab_report.json`` carries an
+    ``approved_evidence_sha256`` map that pins the VLM + production gate
+    reports. ``_evidence_hash_blockers`` enforces that pin. This function
+    enforces the **mirror** check on the operator-controlled side: every
+    canonical evidence file must also match the corresponding
+    ``bindings.{ab_validation,vlm_guardrail,production_gate}_report_hash``
+    slot in ``case-workbench-ai/promotion/manifest.json``.
+
+    Both checks must pass before ``promote_to_default`` is allowed; either
+    side drifting (e.g. a tampered report swapped under a stale approval,
+    or a manifest written without re-signing) emits a blocker and the gate
+    fails closed.
+    """
+    manifest = load_manifest()
+    if manifest is None:
+        return ["manifest_unavailable_for_binding_check"]
+    bindings = manifest.get("bindings") if isinstance(manifest.get("bindings"), dict) else {}
+    checks: tuple[tuple[str, Path | None], ...] = (
+        ("ab_validation_report_hash", ab_validation_report_path),
+        ("vlm_guardrail_report_hash", vlm_guardrail_report_path),
+        ("production_gate_report_hash", production_gate_report_path),
+    )
+    blockers: list[str] = []
+    for binding_name, path in checks:
+        expected = bindings.get(binding_name)
+        if not isinstance(expected, str) or not expected.strip():
+            blockers.append(f"manifest_binding_{binding_name}_missing")
+            continue
+        if not path or not path.is_file():
+            blockers.append(f"manifest_binding_{binding_name}_file_missing")
+            continue
+        try:
+            actual = _hash_file(path)
+        except OSError:
+            blockers.append(f"manifest_binding_{binding_name}_file_unreadable")
+            continue
+        if actual != expected:
+            blockers.append(f"manifest_binding_{binding_name}_drift")
+    return blockers
+
+
 def _evidence_hash_blockers(
     approval: dict[str, Any],
     *,
@@ -777,6 +833,14 @@ def _comfyui_ab_validation_gate(
         blockers.extend(
             _evidence_hash_blockers(
                 approval,
+                vlm_guardrail_report_path=vlm_path,
+                production_gate_report_path=production_path,
+            )
+        )
+        # C0.5.3 — mirror check against the manifest binding side.
+        blockers.extend(
+            _manifest_binding_blockers(
+                ab_validation_report_path=rp,
                 vlm_guardrail_report_path=vlm_path,
                 production_gate_report_path=production_path,
             )
@@ -998,7 +1062,15 @@ def _comfyui_interrupt(prompt_id: str | None = None) -> None:
         pass
 
 
-def _comfyui_preflight() -> dict[str, Any]:
+def _comfyui_preflight(*, workflow_name: str | None = None) -> dict[str, Any]:
+    """C0.5.4 — the gate now needs to know which workflow we plan to route
+    so it can enforce the GA approval scope (``portrait_focal_enhance_v1``).
+
+    ``workflow_name`` defaults to ``GA_APPROVED_WORKFLOW`` so callers that
+    do not have a runtime override (preflight probes, status endpoints)
+    still hit the GA scope check. Runtime renderers should pass the
+    actually-resolved workflow name so a routing mistake fails the gate.
+    """
     system_stats = _comfyui_json("/system_stats", timeout=10)
     try:
         object_info = _comfyui_json("/object_info", timeout=20)
@@ -1017,7 +1089,8 @@ def _comfyui_preflight() -> dict[str, Any]:
         "capabilities": {},
         "models": {},
     }
-    ab_validation = _comfyui_ab_validation_gate()
+    effective_workflow = (workflow_name or "").strip() or GA_APPROVED_WORKFLOW
+    ab_validation = _comfyui_ab_validation_gate(model_name=effective_workflow)
     ab_reasons: list[str] = []
     if ab_validation["validation_status"] != "ready_for_human_review":
         ab_reasons.append(f"A/B validation not ready ({ab_validation['validation_status']})")
@@ -1046,6 +1119,9 @@ def _comfyui_preflight() -> dict[str, Any]:
         "default_promotion_ready": ab_validation.get("default_promotion_ready", False),
         "production_ready": not core_missing and bool(model_profile.get("production_ready")) and not ab_reasons and not vlm_veto,
         "readiness_reasons": all_reasons,
+        # C0.5.4 — surface which workflow the gate evaluated so operators
+        # can confirm the GA scope binding from the status endpoint.
+        "gated_workflow": effective_workflow,
     }
 
 
