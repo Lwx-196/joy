@@ -198,3 +198,46 @@ class TestFocalEnhanceIntegratesResizeAndTimeout:
         # No upscale-back needed → output at native res
         with Image.open(result) as out:
             assert out.size == (640, 480)
+
+    def test_caller_output_dir_still_upscales_back(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ):
+        """W11.4: a caller-supplied output_dir must NOT skip upscale-back.
+
+        The real production caller (render_queue.py) omits output_dir, but the
+        smoke harness and the C1 pytest smoke pass one. Upscale-back is
+        decoupled from path-promotion, so an oversized input is restored to
+        original resolution even when stable_path == generated_path (in place).
+        """
+        src = tmp_path / "input_big.jpg"
+        Image.new("RGB", (1920, 1280), color=(180, 130, 100)).save(src, "JPEG")
+        caller_dir = tmp_path / "caller_output"
+        caller_dir.mkdir()
+
+        captured: dict = {}
+
+        def fake_workflow(input_path, *, output_dir, workflow_name,
+                          workflow_parameters, focus_mask_path,
+                          positive_prompt, negative_prompt,
+                          timeout_seconds, **kwargs):
+            with Image.open(input_path) as im:
+                captured["w"], captured["h"] = im.size
+            # Synthesise the artifact at the RESIZED resolution, inside the
+            # caller-provided output_dir (so generated_path lives there).
+            generated = output_dir / "comfyui-generated.png"
+            Image.new("RGB", (captured["w"], captured["h"]), color=(0, 255, 0)).save(generated, "PNG")
+            return {"generated_path": str(generated)}
+
+        monkeypatch.setattr(ai, "_run_comfyui_workflow", fake_workflow)
+
+        result = ai.run_comfyui_focal_enhance(
+            src, focus_targets=["唇"], brand="md_ai", case_id=79,
+            output_dir=caller_dir,
+        )
+        assert Path(result).is_file()
+        # Workflow saw the resized 1280-edge input
+        assert max(captured["w"], captured["h"]) == ai._FOCAL_MAX_LONG_EDGE
+        # Despite the caller output_dir (in-place promotion), the returned PNG
+        # must be upscaled back to the ORIGINAL resolution.
+        with Image.open(result) as out:
+            assert out.size == (1920, 1280)

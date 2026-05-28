@@ -3221,27 +3221,38 @@ def run_comfyui_focal_enhance(
             )
             return image_path
 
-        # 6. Promote to stable path (K-1 contract). Upscale back to original
-        #    resolution if we resized the input.
+        # 6. Promote to stable path (K-1 contract). Upscale back to the
+        #    original resolution whenever the input was resized.
+        #    W11.4: the upscale-back must NOT be gated by the output-destination
+        #    check. When the caller supplies output_dir, stable_path ==
+        #    generated_path, so the old ``and stable_path != generated_path``
+        #    guard made BOTH branches dead and silently returned a
+        #    working-resolution image — violating the step-6 docstring contract
+        #    and producing eval artifacts that diverge from the production path
+        #    (render_queue.py passes no output_dir and DID upscale back).
         if not caller_provided_output_dir:
             stable_path = image_path.parent / f".comfyui-focal-out-{int(time.time())}-{os.getpid()}-{image_path.name}.png"
         else:
             stable_path = generated_path
 
-        if needs_upscale and stable_path != generated_path:
+        if needs_upscale:
             try:
                 from PIL import Image
-                with Image.open(generated_path) as out:
-                    if out.mode != "RGB":
-                        out = out.convert("RGB")
-                    out = out.resize((orig_w, orig_h), Image.LANCZOS)
-                    out.save(stable_path, format="PNG")
+                with Image.open(generated_path) as src_im:
+                    upscaled = src_im.convert("RGB").resize((orig_w, orig_h), Image.LANCZOS)
+                # Write via a sibling temp + atomic replace so the in-place case
+                # (stable_path == generated_path, i.e. caller-supplied output_dir)
+                # never leaves a half-written file.
+                tmp_out = stable_path.with_name(f".upscale-{os.getpid()}-{stable_path.name}")
+                upscaled.save(tmp_out, format="PNG")
+                os.replace(tmp_out, stable_path)
             except Exception as exc:  # noqa: BLE001
                 LOGGER.warning(
                     "ComfyUI focal enhance: upscale-back failed for %s (%s); using non-upscaled output",
                     image_path.name, exc,
                 )
-                shutil.copyfile(generated_path, stable_path)
+                if stable_path != generated_path:
+                    shutil.copyfile(generated_path, stable_path)
         elif stable_path != generated_path:
             shutil.copyfile(generated_path, stable_path)
         return stable_path
