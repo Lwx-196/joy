@@ -1,26 +1,26 @@
 {
   "schema_version": 1,
   "thresholds": {
-    "comfyui_failure_rate_max": 0.05,
-    "vlm_disagreement_rate_max": 0.10,
-    "vlm_judge_missing_rate_max": 0.10,
+    "comfyui_failure_rate_max": 0.145791,
+    "vlm_disagreement_rate_max": 0.1,
+    "vlm_judge_missing_rate_max": 0.1,
     "delivery_gate_rejection_rate_multiplier_max": 1.05,
-    "pre_render_gate_blocker_multiplier_max": 1.10
+    "pre_render_gate_blocker_multiplier_max": 1.1
   },
   "baseline": {
-    "delivery_gate_rejection_rate": 0.10,
-    "pre_render_gate_blocker_count": 5
+    "delivery_gate_rejection_rate": 0.0,
+    "pre_render_gate_blocker_count": 0.0
   },
   "baseline_provenance": {
-    "measured_at": "2026-05-28T00:00:00+00:00",
-    "window_hours": 24,
-    "sample_size": 0,
-    "computed_by": "manual_seed",
-    "computed_at_main_sha": "d6dc5b1"
+    "measured_at": "2026-05-28T06:54:38.547857+00:00",
+    "window_hours": 720,
+    "sample_size": 974,
+    "computed_by": "calibrate_cli",
+    "computed_at_main_sha": "f5c8928"
   },
   "minimum_sample_size": 30,
   "default_window_hours": 48,
   "paused_stale_days": 7,
   "baseline_stale_days": 60,
-  "notes": "Edit thresholds + baseline to tune SLO. Baseline should be measured during shadow period and refreshed via backend.scripts.calibrate_slo_baseline. baseline_provenance is REQUIRED for load_default_thresholds (fail-closed in prod, warning in SLO_TEST_MODE). paused_stale_days controls Wave 4 W4-2 stop-loss window in days (default 7); baseline_stale_days controls how many days a calibration may stand before the baseline_stale SLO violation fires (default 60). Both tunables may be edited without redeploy. Per plan §P2.4 + Wave 3 Agent C eval-auditor C-2 + Wave 5 followup #1+#2 eval-M1."
+  "notes": "Calibrated by backend.scripts.calibrate_slo_baseline --window 720 --apply against simulation_jobs (975 rows over 2026-05-02~05-23 span). Wave 1 tables (candidate_lineage / ops_audit_log) created empty by init_schema during calibration — vlm/delivery/pre_render baselines fall back to floors until those pipelines backfill. baseline_provenance is REQUIRED for load_default_thresholds (fail-closed in prod, warning in SLO_TEST_MODE). paused_stale_days controls Wave 4 W4-2 stop-loss window in days (default 7); baseline_stale_days controls how many days a calibration may stand before baseline_stale SLO violation fires (default 60). Both tunables may be edited without redeploy. Per plan §P2.4 + Wave 3 Agent C eval-auditor C-2 + Wave 4 W4-1 + Wave 5/6/7 followup."
 }
