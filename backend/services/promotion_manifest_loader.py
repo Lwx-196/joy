@@ -51,6 +51,22 @@ VALID_STATES: frozenset[str] = frozenset(
 # Fail-closed default state.
 FAIL_CLOSED_STATE = "shadow"
 
+# Wave 13 H-4 — schema_version drift detection. The manifest carries an
+# explicit ``schema_version`` (currently 1, see ``case-workbench-ai/promotion/
+# manifest.json``). A future bump (e.g. v2 renaming ``promotion_state`` or
+# repurposing ``bindings``) MUST not be silently consumed by an older loader
+# because the decision matrix (shadow/p10/.../rolled_back) might mean
+# something different. Add explicit forward-compat fail-closed: any
+# ``schema_version`` outside this allowlist causes ``load_manifest`` to
+# return None (same fail-closed behavior as a missing / malformed file), and
+# downstream ``should_promote`` resolves to False. When we *do* publish a
+# new schema, bump this set in lockstep with the code that understands the
+# new layout.
+#
+# Missing ``schema_version`` is tolerated and treated as v1 to preserve
+# backward compatibility for hand-rolled manifests that predate the field.
+SUPPORTED_SCHEMA_VERSIONS: frozenset[int] = frozenset({1})
+
 
 def load_manifest(path: Path | None = None) -> dict[str, Any] | None:
     """Read the promotion manifest from disk.
@@ -59,6 +75,10 @@ def load_manifest(path: Path | None = None) -> dict[str, Any] | None:
     or cannot be parsed as JSON.  We never raise — callers downstream
     (`get_promotion_state`, `should_promote`) treat `None` as fail-closed
     shadow, which is the same as legacy hardcoded behavior.
+
+    Wave 13 H-4: if the manifest carries an unsupported ``schema_version``
+    we reject the load (returns None) rather than silently consume a
+    future schema with potentially incompatible semantics.
     """
     target = path if path is not None else DEFAULT_MANIFEST_PATH
     try:
@@ -72,6 +92,15 @@ def load_manifest(path: Path | None = None) -> dict[str, Any] | None:
     except json.JSONDecodeError:
         return None
     if not isinstance(parsed, dict):
+        return None
+    # H-4: schema_version drift gate. Missing field is tolerated (BC); any
+    # explicit value must be an int (not bool) AND in the supported set.
+    schema_version = parsed.get("schema_version")
+    if schema_version is not None and (
+        not isinstance(schema_version, int)
+        or isinstance(schema_version, bool)
+        or schema_version not in SUPPORTED_SCHEMA_VERSIONS
+    ):
         return None
     return parsed
 
@@ -133,6 +162,7 @@ __all__ = [
     "DEFAULT_MANIFEST_PATH",
     "VALID_STATES",
     "FAIL_CLOSED_STATE",
+    "SUPPORTED_SCHEMA_VERSIONS",
     "load_manifest",
     "get_promotion_state",
     "should_promote",
