@@ -199,17 +199,34 @@ def _inject_structured_field(
     (or any other JSON tunable that surfaces at the structured-branch top
     level) would call this helper rather than re-implementing the pattern.
 
-    Returns the (possibly newly-created) override dict so callers can chain.
+    Wave 9 (resolves W7 reviewer Info #1): the helper now does shallow
+    copy-on-write on the input dict before any mutation. Pre-W9 the helper
+    mutated the caller-supplied dict in place — today's two CLI callers
+    (\\``--baseline-stale-days`` / ``--paused-stale-days``) chain the return
+    value and never reuse the input, so behavior was correct. But a future
+    third caller passing a *shared* dict (e.g. cached/reused config) would
+    see surprise mutation. The defensive copy closes that risk at near-zero
+    cost (one-level shallow dict copy). Nested values like ``thresholds``
+    sub-dict remain shared — those are read-only in this helper, and the
+    full structured override never has the helper write into them.
+
+    Returns a fresh (possibly newly-created) override dict so callers can
+    chain safely.
     """
+    # Copy-on-write at the top level. ``threshold_override is None`` skips
+    # the copy and creates a fresh dict directly; otherwise we make a shallow
+    # copy so the caller's reference is never mutated.
     if threshold_override is None:
         threshold_override = {"thresholds": {}}
-    elif (
-        "thresholds" not in threshold_override
-        and "baseline" not in threshold_override
-    ):
-        # Either marker would suffice; we pick "thresholds" by convention.
-        # See W6 reviewer Info #1 (Wave 6 followup) for the OR-vs-AND audit.
-        threshold_override["thresholds"] = {}
+    else:
+        threshold_override = dict(threshold_override)
+        if (
+            "thresholds" not in threshold_override
+            and "baseline" not in threshold_override
+        ):
+            # Either marker would suffice; we pick "thresholds" by convention.
+            # See W6 reviewer Info #1 (Wave 6 followup) for the OR-vs-AND audit.
+            threshold_override["thresholds"] = {}
     threshold_override[field] = value
     return threshold_override
 

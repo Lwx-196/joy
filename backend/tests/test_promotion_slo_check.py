@@ -549,3 +549,95 @@ def test_w7_inject_structured_field_helper_flat_dict_adds_marker() -> None:
     assert out["comfyui_failure_rate_max"] == 0.05
     # Empty marker injected.
     assert out["thresholds"] == {}
+
+
+# Wave 9 (resolves W7 reviewer Info #1) — defensive copy-on-write -----------
+#
+# Pre-W9 `_inject_structured_field` mutated the caller-supplied dict in place.
+# Today's two CLI callers chain the return value and never reuse the input,
+# so behavior was correct. But a future third caller passing a *shared* dict
+# (e.g. a cached config object reused across calls) would see surprise
+# mutation. W9 adds a shallow top-level copy so input dicts are never
+# mutated. Tests below pin the contract.
+
+
+def test_w9_helper_does_not_mutate_caller_dict_with_structured_marker() -> None:
+    """W9: caller-supplied structured override (carrying real `thresholds`
+    and `baseline` sub-dicts) must come back UNCHANGED after the helper
+    runs — only the returned dict carries the injected field."""
+    from backend.scripts.promotion_slo_check import _inject_structured_field
+
+    caller_dict = {
+        "thresholds": {"comfyui_failure_rate_max": 0.05},
+        "baseline": {"delivery_gate_rejection_rate": 0.10},
+    }
+    # Snapshot a stable serialization for byte-identical comparison.
+    import json
+    pre_snapshot = json.dumps(caller_dict, sort_keys=True)
+
+    out = _inject_structured_field(caller_dict, "paused_stale_days", 14)
+
+    post_snapshot = json.dumps(caller_dict, sort_keys=True)
+    assert pre_snapshot == post_snapshot, (
+        "caller's dict must NOT be mutated by helper (W9 copy-on-write); "
+        f"pre={pre_snapshot!r} post={post_snapshot!r}"
+    )
+    assert "paused_stale_days" not in caller_dict, (
+        "caller_dict still carries injected field — copy-on-write broken"
+    )
+    # Returned dict has the injection.
+    assert out["paused_stale_days"] == 14
+    # Returned dict is a DIFFERENT object than the input.
+    assert out is not caller_dict, (
+        "helper must return a fresh dict, not the input reference"
+    )
+
+
+def test_w9_helper_does_not_mutate_caller_flat_dict() -> None:
+    """W9: caller-supplied flat dict (rare hand-built test fixture) — same
+    contract. Input untouched; marker + field appear only on the return."""
+    from backend.scripts.promotion_slo_check import _inject_structured_field
+
+    flat = {"comfyui_failure_rate_max": 0.05}
+    import json
+    pre_snapshot = json.dumps(flat, sort_keys=True)
+
+    out = _inject_structured_field(flat, "baseline_stale_days", 90)
+
+    assert json.dumps(flat, sort_keys=True) == pre_snapshot
+    assert "baseline_stale_days" not in flat
+    assert "thresholds" not in flat, (
+        "caller's flat dict must NOT have marker injected (W9 copy-on-write)"
+    )
+    assert out["baseline_stale_days"] == 90
+    assert out["thresholds"] == {}
+    assert out is not flat
+
+
+def test_w9_helper_shared_input_reuse_does_not_cross_contaminate() -> None:
+    """W9 most realistic regression test: a hypothetical future caller that
+    passes the same `base_config` to multiple helper calls (e.g. to build
+    two distinct overrides for parallel evaluation) must NOT see one call's
+    injection leak into the second.
+
+    Pre-W9 this would fail because the first call mutates `base_config` in
+    place, so the second call sees `paused_stale_days=14` from the first.
+    """
+    from backend.scripts.promotion_slo_check import _inject_structured_field
+
+    base_config = {"thresholds": {}}
+
+    # Caller scenario: two parallel evaluators want different paused windows
+    # for an A/B test, both starting from the same cached `base_config`.
+    override_a = _inject_structured_field(base_config, "paused_stale_days", 7)
+    override_b = _inject_structured_field(base_config, "paused_stale_days", 14)
+
+    assert override_a["paused_stale_days"] == 7
+    assert override_b["paused_stale_days"] == 14, (
+        "second call inherited mutation from first — copy-on-write broken; "
+        f"override_b={override_b!r}"
+    )
+    # base_config still pristine.
+    assert "paused_stale_days" not in base_config, (
+        "base_config mutated by helper calls — W9 copy-on-write broken"
+    )
