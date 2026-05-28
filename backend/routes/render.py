@@ -28,7 +28,7 @@ from pydantic import BaseModel, Field
 
 from .. import audit, db, render_executor, render_quality, source_images, stress
 from ..render_queue import RENDER_QUEUE
-from ..services import pre_render_gate
+from ..services import ops_readiness, pre_render_gate
 
 router = APIRouter(tags=["render"])
 
@@ -1835,18 +1835,44 @@ def _ops_gate_section(conn) -> dict[str, Any]:
 
 
 @router.get("/api/render/ops/vlm-comfyui/status")
-def ops_vlm_comfyui_status(days: int = Query(default=7, ge=1, le=90)) -> dict[str, Any]:
-    """P0.4 oncall 聚合面板 — VLM 校准+调用量 / ComfyUI 任务分布 / Gate 阻断 top10。"""
+def ops_vlm_comfyui_status(
+    days: int = Query(default=7, ge=1, le=90),
+    slo_window_hours: int = Query(default=24, ge=1, le=24 * 14),
+    probe_comfyui: bool = Query(default=True),
+) -> dict[str, Any]:
+    """P0.4 oncall 聚合面板 — VLM 校准+调用量 / ComfyUI 任务分布 / Gate 阻断 top10。
+
+    C3.0.1 (Ops Readiness Gate): adds ``promotion`` block carrying the 11
+    new fields defined by plan §C3.0.1 — manifest state / bucket exposure /
+    SLO recommendation+sample / violations / baseline freshness / ComfyUI
+    live probe / render latency p50/p95 / silent_fail count / applier last
+    outcome. Pre-existing top-level keys (``days`` / ``vlm`` / ``comfyui`` /
+    ``gate``) are unchanged — additive-only contract.
+
+    Query params:
+      - ``slo_window_hours`` (default 24h): width of the SLO eval window
+        passed to ``promotion_slo_monitor.evaluate_window``.
+      - ``probe_comfyui`` (default True): when False, skip the live HTTP
+        probe against ComfyUI ``/queue`` — useful for offline / CI runs.
+    """
     cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
     with db.connect() as conn:
         vlm = _ops_vlm_section(conn, cutoff)
         comfyui = _ops_comfyui_section(conn, cutoff)
         gate = _ops_gate_section(conn)
+        promotion = ops_readiness.compute_promotion_status(
+            conn,
+            slo_window_hours=slo_window_hours,
+            latency_window_hours=24,
+            silent_fail_window_hours=24,
+            probe_comfyui=probe_comfyui,
+        )
     return {
         "days": days,
         "vlm": vlm,
         "comfyui": comfyui,
         "gate": gate,
+        "promotion": promotion,
     }
 
 
