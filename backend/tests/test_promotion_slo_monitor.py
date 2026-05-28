@@ -36,6 +36,7 @@ from backend.services.promotion_slo_monitor import (
 # signal. This helper is the canonical fresh-provenance overlay.
 def _measured_thresholds_override(
     overlay_thresholds: dict | None = None,
+    overlay_baseline: dict | None = None,
 ) -> dict:
     base: dict = {
         # Structured-override branch is triggered by presence of `thresholds`
@@ -50,7 +51,35 @@ def _measured_thresholds_override(
             "computed_at_main_sha": "wave4-test",
         },
     }
+    if overlay_baseline is not None:
+        base["baseline"] = dict(overlay_baseline)
     return base
+
+
+def _placeholder_thresholds_override() -> dict:
+    """W4-1: mimic the legacy hand-seeded thresholds shape (manual_seed +
+    sample_size=0) so tests that explicitly verify the W4-1 placeholder gate
+    keep working after the live `slo_thresholds.json` was calibrated."""
+    return {
+        "thresholds": {
+            "comfyui_failure_rate_max": 0.05,
+            "vlm_disagreement_rate_max": 0.10,
+            "vlm_judge_missing_rate_max": 0.10,
+            "delivery_gate_rejection_rate_multiplier_max": 1.05,
+            "pre_render_gate_blocker_multiplier_max": 1.10,
+        },
+        "baseline": {
+            "delivery_gate_rejection_rate": 0.10,
+            "pre_render_gate_blocker_count": 5,
+        },
+        "baseline_provenance": {
+            "measured_at": "2026-05-28T00:00:00+00:00",
+            "window_hours": 24,
+            "sample_size": 0,
+            "computed_by": "manual_seed",
+            "computed_at_main_sha": "wave4-test",
+        },
+    }
 
 # ---------------------------------------------------------------------------
 # Insert helpers
@@ -190,7 +219,15 @@ def test_high_failure_rate_triggers_rollback(temp_db: Path) -> None:
             _insert_simulation_job(conn, status="done")
         conn.commit()
 
-        report = evaluate_window(window_hours=48, conn=conn)
+        # Inject 5% threshold via override so test asserts code behavior
+        # independent of whatever the live slo_thresholds.json calibrated to.
+        report = evaluate_window(
+            window_hours=48,
+            conn=conn,
+            thresholds=_measured_thresholds_override(
+                overlay_thresholds={"comfyui_failure_rate_max": 0.05}
+            ),
+        )
 
     assert report.within_slo is False
     assert report.recommendation == "rollback"
@@ -269,16 +306,20 @@ def test_multiple_dimensions_violated_lists_all(temp_db: Path) -> None:
 def test_thresholds_override_via_kwarg(temp_db: Path) -> None:
     """User-supplied thresholds overlay → looser threshold turns violation into pass."""
     with db.connect() as conn:
-        # 10% failure rate — violates default 5%
+        # 10% failure rate — violates 5% baseline threshold
         for _ in range(10):
             _insert_simulation_job(conn, status="failed", failure_stage="provider_call")
         for _ in range(90):
             _insert_simulation_job(conn, status="done")
         conn.commit()
 
-        # Default thresholds → rollback (covers both comfyui_failure_rate and
-        # baseline_unmeasured; we only assert the high-level recommendation).
-        default_report = evaluate_window(window_hours=48, conn=conn)
+        # Strict thresholds (5% + placeholder provenance) → rollback (covers
+        # both comfyui_failure_rate and baseline_unmeasured; we only assert
+        # the high-level recommendation). Inject placeholder explicitly so
+        # the test is independent of the live calibrated thresholds file.
+        default_report = evaluate_window(
+            window_hours=48, conn=conn, thresholds=_placeholder_thresholds_override()
+        )
         assert default_report.recommendation == "rollback"
 
         # Override to 20% threshold AND measured provenance → continue
@@ -316,7 +357,19 @@ def test_delivery_gate_rejection_baseline_multiplier(temp_db: Path) -> None:
             _insert_simulation_job(conn, status="done")
         conn.commit()
 
-        report = evaluate_window(window_hours=48, conn=conn)
+        # Inject explicit baseline (0.10) + multiplier (1.05) so the threshold
+        # arithmetic is independent of the live calibrated baselines file.
+        report = evaluate_window(
+            window_hours=48,
+            conn=conn,
+            thresholds=_measured_thresholds_override(
+                overlay_thresholds={"delivery_gate_rejection_rate_multiplier_max": 1.05},
+                overlay_baseline={
+                    "delivery_gate_rejection_rate": 0.10,
+                    "pre_render_gate_blocker_count": 5,
+                },
+            ),
+        )
 
     dims = {v["dimension"] for v in report.violations}
     assert "delivery_gate_rejection_rate" in dims, (
@@ -344,7 +397,22 @@ def test_pre_render_gate_blocker_count_vs_baseline(temp_db: Path) -> None:
             _insert_simulation_job(conn, status="done")
         conn.commit()
 
-        report = evaluate_window(window_hours=48, conn=conn)
+        # Inject explicit baseline (5) + multiplier (1.10) + comfyui threshold
+        # 0.05 (so 4.67% fails not, 7 blockers does) — independent of live file.
+        report = evaluate_window(
+            window_hours=48,
+            conn=conn,
+            thresholds=_measured_thresholds_override(
+                overlay_thresholds={
+                    "comfyui_failure_rate_max": 0.05,
+                    "pre_render_gate_blocker_multiplier_max": 1.10,
+                },
+                overlay_baseline={
+                    "delivery_gate_rejection_rate": 0.10,
+                    "pre_render_gate_blocker_count": 5,
+                },
+            ),
+        )
 
     dims = {v["dimension"] for v in report.violations}
     assert "pre_render_gate_blocker_count" in dims
@@ -889,9 +957,15 @@ def test_w41_evaluate_window_emits_baseline_unmeasured_violation_for_placeholder
         for _ in range(40):
             _insert_simulation_job(conn, status="done")
         conn.commit()
-        # Default thresholds file has placeholder provenance (manual_seed).
-        # No `thresholds` override → real file load path.
-        report = evaluate_window(window_hours=48, conn=conn)
+        # Inject placeholder (manual_seed + sample_size=0) provenance explicitly
+        # — independent of whatever the live slo_thresholds.json has been
+        # calibrated to. The test asserts the W4-1 (b) violation-emit path,
+        # not the live file content.
+        report = evaluate_window(
+            window_hours=48,
+            conn=conn,
+            thresholds=_placeholder_thresholds_override(),
+        )
 
     dims = {v["dimension"] for v in report.violations}
     assert "baseline_unmeasured" in dims, (
