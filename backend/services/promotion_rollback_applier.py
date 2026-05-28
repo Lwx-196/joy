@@ -120,6 +120,12 @@ REASON_BASELINE_UNMEASURED_ONLY = "baseline_unmeasured_only_no_real_breach"
 # K-5: stop-loss alert — audit row written, manifest untouched, operator
 # review required.
 REASON_STOP_LOSS_HALT_ALERT = "stop_loss_halt_alert"
+# Wave 13 H-6: manifest loaded but ``promotion_state`` is missing or has a
+# value not in ``promotion_manifest_loader.VALID_STATES``. We refuse to
+# transition from an unknown state to ``rolled_back`` because the audit
+# trail would record ``from_state=None`` (or ``from_state='wibble'``) —
+# operator must repair the manifest manually before the applier can run.
+REASON_INVALID_MANIFEST_STATE = "invalid_manifest_state"
 
 
 # ---------------------------------------------------------------------------
@@ -410,6 +416,27 @@ def apply_rollback_decision(
             reason=REASON_ALREADY_ROLLED_BACK,
             recommendation=rec,
             dry_run=dry_run,
+            manifest_path=target_path,
+        )
+
+    # Wave 13 H-6 — refuse to transition out of an unknown / invalid state.
+    # Without this guard a missing ``promotion_state`` field (None) or a
+    # typo'd value (e.g. ``"wibble"``) would fall through to the rollback
+    # path and write ``from_state=None`` into the audit record. Better to
+    # surface the manifest corruption to the operator and leave the file
+    # untouched. We check against the loader's authoritative state set so
+    # this stays in lockstep with ``should_promote`` and friends.
+    if current_state not in _manifest.VALID_STATES:
+        return _result(
+            applied=False,
+            reason=REASON_INVALID_MANIFEST_STATE,
+            recommendation=rec,
+            dry_run=dry_run,
+            error=(
+                f"manifest.promotion_state={current_state!r} is not one of "
+                f"{sorted(_manifest.VALID_STATES)}; refusing to roll back from "
+                "an unknown state (operator must repair the manifest first)"
+            ),
             manifest_path=target_path,
         )
 
@@ -923,4 +950,6 @@ __all__ = [
     "REASON_DRY_RUN",
     "REASON_CONCURRENT_APPLY",
     "REASON_STOP_LOSS_HALT_ALERT",
+    "REASON_BASELINE_UNMEASURED_ONLY",
+    "REASON_INVALID_MANIFEST_STATE",
 ]

@@ -1325,13 +1325,43 @@ def evaluate_window(
         if resolved_state in _PROMOTED_STATES:
             # Wave 4 W4-2 — apply paused-state stop-loss before returning.
             # Wave 5 followup #1 — stale_days is now configurable per JSON.
-            stop_loss_violation, paused_notes = _evaluate_paused_state(
-                promotion_state=resolved_state,
-                sample_size=sample_size,
-                min_sample=min_sample,
-                paused_state_path=paused_state_path,
-                stale_days=paused_stale_days,
-            )
+            # Wave 13 H-5 — contain sidecar write OSError so a disk-full /
+            # permission-denied event cannot crash the entire SLO eval. We
+            # emit a synthetic ``paused_state_write_failed`` violation +
+            # escalate to ``stop_loss_halt`` so the operator sees the issue
+            # without the cron going dark.
+            try:
+                stop_loss_violation, paused_notes = _evaluate_paused_state(
+                    promotion_state=resolved_state,
+                    sample_size=sample_size,
+                    min_sample=min_sample,
+                    paused_state_path=paused_state_path,
+                    stale_days=paused_stale_days,
+                )
+            except OSError as exc:
+                _logger.exception(
+                    "paused_state sidecar write failed during evaluate_window: %s",
+                    exc,
+                )
+                stop_loss_violation = {
+                    "dimension": "paused_state_write_failed",
+                    "actual": type(exc).__name__,
+                    "threshold": "writable_sidecar",
+                    "comparator": "==",
+                    "context": {
+                        "paused_state_path": str(
+                            paused_state_path or _DEFAULT_PAUSED_STATE_FILE
+                        ),
+                        "error": str(exc)[:512],
+                        "hint": (
+                            "OSError while writing/replacing the paused-state "
+                            "sidecar; check disk space + write permissions on "
+                            "promotion/ — eval continues but stop-loss clock "
+                            "cannot advance until this is resolved"
+                        ),
+                    },
+                }
+                paused_notes = f"paused_state_write_failed: {type(exc).__name__}"
             notes_parts = ["small_sample_in_promoted_state"]
             if paused_notes:
                 notes_parts.append(paused_notes)
