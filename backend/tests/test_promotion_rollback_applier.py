@@ -903,3 +903,183 @@ def test_k5_stop_loss_halt_dry_run_writes_no_audit_row(
     with db.connect() as conn:
         post_count = conn.execute("SELECT COUNT(*) AS n FROM ops_audit_log").fetchone()["n"]
     assert post_count == pre_count, "dry_run must NOT write an audit row"
+
+
+# ---------------------------------------------------------------------------
+# Wave 6 followup B-1: effective_*_stale_days flat fields on audit payload
+# ---------------------------------------------------------------------------
+#
+# The two stale-window tunables (paused_stale_days + baseline_stale_days)
+# already round-trip through the SLOReport's evidence dict (Wave 5 #1/#2).
+# B-1 lifts them up to flat ``effective_*`` keys on the audit_payload itself
+# so forensic SQL doesn't have to ``json_extract`` through
+# ``$.evidence_excerpt.<field>``. They also survive the
+# ``_evidence_excerpt`` whitelist (so both surface depths agree).
+
+
+def _decision_with_stale_evidence(
+    *,
+    recommendation: str,
+    baseline_stale_days: int | None = 60,
+    paused_stale_days: int | None = 7,
+    violations: list[dict[str, Any]] | None = None,
+    sample_size: int = 100,
+) -> dict[str, Any]:
+    """W6-B helper: emulate the evidence echo path of evaluate_window so we
+    can drive the applier with realistic decision dicts without spinning
+    up a full SLO computation."""
+    evidence: dict[str, Any] = {
+        "comfyui_failure": {"rate": 0.20, "terminal_total": 80},
+        "minimum_sample_size": 30,
+        "cutoff_iso": "2026-05-28T00:00:00+00:00",
+    }
+    if baseline_stale_days is not None:
+        evidence["baseline_stale_days"] = baseline_stale_days
+    if paused_stale_days is not None:
+        evidence["paused_stale_days"] = paused_stale_days
+    return _make_decision(
+        recommendation=recommendation,
+        violations=violations or _rollback_violation(),
+        sample_size=sample_size,
+        evidence=evidence,
+    )
+
+
+def test_w6_rollback_audit_payload_carries_effective_stale_days_flat(
+    temp_db: Path, tmp_path: Path
+) -> None:
+    """W6-B: a successful rollback's audit payload must carry
+    ``effective_baseline_stale_days`` + ``effective_paused_stale_days`` as
+    top-level (flat) keys read directly off the SLO evidence dict. This is
+    what forensic SQL queries hit first; nested ``evidence_excerpt`` is the
+    backup surface."""
+    manifest_path = tmp_path / "manifest.json"
+    _write_manifest(manifest_path, _make_manifest(promotion_state="p100"))
+
+    with db.connect() as conn:
+        result = apply_rollback_decision(
+            _decision_with_stale_evidence(
+                recommendation=REC_ROLLBACK,
+                baseline_stale_days=90,
+                paused_stale_days=14,
+            ),
+            dry_run=False,
+            manifest_path=manifest_path,
+            conn=conn,
+            request_id="w6-flat-001",
+        )
+    assert result["applied"] is True
+
+    with db.connect() as conn:
+        row = conn.execute(
+            "SELECT payload_json FROM ops_audit_log WHERE id = ?",
+            (result["audit_log_id"],),
+        ).fetchone()
+
+    payload = json.loads(row["payload_json"])
+    # Flat surface (W6-B primary).
+    assert payload.get("effective_baseline_stale_days") == 90, (
+        f"audit payload must carry flat effective_baseline_stale_days=90; "
+        f"got {payload.get('effective_baseline_stale_days')!r} "
+        f"(payload keys: {sorted(payload.keys())})"
+    )
+    assert payload.get("effective_paused_stale_days") == 14, (
+        f"audit payload must carry flat effective_paused_stale_days=14; "
+        f"got {payload.get('effective_paused_stale_days')!r}"
+    )
+    # Nested excerpt also carries the values (defense-in-depth surface).
+    excerpt = payload.get("evidence_excerpt") or {}
+    assert excerpt.get("baseline_stale_days") == 90
+    assert excerpt.get("paused_stale_days") == 14
+
+
+def test_w6_stop_loss_halt_audit_payload_carries_effective_stale_days_flat(
+    temp_db: Path, tmp_path: Path
+) -> None:
+    """W6-B: stop-loss-halt path's audit payload must surface
+    ``effective_*_stale_days`` flat — arguably MORE important than the
+    rollback path because the very signal being recorded ("paused window
+    exceeded paused_stale_days") references the threshold that triggered it.
+    Without the flat field, after-action review needs to dig through the
+    nested evidence excerpt to know what window the operator had configured.
+    """
+    manifest_path = tmp_path / "manifest.json"
+    _write_manifest(manifest_path, _make_manifest(promotion_state="p10"))
+    pre_bytes = manifest_path.read_bytes()
+
+    decision = _decision_with_stale_evidence(
+        recommendation=REC_STOP_LOSS_HALT,
+        baseline_stale_days=60,
+        paused_stale_days=7,
+        sample_size=3,
+        violations=[
+            {
+                "dimension": "monitoring_paused_stale",
+                "actual_days": 8.5,
+                "threshold_days": 7,
+                "comparator": "<=",
+            }
+        ],
+    )
+
+    with db.connect() as conn:
+        result = apply_rollback_decision(
+            decision,
+            dry_run=False,
+            manifest_path=manifest_path,
+            conn=conn,
+            request_id="w6-stop-loss-flat-001",
+        )
+
+    # Manifest UNCHANGED — stop-loss-halt is audit-only.
+    assert manifest_path.read_bytes() == pre_bytes
+    assert result["applied"] is False
+    assert result["reason"] == REASON_STOP_LOSS_HALT_ALERT
+    assert result["audit_log_id"] is not None
+
+    with db.connect() as conn:
+        row = conn.execute(
+            "SELECT payload_json FROM ops_audit_log WHERE id = ?",
+            (result["audit_log_id"],),
+        ).fetchone()
+    payload = json.loads(row["payload_json"])
+    assert payload.get("effective_baseline_stale_days") == 60
+    assert payload.get("effective_paused_stale_days") == 7
+
+
+def test_w6_audit_payload_omits_flat_fields_when_evidence_lacks_them(
+    temp_db: Path, tmp_path: Path
+) -> None:
+    """W6-B BC: pre-W5 callers may pass decisions whose evidence dict has
+    no stale-days fields (older serialized SLOReport, hand-built test
+    fixtures). The flat-field helper must silently omit the keys rather
+    than emit ``effective_*=None`` placeholders that would confuse
+    forensic queries grouping by stale window."""
+    manifest_path = tmp_path / "manifest.json"
+    _write_manifest(manifest_path, _make_manifest(promotion_state="p100"))
+
+    with db.connect() as conn:
+        result = apply_rollback_decision(
+            _decision_with_stale_evidence(
+                recommendation=REC_ROLLBACK,
+                baseline_stale_days=None,
+                paused_stale_days=None,
+            ),
+            dry_run=False,
+            manifest_path=manifest_path,
+            conn=conn,
+            request_id="w6-bc-omit-001",
+        )
+    assert result["applied"] is True
+
+    with db.connect() as conn:
+        row = conn.execute(
+            "SELECT payload_json FROM ops_audit_log WHERE id = ?",
+            (result["audit_log_id"],),
+        ).fetchone()
+    payload = json.loads(row["payload_json"])
+    # Flat fields absent (not None) → forensic queries SELECTing them get NULL.
+    assert "effective_baseline_stale_days" not in payload, (
+        "missing-evidence path must omit the key (not emit None placeholder)"
+    )
+    assert "effective_paused_stale_days" not in payload

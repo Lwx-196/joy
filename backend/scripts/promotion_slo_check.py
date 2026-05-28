@@ -5,6 +5,16 @@ Usage:
     python -m backend.scripts.promotion_slo_check --window 24
     python -m backend.scripts.promotion_slo_check --format markdown
     python -m backend.scripts.promotion_slo_check --thresholds path/to/custom.json
+    python -m backend.scripts.promotion_slo_check --baseline-stale-days 90
+
+``--baseline-stale-days N`` (Wave 6 followup A-1) is a kwarg-semantic mirror
+of the JSON-tunable ``baseline_stale_days`` field added in Wave 5 followup #2.
+Operator priority (see :mod:`backend.services.promotion_slo_monitor` docstring):
+``kwarg > JSON > module constant`` — passing ``--baseline-stale-days 90`` from
+a cron line wins over whatever ``slo_thresholds.json`` says without requiring
+a JSON edit + redeploy. Symmetric ``--paused-stale-days`` is intentionally
+NOT exposed in this followup (single-knob change kept atomic; add in W7 if a
+parallel CLI override is needed).
 
 Exit codes (Wave 3 P0.5 H-5: aligned with the four-token recommendation
 vocabulary that ``promotion_slo_monitor.evaluate_window`` now emits):
@@ -176,16 +186,49 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="path to custom thresholds JSON (overrides slo_thresholds.json)",
     )
+    parser.add_argument(
+        "--baseline-stale-days",
+        dest="baseline_stale_days",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "Wave 6 followup A-1: override baseline_stale_days (default: read "
+            "from slo_thresholds.json or BASELINE_STALE_DAYS=60). Priority "
+            "kwarg > JSON > module constant. Must be positive int."
+        ),
+    )
     args = parser.parse_args(argv)
 
     if args.window <= 0:
         sys.stderr.write("--window must be positive integer\n")
         return EXIT_USAGE_ERROR
+    if args.baseline_stale_days is not None and args.baseline_stale_days <= 0:
+        # W6-A: surface positive-int constraint at the CLI layer so cron
+        # operators see the message immediately rather than having it
+        # tunnel through `_validate_positive_int` → ValueError → generic
+        # "SLO check failed" wrap below.
+        sys.stderr.write("--baseline-stale-days must be positive integer\n")
+        return EXIT_USAGE_ERROR
 
     try:
-        threshold_override = None
+        threshold_override: dict | None = None
         if args.thresholds:
             threshold_override = load_default_thresholds(Path(args.thresholds))
+        if args.baseline_stale_days is not None:
+            # Construct (or augment) a STRUCTURED override so
+            # `_merge_thresholds` routes through the structured branch (which
+            # honors top-level `baseline_stale_days`) instead of the flat
+            # branch (which would misroute it into the `thresholds` sub-dict).
+            # See `_merge_thresholds` docstring for the routing rule.
+            if threshold_override is None:
+                threshold_override = {"thresholds": {}}
+            elif (
+                "thresholds" not in threshold_override
+                and "baseline" not in threshold_override
+            ):
+                threshold_override["thresholds"] = {}
+            threshold_override["baseline_stale_days"] = args.baseline_stale_days
         report = evaluate_window(
             window_hours=args.window,
             thresholds=threshold_override,

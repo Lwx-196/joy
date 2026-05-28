@@ -506,6 +506,8 @@ def _apply_with_lock_and_audit(
         "window_hours": decision.get("window_hours"),
         "from_state": current_state,
         "evidence_excerpt": _evidence_excerpt(decision.get("evidence")),
+        # W6-B: flat ``effective_*_stale_days`` for forensic SQL.
+        **_effective_stale_days(decision.get("evidence")),
     }
     started_response: dict[str, Any] = {
         "phase": AUDIT_OUTCOME_STARTED,
@@ -705,6 +707,12 @@ def _handle_stop_loss_halt(
         "sample_size": decision.get("sample_size"),
         "window_hours": decision.get("window_hours"),
         "evidence_excerpt": _evidence_excerpt(decision.get("evidence")),
+        # W6-B: flat ``effective_*_stale_days`` for forensic SQL. On the
+        # stop-loss-halt path this is doubly important — the very signal
+        # was "paused window exceeded paused_stale_days"; recording the
+        # threshold that triggered it flat in the payload makes after-action
+        # review trivial.
+        **_effective_stale_days(decision.get("evidence")),
         "notes": (
             "灰度流量长时间不足（paused window > 7d），无法判定 SLO；"
             "operator review required — manifest unchanged"
@@ -773,7 +781,15 @@ def _handle_stop_loss_halt(
 def _evidence_excerpt(evidence: Any) -> dict[str, Any]:
     """Trim the SLO evidence dict to a compact subset suitable for audit log
     storage (full evidence can be megabytes of status breakdown). We keep
-    only the per-dimension rate / counts and thresholds."""
+    only the per-dimension rate / counts and thresholds.
+
+    Wave 6 followup B-1: include the effective stale-window tunables
+    (``baseline_stale_days`` + ``paused_stale_days``) so forensic queries can
+    reconstruct exactly which timeout this evaluation used. They're also
+    surfaced as flat ``effective_*`` fields one level up (on the audit_payload
+    itself, see :func:`apply_rollback_decision` and the stop-loss path) so
+    SQL queries don't have to ``json_extract`` through the nested excerpt.
+    """
     if not isinstance(evidence, Mapping):
         return {}
     out: dict[str, Any] = {}
@@ -784,9 +800,34 @@ def _evidence_excerpt(evidence: Any) -> dict[str, Any]:
         "pre_render_gate_blocker",
         "minimum_sample_size",
         "cutoff_iso",
+        # W6-B forensic surface for stale-window tunables.
+        "baseline_stale_days",
+        "paused_stale_days",
     ):
         if k in evidence:
             out[k] = evidence[k]
+    return out
+
+
+def _effective_stale_days(evidence: Any) -> dict[str, Any]:
+    """Wave 6 followup B-1: lift the two stale-window tunables out of the
+    SLO evidence dict and return them as flat ``effective_*`` fields suitable
+    for spread into ``audit_payload``. Returns empty dict when evidence
+    doesn't carry either field (cross-version / older SLOReport callers).
+
+    Flat surfacing matters for forensic SQL: an on-call operator running
+    ``SELECT json_extract(payload, '$.effective_baseline_stale_days') ...``
+    against ``ops_audit_log`` should not have to dig through
+    ``$.evidence_excerpt.baseline_stale_days`` to learn what window was
+    actually applied.
+    """
+    if not isinstance(evidence, Mapping):
+        return {}
+    out: dict[str, Any] = {}
+    if "baseline_stale_days" in evidence:
+        out["effective_baseline_stale_days"] = evidence["baseline_stale_days"]
+    if "paused_stale_days" in evidence:
+        out["effective_paused_stale_days"] = evidence["paused_stale_days"]
     return out
 
 

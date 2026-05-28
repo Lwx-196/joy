@@ -22,6 +22,39 @@
      - disagreement_rate 分母同步改全量行
 5) **阈值可注入**：thresholds 可通过 kwarg 覆盖（测试 / 临时调参 / 多环境），
    未传则读 `case-workbench-ai/promotion/slo_thresholds.json` 默认。
+
+Configuration priority (Wave 6 followup C-1 — operator-facing contract):
+
+    kwarg > JSON > module constant
+
+    For every tunable field — currently :data:`PAUSED_STALE_DAYS`
+    (Wave 5 #1), :data:`BASELINE_STALE_DAYS` (Wave 5 #2), and
+    :data:`DEFAULT_MINIMUM_SAMPLE_SIZE` (Wave 5 #2 BC upgrade) — the resolution
+    order is:
+
+    1. **kwarg / programmatic override** — caller passes a structured dict to
+       :func:`evaluate_window` (``thresholds={"baseline_stale_days": N, ...}``)
+       or to a CLI flag that funnels into the same merge path
+       (``promotion_slo_check.py --baseline-stale-days N``, Wave 6 followup
+       A-1). Wins outright. This is the *intentional* override channel —
+       tests, ad-hoc operator runs, calibration sanity checks.
+    2. **JSON file** — ``case-workbench-ai/promotion/slo_thresholds.json``
+       top-level field. Wins when no kwarg supplied. This is the *normal*
+       production tuning channel — operators edit + commit the JSON, deploy
+       picks it up next cron tick.
+    3. **Module constant** — :data:`PAUSED_STALE_DAYS` / etc., the in-source
+       default. Wins only when both kwarg and JSON are absent (e.g. brand-new
+       deploys where the JSON predates the field, or pure-code unit tests
+       that don't touch the on-disk file).
+
+    All three sites converge through :func:`_validate_positive_int` (Wave 5
+    followup #2) so the same bool / negative / non-int fail-closed semantics
+    apply regardless of which channel supplied the value. The effective
+    resolved values are echoed into :class:`SLOReport`.``evidence`` under
+    the same key names (e.g. ``evidence["baseline_stale_days"]``) and lift
+    into ``ops_audit_log.audit_payload`` as flat ``effective_*`` fields
+    (Wave 6 followup B-1) so forensic queries don't need to dig into nested
+    evidence excerpts.
 """
 
 from __future__ import annotations
