@@ -2978,6 +2978,54 @@ def _build_comfyui_policy(
     }
 
 
+_FOCAL_MAX_LONG_EDGE = 1280
+_FOCAL_TIMEOUT_BASE = 600
+_FOCAL_TIMEOUT_PER_MEGAPIXEL = 800
+_FOCAL_TIMEOUT_CAP = 1800
+_FOCAL_PIXEL_FLOOR = 256_000
+
+
+def _focal_compute_timeout(width: int, height: int) -> int:
+    """Wave 11 W11-2: dynamic timeout from resized image dimensions.
+
+    Base ``_FOCAL_TIMEOUT_BASE`` seconds, plus a linear pixel-area component
+    above ``_FOCAL_PIXEL_FLOOR`` (256K pixels ≈ 512×500). Capped at
+    ``_FOCAL_TIMEOUT_CAP`` so we never wait forever even on a 4K input.
+    """
+    pixels = max(0, int(width) * int(height))
+    extra_pixels = max(0, pixels - _FOCAL_PIXEL_FLOOR)
+    extra_seconds = (extra_pixels * _FOCAL_TIMEOUT_PER_MEGAPIXEL) // 1_000_000
+    return min(_FOCAL_TIMEOUT_CAP, _FOCAL_TIMEOUT_BASE + int(extra_seconds))
+
+
+def _focal_resize_if_needed(
+    image_path: Path,
+    output_dir: Path,
+    max_long_edge: int = _FOCAL_MAX_LONG_EDGE,
+) -> tuple[Path, int, int, int, int]:
+    """Wave 11 W11-3: resize input so long edge ≤ ``max_long_edge``.
+
+    Returns ``(work_path, work_w, work_h, original_w, original_h)``.
+    ``work_path == image_path`` (no I/O) if no resize is needed.
+    """
+    from PIL import Image, ImageOps
+
+    with Image.open(image_path) as im:
+        im = ImageOps.exif_transpose(im)
+        orig_w, orig_h = im.size
+        if max(orig_w, orig_h) <= max_long_edge:
+            return image_path, orig_w, orig_h, orig_w, orig_h
+        scale = max_long_edge / max(orig_w, orig_h)
+        new_w = max(1, int(round(orig_w * scale)))
+        new_h = max(1, int(round(orig_h * scale)))
+        resized = im.resize((new_w, new_h), Image.LANCZOS)
+        if resized.mode != "RGB":
+            resized = resized.convert("RGB")
+        resized_path = output_dir / f"resized_{image_path.stem}.jpg"
+        resized.save(resized_path, format="JPEG", quality=92)
+        return resized_path, new_w, new_h, orig_w, orig_h
+
+
 def run_comfyui_focal_enhance(
     image_path: Path,
     *,
@@ -2988,23 +3036,27 @@ def run_comfyui_focal_enhance(
 ) -> Path:
     """M3 FOCAL — region-aware SDXL inpaint with per-target prompts.
 
-    This is the Step 2 helper for the 4-mode dispatch plan
-    (``~/.claude/plans/md-ai-4-mode-router.md``). Unlike
-    ``run_comfyui_inline_enhance`` which sent an empty focus_mask + the
-    default ``conservative`` strength + hardcoded prompts, this helper:
+    Wave 11 update: the v1 workflow has been simplified to consume the
+    Python-side ellipse focus mask directly (no MediaPipe whole-face SEGS +
+    SAM bbox-expansion chain that was eating the entire face in case 134),
+    and inputs are auto-resized to ≤_FOCAL_MAX_LONG_EDGE long-edge before
+    submission with a pixel-area-derived timeout (W11-1 / W11-2 / W11-3).
 
-      1. Generates a coarse focus mask from ``focus_targets`` via
+    Steps:
+      1. Auto-resize input to ≤_FOCAL_MAX_LONG_EDGE long-edge.
+      2. Generate a coarse focus mask at the resized resolution via
          ``focal_mask_generator.generate_focus_mask``.
-      2. Builds per-target positive + negative prompts via
+      3. Build per-target positive + negative prompts via
          ``focal_prompt_library.build_focal_prompts``.
-      3. Runs the dedicated ``portrait_focal_enhance_v1`` workflow with the
-         new ``focal`` strength (denoise=0.40, 20 steps, cfg=4.0).
-      4. Returns a stable PNG copy next to the input (same K-1 contract as
-         ``run_comfyui_inline_enhance``) — input on silent fail.
+      4. Compute dynamic timeout from resized dimensions
+         (``_focal_compute_timeout``).
+      5. Run the ``portrait_focal_enhance_v1`` workflow (focal strength:
+         denoise=0.40, 20 steps, cfg=4.0).
+      6. Promote generated PNG to a stable path next to the input. If the
+         input was resized, upscale the output back to the original
+         resolution with Lanczos before saving.
 
-    Resolution policy: downstream MediaPipeFaceMeshToSEGS + SAM in the v1
-    workflow refines the coarse ellipse mask into face geometry; we don't
-    need pixel-precise lip/eye contours from Python.
+    K-1 contract: returns ``image_path`` on any silent failure.
     """
     from .services.focal_mask_generator import generate_focus_mask
     from .services.focal_prompt_library import build_focal_prompts
@@ -3019,9 +3071,29 @@ def run_comfyui_focal_enhance(
 
     mask_path: Path | None = None
     try:
-        # 1. Generate focus mask
+        # 1. Auto-resize input if needed (W11-3)
         try:
-            mask_path = generate_focus_mask(image_path, focus_targets, output_path=output_dir / "focus_mask.png")
+            workflow_input, work_w, work_h, orig_w, orig_h = _focal_resize_if_needed(
+                image_path, output_dir,
+            )
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning(
+                "ComfyUI focal enhance: resize failed for %s (%s); silent-fail",
+                image_path.name, exc,
+            )
+            return image_path
+        needs_upscale = (work_w, work_h) != (orig_w, orig_h)
+        if needs_upscale:
+            LOGGER.info(
+                "ComfyUI focal enhance: resized input %dx%d -> %dx%d (long-edge cap %d)",
+                orig_w, orig_h, work_w, work_h, _FOCAL_MAX_LONG_EDGE,
+            )
+
+        # 2. Generate focus mask (at resized resolution so dimensions match)
+        try:
+            mask_path = generate_focus_mask(
+                workflow_input, focus_targets, output_path=output_dir / "focus_mask.png",
+            )
         except Exception as exc:  # noqa: BLE001
             LOGGER.warning(
                 "ComfyUI focal enhance: focus mask generation failed for %s (%s); silent-fail",
@@ -3029,19 +3101,27 @@ def run_comfyui_focal_enhance(
             )
             return image_path
 
-        # 2. Build prompts
+        # 3. Build prompts
         positive_prompt, negative_prompt = build_focal_prompts(focus_targets)
 
-        # 3. Run workflow
+        # 4. Compute dynamic timeout (W11-2)
+        timeout_s = _focal_compute_timeout(work_w, work_h)
+        LOGGER.info(
+            "ComfyUI focal enhance: dynamic timeout=%ds for %dx%d (%d pixels)",
+            timeout_s, work_w, work_h, work_w * work_h,
+        )
+
+        # 5. Run workflow
         try:
             run_result = _run_comfyui_workflow(
-                image_path,
+                workflow_input,
                 output_dir=output_dir,
                 workflow_name="portrait_focal_enhance_v1",
                 workflow_parameters=dict(_COMFYUI_WORKFLOW_PARAMETERS["focal"]),
                 focus_mask_path=mask_path,
                 positive_prompt=positive_prompt,
                 negative_prompt=negative_prompt,
+                timeout_seconds=timeout_s,
             )
         except Exception as exc:  # noqa: BLE001
             LOGGER.warning(
@@ -3065,12 +3145,30 @@ def run_comfyui_focal_enhance(
             )
             return image_path
 
-        # 4. Promote to stable path (same K-1 contract as inline_enhance)
+        # 6. Promote to stable path (K-1 contract). Upscale back to original
+        #    resolution if we resized the input.
         if not caller_provided_output_dir:
             stable_path = image_path.parent / f".comfyui-focal-out-{int(time.time())}-{os.getpid()}-{image_path.name}.png"
+        else:
+            stable_path = generated_path
+
+        if needs_upscale and stable_path != generated_path:
+            try:
+                from PIL import Image
+                with Image.open(generated_path) as out:
+                    if out.mode != "RGB":
+                        out = out.convert("RGB")
+                    out = out.resize((orig_w, orig_h), Image.LANCZOS)
+                    out.save(stable_path, format="PNG")
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.warning(
+                    "ComfyUI focal enhance: upscale-back failed for %s (%s); using non-upscaled output",
+                    image_path.name, exc,
+                )
+                shutil.copyfile(generated_path, stable_path)
+        elif stable_path != generated_path:
             shutil.copyfile(generated_path, stable_path)
-            return stable_path
-        return generated_path
+        return stable_path
     except Exception as exc:  # noqa: BLE001
         LOGGER.warning(
             "ComfyUI focal enhance: unexpected error for %s: %s",

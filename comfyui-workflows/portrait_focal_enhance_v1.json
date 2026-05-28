@@ -12,61 +12,14 @@
       "channel": "red"
     }
   },
-  "3": {
-    "class_type": "MediaPipeFaceMeshToSEGS",
-    "inputs": {
-      "image": ["1", 0],
-      "crop_factor": 2.6,
-      "bbox_fill": false,
-      "crop_min_size": 80,
-      "drop_size": 8,
-      "dilation": 0,
-      "face": true,
-      "mouth": false,
-      "left_eyebrow": false,
-      "left_eye": false,
-      "left_pupil": false,
-      "right_eyebrow": false,
-      "right_eye": false,
-      "right_pupil": false
-    }
-  },
-  "4": {
-    "class_type": "ImpactSegsAndMask",
-    "inputs": {
-      "segs": ["3", 0],
-      "mask": ["2", 0]
-    }
-  },
-  "5": {
-    "class_type": "SAMLoader",
-    "inputs": {
-      "model_name": "sam_vit_b_01ec64.pth",
-      "device_mode": "AUTO"
-    }
-  },
-  "6": {
-    "class_type": "SAMDetectorCombined",
-    "inputs": {
-      "sam_model": ["5", 0],
-      "segs": ["4", 0],
-      "image": ["1", 0],
-      "detection_hint": "center-1",
-      "dilation": -2,
-      "threshold": 0.93,
-      "bbox_expansion": 8,
-      "mask_hint_threshold": 0.7,
-      "mask_hint_use_negative": "Outter"
-    }
-  },
   "7": {
     "class_type": "FeatherMask",
     "inputs": {
-      "mask": ["6", 0],
-      "left": 12,
-      "top": 12,
-      "right": 12,
-      "bottom": 12
+      "mask": ["2", 0],
+      "left": 8,
+      "top": 8,
+      "right": 8,
+      "bottom": 8
     }
   },
   "8": {
