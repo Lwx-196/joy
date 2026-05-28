@@ -789,10 +789,24 @@ def _evidence_excerpt(evidence: Any) -> dict[str, Any]:
     surfaced as flat ``effective_*`` fields one level up (on the audit_payload
     itself, see :func:`apply_rollback_decision` and the stop-loss path) so
     SQL queries don't have to ``json_extract`` through the nested excerpt.
+
+    Wave 7.1 hot-fix (contract symmetry with W7-B): the two stale-window keys
+    use ``evidence.get(key) is not None`` semantics — the same defensive None
+    treatment that :func:`_effective_stale_days` adopted in W7-B. Without
+    this, the nested forensic surface (``$.evidence_excerpt.baseline_stale_days``)
+    would still emit ``None`` placeholders even when the flat surface
+    (``$.effective_baseline_stale_days``) correctly omitted them, producing
+    asymmetric NULL behavior across the two paths the W6-B "defense in depth"
+    docstring promises operators. All non-tunable keys keep the original
+    ``key in evidence`` semantics because they may legitimately carry zero /
+    empty / falsy values (e.g. ``cutoff_iso=""`` would still be auditable).
     """
     if not isinstance(evidence, Mapping):
         return {}
     out: dict[str, Any] = {}
+    # Non-tunable forensic fields: membership-based (None / 0 / "" can be
+    # legitimately recorded — operators inspecting the audit row may need to
+    # know "cutoff was zero" rather than "cutoff was absent").
     for k in (
         "comfyui_failure",
         "vlm_disagreement",
@@ -800,12 +814,17 @@ def _evidence_excerpt(evidence: Any) -> dict[str, Any]:
         "pre_render_gate_blocker",
         "minimum_sample_size",
         "cutoff_iso",
-        # W6-B forensic surface for stale-window tunables.
-        "baseline_stale_days",
-        "paused_stale_days",
     ):
         if k in evidence:
             out[k] = evidence[k]
+    # W7.1: stale-window tunables — value-based (None is regression-only,
+    # never a legitimate signal). Mirrors :func:`_effective_stale_days`.
+    baseline_val = evidence.get("baseline_stale_days")
+    if baseline_val is not None:
+        out["baseline_stale_days"] = baseline_val
+    paused_val = evidence.get("paused_stale_days")
+    if paused_val is not None:
+        out["paused_stale_days"] = paused_val
     return out
 
 

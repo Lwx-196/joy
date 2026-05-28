@@ -1202,3 +1202,127 @@ def test_w7_effective_stale_days_omits_when_paused_is_explicit_none(
         f"{payload.get('effective_paused_stale_days')!r}"
     )
     assert payload.get("effective_baseline_stale_days") == 60
+
+
+# ---------------------------------------------------------------------------
+# Wave 7.1 hot-fix: _evidence_excerpt nested-surface None defense
+# ---------------------------------------------------------------------------
+#
+# W7-B installed defensive None handling on the FLAT surface
+# (`_effective_stale_days`) but left the NESTED surface (`_evidence_excerpt`)
+# using membership-based probes. That broke the W6-B "defense in depth"
+# contract (the docstring promises both forensic surfaces agree). These
+# tests pin the contract: a future monitor regression emitting
+# `evidence["baseline_stale_days"] = None` must omit the key on BOTH
+# surfaces, not just one.
+
+
+def test_w71_evidence_excerpt_omits_none_stale_days_baseline(
+    temp_db: Path, tmp_path: Path
+) -> None:
+    """W7.1: nested `evidence_excerpt.baseline_stale_days` must be OMITTED
+    (not surfaced as None) when the source evidence dict carries explicit
+    None. Mirror of W7-B's flat-surface test."""
+    manifest_path = tmp_path / "manifest.json"
+    _write_manifest(manifest_path, _make_manifest(promotion_state="p100"))
+
+    bad_evidence: dict[str, Any] = {
+        "comfyui_failure": {"rate": 0.20, "terminal_total": 80},
+        "minimum_sample_size": 30,
+        "cutoff_iso": "2026-05-28T00:00:00+00:00",
+        "baseline_stale_days": None,  # regression-style None
+        "paused_stale_days": 7,
+    }
+    decision = _make_decision(
+        recommendation=REC_ROLLBACK,
+        violations=_rollback_violation(),
+        evidence=bad_evidence,
+    )
+
+    with db.connect() as conn:
+        result = apply_rollback_decision(
+            decision,
+            dry_run=False,
+            manifest_path=manifest_path,
+            conn=conn,
+            request_id="w71-nested-none-baseline-001",
+        )
+    assert result["applied"] is True
+
+    with db.connect() as conn:
+        row = conn.execute(
+            "SELECT payload_json FROM ops_audit_log WHERE id = ?",
+            (result["audit_log_id"],),
+        ).fetchone()
+    payload = json.loads(row["payload_json"])
+    excerpt = payload.get("evidence_excerpt") or {}
+
+    # Nested surface: None-carrying tunable must be omitted (W7.1 contract).
+    assert "baseline_stale_days" not in excerpt, (
+        "W7.1: nested evidence_excerpt must OMIT None baseline_stale_days "
+        f"(contract symmetry with W7-B flat surface); got "
+        f"excerpt.baseline_stale_days={excerpt.get('baseline_stale_days')!r}"
+    )
+    # Real value still surfaces.
+    assert excerpt.get("paused_stale_days") == 7
+    # Non-tunable forensic fields keep original membership semantics —
+    # cutoff_iso="" or minimum_sample_size=0 would still surface.
+    assert excerpt.get("cutoff_iso") == "2026-05-28T00:00:00+00:00"
+    # And the flat surface (W7-B) still agrees.
+    assert "effective_baseline_stale_days" not in payload
+
+
+def test_w71_evidence_excerpt_omits_none_stale_days_paused(
+    temp_db: Path, tmp_path: Path
+) -> None:
+    """W7.1 mirror: paused side, stop-loss-halt path (cross-version evidence
+    most likely to encounter the regression in production)."""
+    manifest_path = tmp_path / "manifest.json"
+    _write_manifest(manifest_path, _make_manifest(promotion_state="p10"))
+
+    bad_evidence: dict[str, Any] = {
+        "comfyui_failure": {"rate": 0.0, "terminal_total": 3},
+        "minimum_sample_size": 30,
+        "cutoff_iso": "2026-05-28T00:00:00+00:00",
+        "baseline_stale_days": 60,
+        "paused_stale_days": None,  # regression-style None
+    }
+    decision = _make_decision(
+        recommendation=REC_STOP_LOSS_HALT,
+        sample_size=3,
+        violations=[
+            {
+                "dimension": "monitoring_paused_stale",
+                "actual_days": 8.5,
+                "threshold_days": 7,
+                "comparator": "<=",
+            }
+        ],
+        evidence=bad_evidence,
+    )
+
+    with db.connect() as conn:
+        result = apply_rollback_decision(
+            decision,
+            dry_run=False,
+            manifest_path=manifest_path,
+            conn=conn,
+            request_id="w71-nested-none-paused-001",
+        )
+    assert result["audit_log_id"] is not None
+
+    with db.connect() as conn:
+        row = conn.execute(
+            "SELECT payload_json FROM ops_audit_log WHERE id = ?",
+            (result["audit_log_id"],),
+        ).fetchone()
+    payload = json.loads(row["payload_json"])
+    excerpt = payload.get("evidence_excerpt") or {}
+
+    assert "paused_stale_days" not in excerpt, (
+        "W7.1: nested evidence_excerpt must OMIT None paused_stale_days; got "
+        f"excerpt.paused_stale_days={excerpt.get('paused_stale_days')!r}"
+    )
+    assert excerpt.get("baseline_stale_days") == 60
+    # Flat surface (W7-B) agrees.
+    assert "effective_paused_stale_days" not in payload
