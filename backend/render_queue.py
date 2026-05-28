@@ -43,17 +43,37 @@ from . import _job_pool, ai_generation_adapter, audit, db, render_executor, rend
 from .services import vlm_source_classifier as _vlm_source_classifier
 from .services.promotion_manifest_loader import should_promote
 
+LOGGER = logging.getLogger(__name__)
+
 # G1.A.i — env flag controlling render-flow ComfyUI inline enhance swap.
 # Default false → preserves pre-G1 behavior (P1 Node.js PS path via
 # run_direct_clinical_enhancement). Set to "true" / "1" / "yes" to opt in.
 # Two-tier gate: flag must be true AND should_promote(case_id) must be true
 # (per user 2026-05-28 G1.A decision: "flag AND promotion_state 双保险").
-_RENDER_AUTO_AI_ENABLED = os.environ.get("RENDER_AUTO_AI_ENABLED", "false").strip().lower() in ("true", "1", "yes")
+#
+# K-5 hardening: explicit allow-list + warn on unrecognized values
+# (reviewer W: typos like "yse" / "TRue" silently disable were brittle).
+_RENDER_AUTO_AI_ENABLED_RAW = os.environ.get("RENDER_AUTO_AI_ENABLED", "false").strip()
+_RENDER_AUTO_AI_TRUE_VALUES = {"true", "1", "yes", "on", "enabled"}
+_RENDER_AUTO_AI_FALSE_VALUES = {"", "false", "0", "no", "off", "disabled"}
+_RENDER_AUTO_AI_ENABLED = _RENDER_AUTO_AI_ENABLED_RAW.lower() in _RENDER_AUTO_AI_TRUE_VALUES
+if (
+    _RENDER_AUTO_AI_ENABLED_RAW.lower() not in _RENDER_AUTO_AI_TRUE_VALUES
+    and _RENDER_AUTO_AI_ENABLED_RAW.lower() not in _RENDER_AUTO_AI_FALSE_VALUES
+):
+    LOGGER.warning(
+        "RENDER_AUTO_AI_ENABLED=%r is not a recognized truthy/falsy value, "
+        "defaulting to false (allowed truthy: %s; falsy: %s)",
+        _RENDER_AUTO_AI_ENABLED_RAW,
+        sorted(_RENDER_AUTO_AI_TRUE_VALUES),
+        sorted(_RENDER_AUTO_AI_FALSE_VALUES - {""}),
+    )
+if _RENDER_AUTO_AI_ENABLED:
+    LOGGER.info("RENDER_AUTO_AI_ENABLED=true — md_ai render flow will use ComfyUI inline enhance for promoted cases")
 
 
 DEFAULT_TEMPLATE = "tri-compare"
 DEFAULT_SEMANTIC_JUDGE = "auto"
-LOGGER = logging.getLogger(__name__)
 
 
 def _env_int(name: str, default: int) -> int:
@@ -1635,6 +1655,13 @@ class RenderQueue:
 
         for entry in staging_path.iterdir():
             if not entry.is_file():
+                continue
+            # K-2 hardening: skip dotfile residue (.comfyui-inline-* / .comfyui-out-*
+            # auto-tempdir cleanup contracts in run_comfyui_inline_enhance) and
+            # enhanced_ prefixed temp files left behind by prior interrupted runs.
+            # Without this, residue from earlier crashed renders would be
+            # double-enhanced on next attempt.
+            if entry.name.startswith(".") or entry.name.startswith("enhanced_"):
                 continue
 
             # Phase resolution: manual override wins over filename token.

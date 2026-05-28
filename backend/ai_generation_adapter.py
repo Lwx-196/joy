@@ -2701,12 +2701,22 @@ def run_comfyui_inline_enhance(
         output_dir: optional temp dir for ComfyUI output. Defaults to a
             timestamp+pid-namespaced subdir under image_path.parent.
     """
+    # K-1 hardening: use mkdtemp + try/finally + rmtree to prevent staging dir
+    # accumulation (cross-reviewer Critical: 100 case x 3 after x 1MB = 300MB/round 累积).
+    # output_dir caller-provided path is honored (no cleanup) for testability;
+    # auto-generated tempdir is always cleaned. We copy generated.png to a
+    # caller-readable path before cleanup so the helper's Path return remains stable.
+    caller_provided_output_dir = output_dir is not None
+    if not caller_provided_output_dir:
+        import tempfile
+        # K-2 hardening: tempdir under image_path.parent with explicit prefix lets
+        # render_queue iterdir filter (`.` + `enhanced_`) reliably skip residue.
+        output_dir = Path(tempfile.mkdtemp(prefix=".comfyui-inline-", dir=str(image_path.parent)))
+    else:
+        output_dir.mkdir(parents=True, exist_ok=True)
     try:
         profile = _resolve_comfyui_workflow_profile(model_name)
         workflow_name = str(profile["workflow_name"])
-        if output_dir is None:
-            output_dir = image_path.parent / f".comfyui-inline-{int(time.time())}-{os.getpid()}"
-        output_dir.mkdir(parents=True, exist_ok=True)
         run_result = _run_comfyui_workflow(
             image_path,
             output_dir=output_dir,
@@ -2729,6 +2739,12 @@ def run_comfyui_inline_enhance(
                 generated_path, case_id, brand,
             )
             return image_path
+        if not caller_provided_output_dir:
+            # K-1: stable Path outside the soon-to-be-rmtree'd tempdir.
+            # Use a sibling file next to image_path; caller os.replace it onto staging.
+            stable_path = image_path.parent / f".comfyui-out-{int(time.time())}-{os.getpid()}-{image_path.name}.png"
+            shutil.copyfile(generated_path, stable_path)
+            return stable_path
         return generated_path
     except Exception as exc:  # noqa: BLE001 - silent fail per G1.A.i contract (render done + audit only)
         LOGGER.warning(
@@ -2736,6 +2752,10 @@ def run_comfyui_inline_enhance(
             image_path.name, case_id, brand, type(exc).__name__, exc,
         )
         return image_path
+    finally:
+        # K-1: always cleanup auto-generated tempdir (caller-provided dir is owned by caller)
+        if not caller_provided_output_dir and output_dir.is_dir():
+            shutil.rmtree(output_dir, ignore_errors=True)
 
 
 def _build_comfyui_policy(
