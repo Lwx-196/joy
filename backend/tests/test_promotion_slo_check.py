@@ -4,17 +4,26 @@ Wave 4 K-7 hardening: pre-K-7 the markdown renderer hard-coded
 ``v['actual']`` / ``v['threshold']`` and crashed on Wave 4 violations
 that use different field names. Post-K-7 the renderer is schema-adaptive
 via ``_render_violation_row``.
+
+Wave 6 followup A-1: ``--baseline-stale-days`` CLI flag tests at the
+bottom of this file exercise argparse + threshold_override routing without
+hitting the real DB (the flag layer is pure argument-shape logic — the
+underlying override path is covered exhaustively in test_promotion_slo_monitor).
 """
 
 from __future__ import annotations
+
+import pytest
 
 from backend.scripts.promotion_slo_check import (
     EXIT_OK,
     EXIT_ROLLBACK,
     EXIT_STOP_LOSS_HALT,
+    EXIT_USAGE_ERROR,
     _exit_code_for,
     _format_markdown,
     _render_violation_row,
+    main,
 )
 from backend.services.promotion_slo_monitor import (
     RECOMMENDATION_CONTINUE,
@@ -179,3 +188,203 @@ def test_k7_exit_code_continue_still_0() -> None:
     """K-7: continue still exit 0 (back-compat)."""
     report = _make_report(violations=[], recommendation=RECOMMENDATION_CONTINUE)
     assert _exit_code_for(report) == EXIT_OK
+
+
+# Wave 6 followup A-1 — --baseline-stale-days CLI flag ----------------------
+
+
+def test_w6_baseline_stale_days_zero_rejected_at_cli(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """W6-A: ``--baseline-stale-days 0`` must exit ``EXIT_USAGE_ERROR=2``
+    at the argparse / validation layer, BEFORE reaching ``evaluate_window``
+    (where the same value would also raise — but cron operators get a
+    cleaner stderr line by failing fast at the CLI layer).
+    """
+    exit_code = main(["--baseline-stale-days", "0"])
+    captured = capsys.readouterr()
+    assert exit_code == EXIT_USAGE_ERROR
+    assert "--baseline-stale-days must be positive integer" in captured.err
+
+
+def test_w6_baseline_stale_days_negative_rejected_at_cli(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """W6-A: negative override is rejected at the CLI layer (parallel to
+    ``--window`` rejecting non-positive)."""
+    exit_code = main(["--baseline-stale-days", "-5"])
+    captured = capsys.readouterr()
+    assert exit_code == EXIT_USAGE_ERROR
+    assert "--baseline-stale-days must be positive integer" in captured.err
+
+
+def test_w6_baseline_stale_days_routes_through_structured_override(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """W6-A: ``--baseline-stale-days N`` (without ``--thresholds``) must
+    construct a structured override (``{"thresholds": {}, ...}``) so
+    ``_merge_thresholds`` routes the field through the *structured branch*
+    (which respects top-level ``baseline_stale_days``) instead of the *flat
+    branch* (which would misroute the key into the ``thresholds`` sub-dict).
+    Closes a footgun where CLI override would silently no-op."""
+    captured_kwargs: dict[str, object] = {}
+
+    def _fake_evaluate(*args: object, **kwargs: object) -> SLOReport:
+        captured_kwargs.update(kwargs)
+        return SLOReport(
+            within_slo=True,
+            violations=[],
+            evidence={"comfyui_failure": {"rate": 0.01}},
+            recommendation=RECOMMENDATION_CONTINUE,
+            window_hours=int(kwargs.get("window_hours", 48)),
+            sample_size=100,
+        )
+
+    monkeypatch.setattr(
+        "backend.scripts.promotion_slo_check.evaluate_window",
+        _fake_evaluate,
+    )
+
+    exit_code = main(["--baseline-stale-days", "90"])
+    capsys.readouterr()  # discard JSON stdout
+    assert exit_code == EXIT_OK
+
+    override = captured_kwargs.get("thresholds")
+    assert isinstance(override, dict), (
+        f"CLI must construct an override dict; got {override!r}"
+    )
+    # Structured-branch marker present.
+    assert (
+        "thresholds" in override or "baseline" in override
+    ), (
+        f"CLI override must trip the structured branch in _merge_thresholds; "
+        f"got keys={list(override)}"
+    )
+    # Top-level value forwarded.
+    assert override["baseline_stale_days"] == 90, (
+        f"override must carry top-level baseline_stale_days=90; got {override!r}"
+    )
+
+
+def test_w6_baseline_stale_days_augments_existing_thresholds_dict(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path,
+) -> None:
+    """W6-A: ``--baseline-stale-days N`` + ``--thresholds <path>`` must
+    *augment* the on-disk override with the CLI value (CLI wins over the
+    file's own baseline_stale_days), not replace it wholesale. Mirrors the
+    documented "kwarg > JSON > module constant" priority — here the CLI
+    flag IS the kwarg channel.
+    """
+    # Build a minimal valid thresholds JSON with its own baseline_stale_days=120.
+    import json
+
+    thresholds_file = tmp_path / "custom.json"
+    thresholds_file.write_text(
+        json.dumps(
+            {
+                "thresholds": {
+                    "comfyui_failure_rate_max": 0.05,
+                    "vlm_disagreement_rate_max": 0.10,
+                    "vlm_judge_missing_rate_max": 0.10,
+                    "delivery_gate_rejection_rate_multiplier_max": 1.05,
+                    "pre_render_gate_blocker_multiplier_max": 1.10,
+                },
+                "baseline": {
+                    "delivery_gate_rejection_rate": 0.10,
+                    "pre_render_gate_blocker_count": 5,
+                },
+                "baseline_provenance": {
+                    "measured_at": "2026-05-01T00:00:00+00:00",
+                    "window_hours": 24,
+                    "sample_size": 100,
+                    "computed_by": "calibrate_cli",
+                    "computed_at_main_sha": "abc1234",
+                },
+                "minimum_sample_size": 30,
+                "default_window_hours": 48,
+                "paused_stale_days": 7,
+                "baseline_stale_days": 120,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    captured_kwargs: dict[str, object] = {}
+
+    def _fake_evaluate(*args: object, **kwargs: object) -> SLOReport:
+        captured_kwargs.update(kwargs)
+        return SLOReport(
+            within_slo=True,
+            violations=[],
+            evidence={"comfyui_failure": {"rate": 0.01}},
+            recommendation=RECOMMENDATION_CONTINUE,
+            window_hours=48,
+            sample_size=100,
+        )
+
+    monkeypatch.setattr(
+        "backend.scripts.promotion_slo_check.evaluate_window",
+        _fake_evaluate,
+    )
+
+    exit_code = main(
+        [
+            "--thresholds",
+            str(thresholds_file),
+            "--baseline-stale-days",
+            "90",
+        ]
+    )
+    capsys.readouterr()
+    assert exit_code == EXIT_OK
+
+    override = captured_kwargs.get("thresholds")
+    assert isinstance(override, dict)
+    # CLI flag must win over file value (90, not 120).
+    assert override["baseline_stale_days"] == 90, (
+        f"CLI --baseline-stale-days 90 must override file value 120; "
+        f"got effective={override.get('baseline_stale_days')!r}"
+    )
+    # File-supplied structured fields preserved (thresholds + baseline + provenance).
+    assert "thresholds" in override and override["thresholds"], (
+        f"file thresholds must survive augmentation; got {override!r}"
+    )
+    assert "baseline" in override
+
+
+def test_w6_baseline_stale_days_default_does_not_inject_override(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """W6-A BC: invoking the CLI WITHOUT ``--baseline-stale-days`` must
+    pass ``thresholds=None`` to ``evaluate_window`` (the pre-W6 contract).
+    Closes a regression risk where the new flag silently injected an empty
+    override dict on every invocation."""
+    captured_kwargs: dict[str, object] = {}
+
+    def _fake_evaluate(*args: object, **kwargs: object) -> SLOReport:
+        captured_kwargs.update(kwargs)
+        return SLOReport(
+            within_slo=True,
+            violations=[],
+            evidence={"comfyui_failure": {"rate": 0.01}},
+            recommendation=RECOMMENDATION_CONTINUE,
+            window_hours=48,
+            sample_size=100,
+        )
+
+    monkeypatch.setattr(
+        "backend.scripts.promotion_slo_check.evaluate_window",
+        _fake_evaluate,
+    )
+
+    exit_code = main([])
+    capsys.readouterr()
+    assert exit_code == EXIT_OK
+    assert captured_kwargs.get("thresholds") is None, (
+        f"absent flag must pass thresholds=None (BC); got "
+        f"{captured_kwargs.get('thresholds')!r}"
+    )
