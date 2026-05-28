@@ -6,15 +6,21 @@ Usage:
     python -m backend.scripts.promotion_slo_check --format markdown
     python -m backend.scripts.promotion_slo_check --thresholds path/to/custom.json
     python -m backend.scripts.promotion_slo_check --baseline-stale-days 90
+    python -m backend.scripts.promotion_slo_check --paused-stale-days 14
 
-``--baseline-stale-days N`` (Wave 6 followup A-1) is a kwarg-semantic mirror
-of the JSON-tunable ``baseline_stale_days`` field added in Wave 5 followup #2.
+Two kwarg-semantic CLI overrides mirror their JSON-tunable counterparts:
+
+* ``--baseline-stale-days N`` (Wave 6 followup A-1) → ``baseline_stale_days``
+  JSON field (added in Wave 5 followup #2).
+* ``--paused-stale-days N`` (Wave 7 followup A-1) → ``paused_stale_days``
+  JSON field (added in Wave 5 followup #1).
+
 Operator priority (see :mod:`backend.services.promotion_slo_monitor` docstring):
-``kwarg > JSON > module constant`` — passing ``--baseline-stale-days 90`` from
-a cron line wins over whatever ``slo_thresholds.json`` says without requiring
-a JSON edit + redeploy. Symmetric ``--paused-stale-days`` is intentionally
-NOT exposed in this followup (single-knob change kept atomic; add in W7 if a
-parallel CLI override is needed).
+``kwarg > JSON > module constant`` — passing ``--baseline-stale-days 90`` /
+``--paused-stale-days 14`` from a cron line wins over ``slo_thresholds.json``
+without requiring a JSON edit + redeploy. Both flags route through
+:func:`_inject_structured_field` so the structured-branch invariant in
+``_merge_thresholds`` is honored uniformly.
 
 Exit codes (Wave 3 P0.5 H-5: aligned with the four-token recommendation
 vocabulary that ``promotion_slo_monitor.evaluate_window`` now emits):
@@ -163,6 +169,51 @@ def _exit_code_for(report: SLOReport) -> int:
     return EXIT_OK
 
 
+def _inject_structured_field(
+    threshold_override: dict | None,
+    field: str,
+    value: int,
+) -> dict:
+    """Wave 7 followup A-1 (extracts the helper W6-A in-lined):
+
+    Inject a top-level ``field=value`` into ``threshold_override`` and ensure
+    the result is shaped so :func:`backend.services.promotion_slo_monitor._merge_thresholds`
+    routes through its **structured branch** (which honors top-level fields
+    like ``baseline_stale_days`` / ``paused_stale_days``) rather than its
+    **flat branch** (which would misroute the key into the ``thresholds``
+    sub-dict and effectively no-op the CLI override).
+
+    Routing invariant: either ``"thresholds"`` OR ``"baseline"`` key in the
+    override dict is enough to trip the structured branch (see
+    ``_merge_thresholds`` source — the check is an OR, not an AND). So:
+
+    * ``override is None`` → create ``{"thresholds": {}}`` (empty marker).
+    * Override already has ``"thresholds"`` or ``"baseline"`` (e.g. supplied
+      via ``--thresholds <file>``) → no marker injection needed.
+    * Override exists but lacks both markers (rare — typically a flat
+      thresholds-only dict from a hand-built test) → inject empty
+      ``"thresholds": {}`` so the structured branch takes precedence.
+
+    This helper replaces the duplicated routing dance that lived inline for
+    each CLI flag pre-W7. Adding a future ``--minimum-sample-size N`` flag
+    (or any other JSON tunable that surfaces at the structured-branch top
+    level) would call this helper rather than re-implementing the pattern.
+
+    Returns the (possibly newly-created) override dict so callers can chain.
+    """
+    if threshold_override is None:
+        threshold_override = {"thresholds": {}}
+    elif (
+        "thresholds" not in threshold_override
+        and "baseline" not in threshold_override
+    ):
+        # Either marker would suffice; we pick "thresholds" by convention.
+        # See W6 reviewer Info #1 (Wave 6 followup) for the OR-vs-AND audit.
+        threshold_override["thresholds"] = {}
+    threshold_override[field] = value
+    return threshold_override
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="promotion_slo_check",
@@ -198,17 +249,33 @@ def main(argv: list[str] | None = None) -> int:
             "kwarg > JSON > module constant. Must be positive int."
         ),
     )
+    parser.add_argument(
+        "--paused-stale-days",
+        dest="paused_stale_days",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "Wave 7 followup A-1: override paused_stale_days (default: read "
+            "from slo_thresholds.json or PAUSED_STALE_DAYS=7). Priority "
+            "kwarg > JSON > module constant. Must be positive int. Symmetric "
+            "to --baseline-stale-days (W6-A)."
+        ),
+    )
     args = parser.parse_args(argv)
 
     if args.window <= 0:
         sys.stderr.write("--window must be positive integer\n")
         return EXIT_USAGE_ERROR
+    # CLI-layer positive-int gate: surface the constraint with a friendly
+    # stderr line BEFORE values tunnel into `_validate_positive_int` →
+    # ValueError → generic "SLO check failed" wrap. The deeper validator
+    # still protects production callers that bypass the CLI.
     if args.baseline_stale_days is not None and args.baseline_stale_days <= 0:
-        # W6-A: surface positive-int constraint at the CLI layer so cron
-        # operators see the message immediately rather than having it
-        # tunnel through `_validate_positive_int` → ValueError → generic
-        # "SLO check failed" wrap below.
         sys.stderr.write("--baseline-stale-days must be positive integer\n")
+        return EXIT_USAGE_ERROR
+    if args.paused_stale_days is not None and args.paused_stale_days <= 0:
+        sys.stderr.write("--paused-stale-days must be positive integer\n")
         return EXIT_USAGE_ERROR
 
     try:
@@ -216,19 +283,17 @@ def main(argv: list[str] | None = None) -> int:
         if args.thresholds:
             threshold_override = load_default_thresholds(Path(args.thresholds))
         if args.baseline_stale_days is not None:
-            # Construct (or augment) a STRUCTURED override so
-            # `_merge_thresholds` routes through the structured branch (which
-            # honors top-level `baseline_stale_days`) instead of the flat
-            # branch (which would misroute it into the `thresholds` sub-dict).
-            # See `_merge_thresholds` docstring for the routing rule.
-            if threshold_override is None:
-                threshold_override = {"thresholds": {}}
-            elif (
-                "thresholds" not in threshold_override
-                and "baseline" not in threshold_override
-            ):
-                threshold_override["thresholds"] = {}
-            threshold_override["baseline_stale_days"] = args.baseline_stale_days
+            threshold_override = _inject_structured_field(
+                threshold_override,
+                "baseline_stale_days",
+                args.baseline_stale_days,
+            )
+        if args.paused_stale_days is not None:
+            threshold_override = _inject_structured_field(
+                threshold_override,
+                "paused_stale_days",
+                args.paused_stale_days,
+            )
         report = evaluate_window(
             window_hours=args.window,
             thresholds=threshold_override,

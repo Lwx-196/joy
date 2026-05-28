@@ -820,14 +820,30 @@ def _effective_stale_days(evidence: Any) -> dict[str, Any]:
     against ``ops_audit_log`` should not have to dig through
     ``$.evidence_excerpt.baseline_stale_days`` to learn what window was
     actually applied.
+
+    Wave 7 followup B-1 (resolves W6 reviewer Info #2): membership probes
+    use ``evidence.get(key) is not None`` rather than ``key in evidence``.
+    The earlier W6 implementation correctly omitted on absent-key, but
+    would surface ``effective_*_stale_days=None`` if a future SLO monitor
+    regression started emitting explicit ``None`` for these fields (e.g.
+    a pre-Wave-5 fallback path resurrected, or a cross-version evidence
+    dict carrying a stale ``None`` echo). Forensic queries grouping by
+    stale window value would then receive a confusing ``NULL`` bucket
+    indistinguishable from the legitimate "field absent" bucket. With the
+    W7 hardening, ``None`` and missing both consistently map to "omit the
+    flat field"; only real positive-int values surface. The trade-off is
+    that an operator who somehow *wants* to record ``effective_*=None``
+    explicitly can't — but no legitimate flow produces that signal.
     """
     if not isinstance(evidence, Mapping):
         return {}
     out: dict[str, Any] = {}
-    if "baseline_stale_days" in evidence:
-        out["effective_baseline_stale_days"] = evidence["baseline_stale_days"]
-    if "paused_stale_days" in evidence:
-        out["effective_paused_stale_days"] = evidence["paused_stale_days"]
+    baseline_val = evidence.get("baseline_stale_days")
+    if baseline_val is not None:
+        out["effective_baseline_stale_days"] = baseline_val
+    paused_val = evidence.get("paused_stale_days")
+    if paused_val is not None:
+        out["effective_paused_stale_days"] = paused_val
     return out
 
 

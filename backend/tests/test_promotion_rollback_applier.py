@@ -1083,3 +1083,122 @@ def test_w6_audit_payload_omits_flat_fields_when_evidence_lacks_them(
         "missing-evidence path must omit the key (not emit None placeholder)"
     )
     assert "effective_paused_stale_days" not in payload
+
+
+# ---------------------------------------------------------------------------
+# Wave 7 followup B-1: _effective_stale_days defensive None check
+# ---------------------------------------------------------------------------
+#
+# W6 reviewer Info #2 flagged that `_effective_stale_days` used membership
+# probes (`"k" in evidence`) which correctly omit when key is absent but
+# would surface `effective_*_stale_days=None` if a future SLO monitor
+# regression ever started emitting explicit `None` for these fields.
+# Forensic queries grouping by stale window would then receive an
+# ambiguous NULL bucket. W7-B hardens by switching to
+# `evidence.get(k) is not None` semantics so None+missing both omit.
+
+
+def test_w7_effective_stale_days_omits_when_baseline_is_explicit_none(
+    temp_db: Path, tmp_path: Path
+) -> None:
+    """W7-B: if evidence dict carries baseline_stale_days=None (regression
+    from a future monitor change), the audit payload must OMIT the flat
+    field — not emit `effective_baseline_stale_days=None` which would
+    confuse forensic queries grouping by stale window."""
+    manifest_path = tmp_path / "manifest.json"
+    _write_manifest(manifest_path, _make_manifest(promotion_state="p100"))
+
+    # Build a decision whose evidence explicitly carries None — emulates
+    # a future bug or cross-version evidence dict from a stale fallback path.
+    bad_evidence: dict[str, Any] = {
+        "comfyui_failure": {"rate": 0.20, "terminal_total": 80},
+        "minimum_sample_size": 30,
+        "cutoff_iso": "2026-05-28T00:00:00+00:00",
+        "baseline_stale_days": None,  # ← the regression we guard against
+        "paused_stale_days": 7,  # legitimate value
+    }
+    decision = _make_decision(
+        recommendation=REC_ROLLBACK,
+        violations=_rollback_violation(),
+        evidence=bad_evidence,
+    )
+
+    with db.connect() as conn:
+        result = apply_rollback_decision(
+            decision,
+            dry_run=False,
+            manifest_path=manifest_path,
+            conn=conn,
+            request_id="w7-defensive-none-001",
+        )
+    assert result["applied"] is True
+
+    with db.connect() as conn:
+        row = conn.execute(
+            "SELECT payload_json FROM ops_audit_log WHERE id = ?",
+            (result["audit_log_id"],),
+        ).fetchone()
+    payload = json.loads(row["payload_json"])
+
+    # The None-carrying field is omitted entirely.
+    assert "effective_baseline_stale_days" not in payload, (
+        "evidence carrying explicit None must NOT surface as flat field "
+        "(would be indistinguishable from absent in forensic GROUP BY); "
+        f"got payload keys: {sorted(payload.keys())}"
+    )
+    # The legitimate value still surfaces.
+    assert payload.get("effective_paused_stale_days") == 7
+
+
+def test_w7_effective_stale_days_omits_when_paused_is_explicit_none(
+    temp_db: Path, tmp_path: Path
+) -> None:
+    """W7-B mirror: paused side. Stop-loss-halt path is the natural test
+    bed because it's the route most likely to encounter cross-version
+    evidence in production (paused episodes survive across cron cycles)."""
+    manifest_path = tmp_path / "manifest.json"
+    _write_manifest(manifest_path, _make_manifest(promotion_state="p10"))
+
+    bad_evidence: dict[str, Any] = {
+        "comfyui_failure": {"rate": 0.0, "terminal_total": 3},
+        "minimum_sample_size": 30,
+        "cutoff_iso": "2026-05-28T00:00:00+00:00",
+        "baseline_stale_days": 60,  # legitimate
+        "paused_stale_days": None,  # ← regression we guard against
+    }
+    decision = _make_decision(
+        recommendation=REC_STOP_LOSS_HALT,
+        sample_size=3,
+        violations=[
+            {
+                "dimension": "monitoring_paused_stale",
+                "actual_days": 8.5,
+                "threshold_days": 7,
+                "comparator": "<=",
+            }
+        ],
+        evidence=bad_evidence,
+    )
+
+    with db.connect() as conn:
+        result = apply_rollback_decision(
+            decision,
+            dry_run=False,
+            manifest_path=manifest_path,
+            conn=conn,
+            request_id="w7-defensive-none-paused-001",
+        )
+    assert result["audit_log_id"] is not None
+    assert result["reason"] == REASON_STOP_LOSS_HALT_ALERT
+
+    with db.connect() as conn:
+        row = conn.execute(
+            "SELECT payload_json FROM ops_audit_log WHERE id = ?",
+            (result["audit_log_id"],),
+        ).fetchone()
+    payload = json.loads(row["payload_json"])
+    assert "effective_paused_stale_days" not in payload, (
+        "None-carrying evidence must omit flat field; got "
+        f"{payload.get('effective_paused_stale_days')!r}"
+    )
+    assert payload.get("effective_baseline_stale_days") == 60
