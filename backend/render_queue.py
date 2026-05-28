@@ -1726,7 +1726,10 @@ class RenderQueue:
             )
             try:
                 if effective_mode == md_ai_mode_router.EnhancementMode.FOCAL:
-                    enhanced_path = ai_generation_adapter.run_comfyui_inline_enhance(
+                    # M3 — Step 2 of 4-mode plan. Uses portrait_focal_enhance_v1
+                    # (proper SDXL inpaint with focus mask + per-target prompts),
+                    # not the legacy G1.A.i sharpen+composite v1 workflow.
+                    enhanced_path = ai_generation_adapter.run_comfyui_focal_enhance(
                         entry,
                         focus_targets=focus_targets,
                         brand=brand,

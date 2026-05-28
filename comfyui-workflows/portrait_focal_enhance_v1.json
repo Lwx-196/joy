@@ -1,0 +1,132 @@
+{
+  "1": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "{{input_image}}"
+    }
+  },
+  "2": {
+    "class_type": "LoadImageMask",
+    "inputs": {
+      "image": "{{focus_mask}}",
+      "channel": "red"
+    }
+  },
+  "3": {
+    "class_type": "MediaPipeFaceMeshToSEGS",
+    "inputs": {
+      "image": ["1", 0],
+      "crop_factor": 2.6,
+      "bbox_fill": false,
+      "crop_min_size": 80,
+      "drop_size": 8,
+      "dilation": 0,
+      "face": true,
+      "mouth": false,
+      "left_eyebrow": false,
+      "left_eye": false,
+      "left_pupil": false,
+      "right_eyebrow": false,
+      "right_eye": false,
+      "right_pupil": false
+    }
+  },
+  "4": {
+    "class_type": "ImpactSegsAndMask",
+    "inputs": {
+      "segs": ["3", 0],
+      "mask": ["2", 0]
+    }
+  },
+  "5": {
+    "class_type": "SAMLoader",
+    "inputs": {
+      "model_name": "sam_vit_b_01ec64.pth",
+      "device_mode": "AUTO"
+    }
+  },
+  "6": {
+    "class_type": "SAMDetectorCombined",
+    "inputs": {
+      "sam_model": ["5", 0],
+      "segs": ["4", 0],
+      "image": ["1", 0],
+      "detection_hint": "center-1",
+      "dilation": -2,
+      "threshold": 0.93,
+      "bbox_expansion": 8,
+      "mask_hint_threshold": 0.7,
+      "mask_hint_use_negative": "Outter"
+    }
+  },
+  "7": {
+    "class_type": "FeatherMask",
+    "inputs": {
+      "mask": ["6", 0],
+      "left": 12,
+      "top": 12,
+      "right": 12,
+      "bottom": 12
+    }
+  },
+  "8": {
+    "class_type": "CheckpointLoaderSimple",
+    "inputs": {
+      "ckpt_name": "sd-v1-5-inpainting.ckpt"
+    }
+  },
+  "9": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "text": "{{positive_prompt}}",
+      "clip": ["8", 1]
+    }
+  },
+  "10": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "text": "{{negative_prompt}}",
+      "clip": ["8", 1]
+    }
+  },
+  "11": {
+    "class_type": "InpaintModelConditioning",
+    "inputs": {
+      "positive": ["9", 0],
+      "negative": ["10", 0],
+      "vae": ["8", 2],
+      "pixels": ["1", 0],
+      "mask": ["7", 0],
+      "noise_mask": true
+    }
+  },
+  "12": {
+    "class_type": "KSampler",
+    "inputs": {
+      "model": ["8", 0],
+      "seed": "{{seed}}",
+      "steps": "{{steps}}",
+      "cfg": "{{cfg}}",
+      "sampler_name": "dpmpp_2m",
+      "scheduler": "karras",
+      "positive": ["11", 0],
+      "negative": ["11", 1],
+      "latent_image": ["11", 2],
+      "denoise": "{{denoise}}"
+    }
+  },
+  "13": {
+    "class_type": "VAEDecode",
+    "inputs": {
+      "samples": ["12", 0],
+      "vae": ["8", 2]
+    }
+  },
+  "14": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "images": ["13", 0],
+      "filename_prefix": "{{filename_prefix}}"
+    }
+  }
+}

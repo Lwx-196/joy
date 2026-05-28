@@ -19,6 +19,7 @@ These tests pin G1.A.i contract:
 from __future__ import annotations
 
 import logging
+from PIL import Image
 from pathlib import Path
 
 import pytest
@@ -167,7 +168,13 @@ def capture_p1_calls(monkeypatch: pytest.MonkeyPatch) -> list[dict]:
 
 @pytest.fixture
 def capture_p2_calls(monkeypatch: pytest.MonkeyPatch) -> list[dict]:
-    """Capture run_comfyui_inline_enhance (P2 ComfyUI inline path) invocations."""
+    """Capture FOCAL dispatch (run_comfyui_focal_enhance) invocations.
+
+    Post-Step-2 of 4-mode plan: FOCAL mode now calls
+    ``run_comfyui_focal_enhance`` (proper SDXL inpaint with mask + prompts),
+    not the legacy ``run_comfyui_inline_enhance``. This fixture mocks the
+    new helper so dispatch wiring tests don't need real ComfyUI.
+    """
     calls: list[dict] = []
 
     def _fake_p2(image_path, *, focus_targets=None, brand="fumei", case_id=None, **kwargs):
@@ -179,7 +186,7 @@ def capture_p2_calls(monkeypatch: pytest.MonkeyPatch) -> list[dict]:
         })
         return image_path  # signal no-op
 
-    monkeypatch.setattr(ai_generation_adapter, "run_comfyui_inline_enhance", _fake_p2)
+    monkeypatch.setattr(ai_generation_adapter, "run_comfyui_focal_enhance", _fake_p2)
     return calls
 
 
@@ -289,7 +296,8 @@ def test_s4_flag_true_p2_raises_render_continues_audit_only(
     def _p2_raise(image_path, **kwargs):
         raise ConnectionError("ComfyUI 127.0.0.1:8188 not reachable")
 
-    monkeypatch.setattr(ai_generation_adapter, "run_comfyui_inline_enhance", _p2_raise)
+    # Post-Step-2: FOCAL mode dispatches to run_comfyui_focal_enhance.
+    monkeypatch.setattr(ai_generation_adapter, "run_comfyui_focal_enhance", _p2_raise)
 
     staging = _make_staging(tmp_path, ["术后-正面.jpg"])
     entry = staging / "术后-正面.jpg"
@@ -341,11 +349,15 @@ def test_s5_flag_true_helper_internal_silent_fail_real_production_path(
     def _workflow_raises(input_path, *, output_dir, workflow_name, **kwargs):
         raise ConnectionError("ComfyUI 127.0.0.1:8188 connection refused")
 
-    # Mock the lower-level _run_comfyui_workflow so helper's internal try/except runs.
+    # Mock the lower-level _run_comfyui_workflow so the focal helper's internal try/except runs.
     monkeypatch.setattr(ai_generation_adapter, "_run_comfyui_workflow", _workflow_raises)
 
-    staging = _make_staging(tmp_path, ["术后-正面.jpg"])
+    # Post-Step-2: staging image must be a real JPG so focal_mask_generator's
+    # PIL pipeline doesn't fail before reaching _run_comfyui_workflow.
+    staging = tmp_path / ".case-workbench-bound-render" / "job-1"
+    staging.mkdir(parents=True)
     entry = staging / "术后-正面.jpg"
+    Image.new("RGB", (640, 480), color=(180, 180, 180)).save(entry, format="JPEG", quality=90)
     original_bytes = entry.read_bytes()
 
     queue = render_queue.RenderQueue()
@@ -360,16 +372,16 @@ def test_s5_flag_true_helper_internal_silent_fail_real_production_path(
         )
 
     # File unchanged — helper returned image_path (silent fail), so enhanced_path == entry
-    # → render_queue takes "silent adapter swallow" branch, no os.replace called.
+    # → render_queue takes "silent fail" branch, no os.replace called.
     assert entry.read_bytes() == original_bytes
-    # Helper's own warning "inline enhance failed for ... ConnectionError" should fire.
-    helper_warnings = [r for r in caplog.records if "inline enhance failed" in r.message.lower()]
+    # Focal helper's own warning "focal enhance: workflow run failed" should fire (S-5 post-Step-2).
+    helper_warnings = [r for r in caplog.records if "focal enhance: workflow run failed" in r.message.lower()]
     assert len(helper_warnings) == 1, (
-        f"expected helper to log 'inline enhance failed' for ConnectionError, "
+        f"expected helper to log 'focal enhance: workflow run failed' for ConnectionError, "
         f"got: {[r.message for r in caplog.records]}"
     )
-    # Also assert tempdir was cleaned (K-1 hardening)
-    residue = [d for d in staging.iterdir() if d.name.startswith(".comfyui-inline-")]
+    # Also assert auto-tempdir was cleaned (K-1 hardening)
+    residue = [d for d in staging.iterdir() if d.name.startswith(".comfyui-focal-")]
     assert residue == [], f"K-1 violation: tempdir not cleaned up: {residue}"
 
 

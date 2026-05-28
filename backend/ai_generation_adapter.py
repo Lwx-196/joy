@@ -94,6 +94,10 @@ _COMFYUI_WORKFLOW_PARAMETERS: dict[str, dict[str, Any]] = {
     "conservative": {"steps": 6, "cfg": 1.5, "denoise": 0.05, "control_strength": 0.45, "control_end": 0.58},
     "balanced": {"steps": 12, "cfg": 2.8, "denoise": 0.14, "control_strength": 0.55, "control_end": 0.72},
     "strong": {"steps": 16, "cfg": 3.4, "denoise": 0.20, "control_strength": 0.65, "control_end": 0.78},
+    # 2026-05-28 Step 2 of 4-mode plan: FOCAL strength for M3 portrait_focal_enhance_v1.
+    # Aggressive denoise inside the SAM-refined focus mask only; preservation
+    # outside is enforced by InpaintModelConditioning + negative prompt.
+    "focal": {"steps": 20, "cfg": 4.0, "denoise": 0.40, "control_strength": 0.55, "control_end": 0.72},
 }
 _COMFYUI_TONE_DETAIL_POSTPROCESS: dict[str, Any] = {
     "enabled": True,
@@ -165,6 +169,7 @@ _COMFYUI_WORKFLOW_GROUPS = {
     "local_region_enhance_v1": ("comfyui_local_region", "ComfyUI local region"),
     "local_region_enhance_v2": ("comfyui_local_region", "ComfyUI local region"),
     "local_region_enhance_v3": ("comfyui_local_region", "ComfyUI local patch"),
+    "portrait_focal_enhance_v1": ("comfyui_focal_enhance", "ComfyUI focal enhance (M3)"),
     "portrait_front_compare_v1": ("comfyui_pose_alignment", "ComfyUI pose alignment"),
     "portrait_45_compare_v1": ("comfyui_pose_alignment", "ComfyUI pose alignment"),
     "portrait_side_compare_v1": ("comfyui_pose_alignment", "ComfyUI pose alignment"),
@@ -822,6 +827,8 @@ def _load_comfyui_workflow(
     extra_uploads: dict[str, str] | None = None,
     seed: int | None = None,
     workflow_parameters: dict[str, Any] | None = None,
+    positive_prompt: str | None = None,
+    negative_prompt: str | None = None,
 ) -> dict[str, Any]:
     workflow_path = COMFYUI_WORKFLOW_DIR / f"{workflow_name}.json"
     if not workflow_path.is_file():
@@ -841,6 +848,10 @@ def _load_comfyui_workflow(
         "focus_mask": (extra_uploads or {}).get("focus_mask", "focus-mask.png"),
         "subject_mask": (extra_uploads or {}).get("subject_mask", "subject-mask.png"),
         "edge_mask": (extra_uploads or {}).get("edge_mask", "edge-mask.png"),
+        # 2026-05-28 Step 2 of 4-mode plan: per-target prompts for M3 FOCAL.
+        # Default to empty strings so workflows without these placeholders are unaffected.
+        "positive_prompt": positive_prompt or "",
+        "negative_prompt": negative_prompt or "",
     }
     return _replace_workflow_placeholders(workflow, replacements)
 
@@ -1379,6 +1390,8 @@ def _run_comfyui_workflow(
     subject_mask_path: Path | None = None,
     edge_mask_path: Path | None = None,
     workflow_parameters: dict[str, Any] | None = None,
+    positive_prompt: str | None = None,
+    negative_prompt: str | None = None,
     timeout_seconds: int = 900,
 ) -> dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -1401,6 +1414,8 @@ def _run_comfyui_workflow(
                     subject_mask_path=subject_mask_path,
                     edge_mask_path=edge_mask_path,
                     workflow_parameters=workflow_parameters,
+                    positive_prompt=positive_prompt,
+                    negative_prompt=negative_prompt,
                     timeout_seconds=timeout_seconds,
                     wait_seconds=wait_seconds,
                 )
@@ -1424,6 +1439,8 @@ def _run_comfyui_workflow_once(
     subject_mask_path: Path | None = None,
     edge_mask_path: Path | None = None,
     workflow_parameters: dict[str, Any] | None = None,
+    positive_prompt: str | None = None,
+    negative_prompt: str | None = None,
     timeout_seconds: int = 900,
     wait_seconds: float = 0.0,
 ) -> dict[str, Any]:
@@ -1450,6 +1467,8 @@ def _run_comfyui_workflow_once(
         extra_uploads=uploads,
         seed=seed,
         workflow_parameters=workflow_parameters,
+        positive_prompt=positive_prompt,
+        negative_prompt=negative_prompt,
     )
     workflow_hash = "sha256:" + hashlib.sha256(json.dumps(workflow, sort_keys=True).encode("utf-8")).hexdigest()
     prompt_response = _comfyui_json(
@@ -2613,13 +2632,22 @@ def run_direct_clinical_enhancement(
     image_path: Path,
     brand: str,
     focus_targets: list[str] | None = None,
+    *,
+    retry_count: int = 1,
 ) -> Path:
-    """Trigger AI clinical enhancement directly on a specific image.
+    """Trigger AI clinical enhancement directly on a specific image (M1 POLISH).
 
     Used by the rendering queue to automate 'md_ai' clinical post-processing.
+
+    Step 3 of 4-mode plan adds:
+      * Identity-preservation reinforcement at prompt prefix (mitigates the
+        over-polish behaviour observed in L2 quality validation case 129).
+      * Single retry on subprocess failure (mitigates the 1/5 silent_fail
+        rate observed on L2 case 140 — transient API errors, timeouts).
+      * LOGGER.warning surfaces stderr on terminal failure so bulk runs can
+        be grepped for root cause (was previously silent).
     """
     if stress.is_stress_mode() and not stress.allow_external_ai():
-        # In stress mode, just return the original path
         return image_path
 
     if not PS_ENHANCE_SCRIPT.is_file():
@@ -2629,7 +2657,17 @@ def run_direct_clinical_enhancement(
     if not focus_targets:
         focus_targets = ["面部"]
 
-    prompt = build_after_enhancement_prompt(focus_targets, [], brand=brand)
+    # Build prompt with explicit anti-polish reinforcement prefix (Step 3 polish improvement).
+    # Earlier prompt put identity locks AT THE END which some models down-weight; lifting the
+    # safety clause to the front gives consistent identity preservation across calls.
+    body_prompt = build_after_enhancement_prompt(focus_targets, [], brand=brand)
+    prompt = (
+        "CRITICAL: Preserve patient identity exactly. NO over-smoothing, NO over-brightening, "
+        "NO over-enhancement. The output must look like a real photograph of the SAME PERSON, "
+        "not an AI-generated portrait. Preserve all original skin texture, pores, freckles, "
+        "blemishes, eye shape, and facial structure.\n\n"
+        + body_prompt
+    )
     cmd = [
         "node",
         str(PS_ENHANCE_SCRIPT),
@@ -2641,23 +2679,66 @@ def run_direct_clinical_enhancement(
         DEFAULT_QUALITY,
     ]
 
-    try:
-        proc = subprocess.run(
-            cmd,
-            text=True,
-            capture_output=True,
-            timeout=DEFAULT_TIMEOUT_SEC,
-            check=False,
-        )
-        if proc.returncode != 0:
-            return image_path
-        raw = _parse_json_stdout(proc.stdout)
-        generated = Path(str(raw.get("imagePath") or raw.get("generatedImagePath") or ""))
-        if raw.get("success") and generated.is_file():
-            return generated
-    except (subprocess.TimeoutExpired, Exception):
-        pass
+    # Subprocess attempt loop: original attempt + (retry_count) retries.
+    # Total subprocess calls = 1 + retry_count.
+    last_error_summary: str | None = None
+    for attempt in range(1 + retry_count):
+        try:
+            proc = subprocess.run(
+                cmd,
+                text=True,
+                capture_output=True,
+                timeout=DEFAULT_TIMEOUT_SEC,
+                check=False,
+            )
+            if proc.returncode != 0:
+                stderr_tail = (proc.stderr or "")[-400:]
+                last_error_summary = (
+                    f"returncode={proc.returncode} stderr_tail={stderr_tail!r}"
+                )
+                if attempt < retry_count:
+                    LOGGER.warning(
+                        "P1 PS direct enhance non-zero exit for %s (attempt %d/%d): %s — retrying",
+                        image_path.name, attempt + 1, 1 + retry_count, last_error_summary,
+                    )
+                    continue
+                break
+            raw = _parse_json_stdout(proc.stdout)
+            generated = Path(str(raw.get("imagePath") or raw.get("generatedImagePath") or ""))
+            if raw.get("success") and generated.is_file():
+                return generated
+            # success=False or missing imagePath — bookkeeping-level failure, retry.
+            last_error_summary = (
+                f"raw.success={raw.get('success')} imagePath={raw.get('imagePath')!r}"
+            )
+            if attempt < retry_count:
+                LOGGER.warning(
+                    "P1 PS direct enhance returned no image for %s (attempt %d/%d): %s — retrying",
+                    image_path.name, attempt + 1, 1 + retry_count, last_error_summary,
+                )
+                continue
+        except subprocess.TimeoutExpired as exc:
+            last_error_summary = f"TimeoutExpired after {exc.timeout}s"
+            if attempt < retry_count:
+                LOGGER.warning(
+                    "P1 PS direct enhance timed out for %s (attempt %d/%d): %s — retrying",
+                    image_path.name, attempt + 1, 1 + retry_count, last_error_summary,
+                )
+                continue
+        except Exception as exc:  # noqa: BLE001
+            last_error_summary = f"{type(exc).__name__}: {exc}"
+            if attempt < retry_count:
+                LOGGER.warning(
+                    "P1 PS direct enhance raised for %s (attempt %d/%d): %s — retrying",
+                    image_path.name, attempt + 1, 1 + retry_count, last_error_summary,
+                )
+                continue
 
+    if last_error_summary:
+        LOGGER.warning(
+            "P1 PS direct enhance terminal failure for %s after %d attempts: %s",
+            image_path.name, 1 + retry_count, last_error_summary,
+        )
     return image_path
 
 
@@ -2895,6 +2976,110 @@ def _build_comfyui_policy(
         "can_publish_default": promoted,
         "promote_to_default": promoted,
     }
+
+
+def run_comfyui_focal_enhance(
+    image_path: Path,
+    *,
+    focus_targets: list[str] | None = None,
+    brand: str = "fumei",
+    case_id: int | None = None,
+    output_dir: Path | None = None,
+) -> Path:
+    """M3 FOCAL — region-aware SDXL inpaint with per-target prompts.
+
+    This is the Step 2 helper for the 4-mode dispatch plan
+    (``~/.claude/plans/md-ai-4-mode-router.md``). Unlike
+    ``run_comfyui_inline_enhance`` which sent an empty focus_mask + the
+    default ``conservative`` strength + hardcoded prompts, this helper:
+
+      1. Generates a coarse focus mask from ``focus_targets`` via
+         ``focal_mask_generator.generate_focus_mask``.
+      2. Builds per-target positive + negative prompts via
+         ``focal_prompt_library.build_focal_prompts``.
+      3. Runs the dedicated ``portrait_focal_enhance_v1`` workflow with the
+         new ``focal`` strength (denoise=0.40, 20 steps, cfg=4.0).
+      4. Returns a stable PNG copy next to the input (same K-1 contract as
+         ``run_comfyui_inline_enhance``) — input on silent fail.
+
+    Resolution policy: downstream MediaPipeFaceMeshToSEGS + SAM in the v1
+    workflow refines the coarse ellipse mask into face geometry; we don't
+    need pixel-precise lip/eye contours from Python.
+    """
+    from .services.focal_mask_generator import generate_focus_mask
+    from .services.focal_prompt_library import build_focal_prompts
+
+    focus_targets = focus_targets or []
+    caller_provided_output_dir = output_dir is not None
+    if not caller_provided_output_dir:
+        import tempfile
+        output_dir = Path(tempfile.mkdtemp(prefix=".comfyui-focal-", dir=str(image_path.parent)))
+    else:
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+    mask_path: Path | None = None
+    try:
+        # 1. Generate focus mask
+        try:
+            mask_path = generate_focus_mask(image_path, focus_targets, output_path=output_dir / "focus_mask.png")
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning(
+                "ComfyUI focal enhance: focus mask generation failed for %s (%s); silent-fail",
+                image_path.name, exc,
+            )
+            return image_path
+
+        # 2. Build prompts
+        positive_prompt, negative_prompt = build_focal_prompts(focus_targets)
+
+        # 3. Run workflow
+        try:
+            run_result = _run_comfyui_workflow(
+                image_path,
+                output_dir=output_dir,
+                workflow_name="portrait_focal_enhance_v1",
+                workflow_parameters=dict(_COMFYUI_WORKFLOW_PARAMETERS["focal"]),
+                focus_mask_path=mask_path,
+                positive_prompt=positive_prompt,
+                negative_prompt=negative_prompt,
+            )
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning(
+                "ComfyUI focal enhance: workflow run failed for %s (case_id=%s brand=%s): %s",
+                image_path.name, case_id, brand, exc,
+            )
+            return image_path
+
+        generated_path_str = run_result.get("generated_path") if isinstance(run_result, dict) else None
+        if not generated_path_str:
+            LOGGER.warning(
+                "ComfyUI focal enhance: no generated_path for %s; silent-fail",
+                image_path.name,
+            )
+            return image_path
+        generated_path = Path(generated_path_str)
+        if not generated_path.is_file():
+            LOGGER.warning(
+                "ComfyUI focal enhance: generated_path %s does not exist; silent-fail",
+                generated_path,
+            )
+            return image_path
+
+        # 4. Promote to stable path (same K-1 contract as inline_enhance)
+        if not caller_provided_output_dir:
+            stable_path = image_path.parent / f".comfyui-focal-out-{int(time.time())}-{os.getpid()}-{image_path.name}.png"
+            shutil.copyfile(generated_path, stable_path)
+            return stable_path
+        return generated_path
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.warning(
+            "ComfyUI focal enhance: unexpected error for %s: %s",
+            image_path.name, exc,
+        )
+        return image_path
+    finally:
+        if not caller_provided_output_dir and output_dir is not None and output_dir.is_dir():
+            shutil.rmtree(output_dir, ignore_errors=True)
 
 
 def run_comfyui_local_after_simulation(
