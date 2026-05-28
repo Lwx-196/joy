@@ -388,3 +388,164 @@ def test_w6_baseline_stale_days_default_does_not_inject_override(
         f"absent flag must pass thresholds=None (BC); got "
         f"{captured_kwargs.get('thresholds')!r}"
     )
+
+
+# Wave 7 followup A-1 — --paused-stale-days CLI flag (symmetric W6-A) ------
+#
+# W7-A mirrors W6-A's contract one-for-one. Both flags now route through
+# `_inject_structured_field`, so any structural-routing footgun caught by
+# the W6 tests is automatically guarded for paused too. Tests below focus
+# on (a) W7-specific surface (--paused-stale-days), (b) helper extraction
+# correctness, and (c) the dual-flag combo case (both flags together must
+# both land in the override).
+
+
+def _fake_evaluator(captured: dict, recommendation: str = "continue"):
+    def _evaluate(*args: object, **kwargs: object) -> SLOReport:
+        captured.update(kwargs)
+        return SLOReport(
+            within_slo=True,
+            violations=[],
+            evidence={"comfyui_failure": {"rate": 0.01}},
+            recommendation=recommendation,
+            window_hours=int(kwargs.get("window_hours", 48)),
+            sample_size=100,
+        )
+    return _evaluate
+
+
+def test_w7_paused_stale_days_zero_rejected_at_cli(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """W7-A: --paused-stale-days 0 must EXIT_USAGE_ERROR=2 at CLI layer
+    (symmetric to W6-A baseline behavior)."""
+    exit_code = main(["--paused-stale-days", "0"])
+    captured = capsys.readouterr()
+    assert exit_code == EXIT_USAGE_ERROR
+    assert "--paused-stale-days must be positive integer" in captured.err
+
+
+def test_w7_paused_stale_days_negative_rejected_at_cli(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """W7-A: --paused-stale-days -3 must EXIT_USAGE_ERROR=2 (symmetric to W6-A)."""
+    exit_code = main(["--paused-stale-days", "-3"])
+    captured = capsys.readouterr()
+    assert exit_code == EXIT_USAGE_ERROR
+    assert "--paused-stale-days must be positive integer" in captured.err
+
+
+def test_w7_paused_stale_days_routes_through_structured_override(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """W7-A: --paused-stale-days N (alone) must construct a structured
+    override carrying top-level `paused_stale_days`, NOT misroute it into
+    the `thresholds` sub-dict. Mirror of the W6-A footgun test."""
+    captured_kwargs: dict[str, object] = {}
+    monkeypatch.setattr(
+        "backend.scripts.promotion_slo_check.evaluate_window",
+        _fake_evaluator(captured_kwargs),
+    )
+
+    exit_code = main(["--paused-stale-days", "14"])
+    capsys.readouterr()
+    assert exit_code == EXIT_OK
+
+    override = captured_kwargs.get("thresholds")
+    assert isinstance(override, dict), (
+        f"CLI must construct an override dict; got {override!r}"
+    )
+    assert "thresholds" in override or "baseline" in override, (
+        f"CLI override must trip the structured branch; got keys={list(override)}"
+    )
+    assert override["paused_stale_days"] == 14, (
+        f"override must carry top-level paused_stale_days=14; got {override!r}"
+    )
+    # Critically, the value must NOT be inside the `thresholds` sub-dict
+    # (where _merge_thresholds' flat branch would otherwise misroute it).
+    assert "paused_stale_days" not in override.get("thresholds", {}), (
+        "paused_stale_days must NOT be inside thresholds sub-dict "
+        "(would be silently no-op'd by the structured branch)"
+    )
+
+
+def test_w7_dual_flag_both_take_effect_together(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """W7-A: passing BOTH --baseline-stale-days AND --paused-stale-days
+    in one invocation must land BOTH in the override. Closes a regression
+    risk where the second helper call could clobber the first if the
+    structured-marker injection logic ran twice incorrectly."""
+    captured_kwargs: dict[str, object] = {}
+    monkeypatch.setattr(
+        "backend.scripts.promotion_slo_check.evaluate_window",
+        _fake_evaluator(captured_kwargs),
+    )
+
+    exit_code = main(
+        [
+            "--baseline-stale-days",
+            "75",
+            "--paused-stale-days",
+            "10",
+        ]
+    )
+    capsys.readouterr()
+    assert exit_code == EXIT_OK
+
+    override = captured_kwargs.get("thresholds")
+    assert isinstance(override, dict)
+    assert override.get("baseline_stale_days") == 75
+    assert override.get("paused_stale_days") == 10
+    # Structured marker still present, not duplicated (must be a dict).
+    assert isinstance(override.get("thresholds"), dict)
+
+
+def test_w7_inject_structured_field_helper_idempotent_marker() -> None:
+    """W7-A helper-unit test: _inject_structured_field must NOT clobber an
+    existing `thresholds` sub-dict (e.g. one loaded from --thresholds file)
+    when called a second time for a different field."""
+    from backend.scripts.promotion_slo_check import _inject_structured_field
+
+    # Start with a file-supplied override carrying real thresholds + baseline.
+    base_override = {
+        "thresholds": {"comfyui_failure_rate_max": 0.05},
+        "baseline": {"delivery_gate_rejection_rate": 0.10},
+    }
+    out = _inject_structured_field(base_override, "paused_stale_days", 14)
+    assert out["paused_stale_days"] == 14
+    # File-supplied thresholds preserved (not overwritten by empty marker).
+    assert out["thresholds"] == {"comfyui_failure_rate_max": 0.05}
+    assert out["baseline"] == {"delivery_gate_rejection_rate": 0.10}
+
+    # Second call for a different field augments rather than clobbers.
+    out2 = _inject_structured_field(out, "baseline_stale_days", 90)
+    assert out2["paused_stale_days"] == 14
+    assert out2["baseline_stale_days"] == 90
+    assert out2["thresholds"] == {"comfyui_failure_rate_max": 0.05}
+
+
+def test_w7_inject_structured_field_helper_creates_marker_from_none() -> None:
+    """W7-A helper-unit test: passing override=None creates a fresh
+    structured dict with empty thresholds marker + top-level field."""
+    from backend.scripts.promotion_slo_check import _inject_structured_field
+
+    out = _inject_structured_field(None, "paused_stale_days", 14)
+    assert out == {"thresholds": {}, "paused_stale_days": 14}
+
+
+def test_w7_inject_structured_field_helper_flat_dict_adds_marker() -> None:
+    """W7-A helper-unit test: passing a flat thresholds-only override
+    (rare but plausible from hand-built tests) must inject the empty
+    `thresholds` marker so _merge_thresholds takes the structured branch."""
+    from backend.scripts.promotion_slo_check import _inject_structured_field
+
+    flat = {"comfyui_failure_rate_max": 0.05}  # NO 'thresholds' or 'baseline' key
+    out = _inject_structured_field(flat, "paused_stale_days", 14)
+    assert out["paused_stale_days"] == 14
+    # Original flat fields preserved.
+    assert out["comfyui_failure_rate_max"] == 0.05
+    # Empty marker injected.
+    assert out["thresholds"] == {}
