@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-05-28T10:42:00+08:00",
+  "case_id": 126,
+  "brand": "fumei",
+  "template": "tri-compare",
+  "finding": "byte_identical_outputs_zero_ai_calls",
+  "pairs": [
+    {
+      "mode": "best-pair",
+      "job_id": 166,
+      "finished_at_db": "2026-05-10 13:54:38",
+      "best_pair_selection_id": 5,
+      "candidates_fingerprint_snapshot": "499e936ae8b46cefef3ca6a9166df4...",
+      "render_selection_plan_sha256_prefix": "765ffefb21ffc825",
+      "render_plan_sha256_prefix": "c64cf2dc3bcc5ca1",
+      "delivery_image_path": "delivery/phase-a/best-pair-fumei-job166.jpg",
+      "delivery_manifest_path": "delivery/phase-a/best-pair-fumei-job166.manifest.json",
+      "image_sha256": "e39bd3c28a05c040e28eaa6acf596c21d6f5c82a04ac5b44c5f028cd820a7680",
+      "image_size_bytes": 501897,
+      "backed_up_at": "2026-05-28T10:37:10+08:00",
+      "ai_usage_observed": {
+        "vlm_usage_log_calls_at_backup_time_window": null,
+        "note": "best-pair job 166 写入时未捕获 (历史数据), 但 manifest.semantic_summary 显示 pair_calls=0 final_calls=0"
+      }
+    },
+    {
+      "mode": "ai",
+      "job_id": 633,
+      "finished_at_db": "2026-05-28 02:40:11",
+      "best_pair_selection_id": null,
+      "candidates_fingerprint_snapshot": null,
+      "render_selection_plan_sha256_prefix": "4319caaa143c9e88",
+      "render_plan_sha256_prefix": "c055ff17b36b7342",
+      "delivery_image_path": "delivery/phase-a/ai-fumei-fresh-job633.jpg",
+      "delivery_manifest_path": "delivery/phase-a/ai-fumei-fresh-job633.manifest.json",
+      "image_sha256": "e39bd3c28a05c040e28eaa6acf596c21d6f5c82a04ac5b44c5f028cd820a7680",
+      "image_size_bytes": 501897,
+      "backed_up_at": "2026-05-28T10:40:34+08:00",
+      "ai_usage_observed": {
+        "ai_usage_used_after_enhancement": false,
+        "ai_usage_used_ai_padfill": false,
+        "semantic_judge_effective": "off",
+        "manifest_semantic_summary_pair_calls": 0,
+        "manifest_semantic_summary_final_calls": 0,
+        "vlm_usage_log_rows_2026_05_28_02_39_to_02_41": 0
+      }
+    }
+  ],
+  "comparison": {
+    "image_sha256_identical": true,
+    "image_size_identical": true,
+    "render_selection_plan_identical": false,
+    "render_plan_identical": false,
+    "ai_calls_made_in_either_mode": false,
+    "vlm_calls_made_in_either_mode": false
+  },
+  "phase_a_decision_gate_outcome": "byte_identical_unlisted_outcome_phase_b_cancelled",
+  "stop_reason": "Phase A 均质假设被实证破裂：ai mode 与 best-pair mode 输出 byte-identical 且双方均零 AI/VLM/ComfyUI 调用，盲评无差可比",
+  "next_action": "新 plan 接通 ComfyUI / Gemini image gen 到 ai render mode"
+}
