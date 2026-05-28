@@ -216,7 +216,14 @@ def test_s2_flag_true_promoted_uses_p2_comfyui_path(
     capture_p1_calls: list[dict],
     capture_p2_calls: list[dict],
 ) -> None:
-    """S-2: flag true + should_promote=True → calls P2 (run_comfyui_inline_enhance)."""
+    """S-2: flag true + should_promote=True + FOCAL routing signal → calls P2.
+
+    Post-4-mode-router: G1.A.i FOCAL path now requires an explicit routing
+    signal (focus_targets matching an anatomical keyword, ``focal_enhance``
+    tag, or ``meta_json.enhancement_mode=focal``). Plain ``["面部"]`` is no
+    longer a valid keyword (not in MD_ANATOMICAL_KEYWORDS) and would route
+    to POLISH via brand_default — masking the FOCAL dispatch contract.
+    """
     monkeypatch.setattr(render_queue, "_RENDER_AUTO_AI_ENABLED", True)
     monkeypatch.setattr(render_queue, "should_promote", lambda case_id: True)
 
@@ -225,7 +232,7 @@ def test_s2_flag_true_promoted_uses_p2_comfyui_path(
     queue._automate_md_ai_clinical_enhancements(
         render_case_dir=str(staging),
         brand="md_ai",
-        case_tags_json='["面部"]',
+        case_tags_json='["面颊"]',  # real MD_ANATOMICAL_KEYWORDS key → focus_targets non-empty → FOCAL
         manual_phase_lookup={},
         render_job_id=999,
         case_id=129,
@@ -294,7 +301,7 @@ def test_s4_flag_true_p2_raises_render_continues_audit_only(
         queue._automate_md_ai_clinical_enhancements(
             render_case_dir=str(staging),
             brand="md_ai",
-            case_tags_json='["面部"]',
+            case_tags_json='["面颊"]',  # real anatomical keyword → FOCAL routing
             manual_phase_lookup={},
             render_job_id=999,
             case_id=129,
@@ -346,7 +353,7 @@ def test_s5_flag_true_helper_internal_silent_fail_real_production_path(
         queue._automate_md_ai_clinical_enhancements(
             render_case_dir=str(staging),
             brand="md_ai",
-            case_tags_json='["面部"]',
+            case_tags_json='["面颊"]',  # real anatomical keyword → FOCAL routing
             manual_phase_lookup={},
             render_job_id=999,
             case_id=129,

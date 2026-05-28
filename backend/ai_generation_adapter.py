@@ -2661,6 +2661,120 @@ def run_direct_clinical_enhancement(
     return image_path
 
 
+def run_clinical_archive_pipeline(
+    image_path: Path,
+    *,
+    output_dir: Path | None = None,
+    apply_white_balance: bool = False,
+) -> Path:
+    """M2 — Clinical archive raw pipeline (NO AI).
+
+    Per the 4-mode dispatch plan (~/.claude/plans/md-ai-4-mode-router.md), this
+    is the "preserve clinical reality" path. It performs ONLY non-destructive
+    corrections — never alters facial features, skin texture, or anatomy.
+
+    Operations:
+      1. EXIF orientation transpose (``PIL.ImageOps.exif_transpose``) — fixes
+         photos shot in landscape that should display portrait (case 140 was
+         a real example from L2 validation).
+      2. Optional gray-world LAB white balance (env-gated via
+         ``apply_white_balance``) — normalises clinic lighting drift WITHOUT
+         touching pixel-level facial detail.
+
+    Silent-fail contract: on any error, returns input ``image_path`` unchanged
+    so the caller dispatch can fall back to logging a warning. Same contract as
+    ``run_direct_clinical_enhancement`` and ``run_comfyui_inline_enhance``.
+    """
+    try:
+        from PIL import Image, ImageOps
+    except ImportError:  # pragma: no cover  — defensive; PIL is a hard dep
+        LOGGER.warning("Pillow not importable; clinical archive pipeline disabled")
+        return image_path
+
+    if not image_path.is_file():
+        return image_path
+
+    caller_provided_output_dir = output_dir is not None
+    if not caller_provided_output_dir:
+        import tempfile
+        output_dir = Path(tempfile.mkdtemp(prefix=".archive-pipeline-", dir=str(image_path.parent)))
+    else:
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        with Image.open(image_path) as raw:
+            # PIL's exif_transpose returns a NEW image with orientation
+            # baked in (and the orientation tag stripped) — exactly what we
+            # want for an archive that's safe to consume by downstream pipelines
+            # that may not honour EXIF rotation tags.
+            transposed = ImageOps.exif_transpose(raw)
+
+            if apply_white_balance:
+                transposed = _archive_apply_white_balance(transposed)
+
+            if transposed.mode != "RGB":
+                transposed = transposed.convert("RGB")
+
+            # Output PNG (lossless) to preserve byte-identicality if no edits
+            # actually fired, while still allowing diff inspection. Suffix
+            # ``.archive.png`` distinguishes from raw inputs.
+            output_path = output_dir / f"{image_path.stem}.archive.png"
+            transposed.save(output_path, format="PNG", optimize=True)
+
+        if not caller_provided_output_dir:
+            # Promote to stable path next to input (mirrors K-1 contract for
+            # ``run_comfyui_inline_enhance``); auto-cleaned tempdir below.
+            stable_path = image_path.parent / f".archive-out-{int(time.time())}-{os.getpid()}-{image_path.stem}.png"
+            shutil.copyfile(output_path, stable_path)
+            return stable_path
+        return output_path
+    except Exception as exc:  # noqa: BLE001 — silent-fail contract
+        LOGGER.warning(
+            "Clinical archive pipeline failed for %s (%s); returning input",
+            image_path, exc,
+        )
+        return image_path
+    finally:
+        if not caller_provided_output_dir and output_dir is not None and output_dir.is_dir():
+            shutil.rmtree(output_dir, ignore_errors=True)
+
+
+def _archive_apply_white_balance(image):
+    """Conservative gray-world LAB white balance.
+
+    Computes the mean of the a* and b* channels and shifts them toward the
+    neutral point (128 in LAB 8-bit encoding). Does NOT modify the L channel
+    so brightness is preserved. Safe for clinical record photos because the
+    operation is global + linear — no localised pixel content alteration.
+
+    Returns the image unchanged on any error (silent-fail).
+
+    Implementation note: uses a 256-element LUT passed to ``point()`` instead
+    of a per-pixel lambda. The lambda form is ~1000x slower on 480p images
+    (~95s vs ~0.05s) because it triggers a Python call per pixel.
+    """
+    try:
+        from PIL import Image
+        if image.mode != "RGB":
+            image = image.convert("RGB")
+        lab = image.convert("LAB")
+        from PIL.ImageStat import Stat
+        stat = Stat(lab)
+        a_mean, b_mean = stat.mean[1], stat.mean[2]
+        l_band, a_band, b_band = lab.split()
+        # Build 256-element LUTs for each channel shift — point() applies the
+        # LUT in C, no Python callbacks per pixel.
+        a_shift = int(round(a_mean - 128))
+        b_shift = int(round(b_mean - 128))
+        a_lut = [max(0, min(255, v - a_shift)) for v in range(256)]
+        b_lut = [max(0, min(255, v - b_shift)) for v in range(256)]
+        a_band = a_band.point(a_lut)
+        b_band = b_band.point(b_lut)
+        return Image.merge("LAB", (l_band, a_band, b_band)).convert("RGB")
+    except Exception:  # noqa: BLE001
+        return image
+
+
 def run_comfyui_inline_enhance(
     image_path: Path,
     *,

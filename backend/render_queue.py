@@ -40,6 +40,7 @@ from pathlib import Path
 from typing import Any, AsyncIterator, Callable
 
 from . import _job_pool, ai_generation_adapter, audit, db, render_executor, render_quality, skill_bridge, source_images, source_selection, stress
+from .services import md_ai_mode_router
 from .services import vlm_source_classifier as _vlm_source_classifier
 from .services.promotion_manifest_loader import should_promote
 
@@ -1607,60 +1608,104 @@ class RenderQueue:
         manual_phase_lookup: dict[str, str] | None = None,
         render_job_id: int | None = None,
         case_id: int | None = None,
+        template: str | None = None,
+        render_job_meta_json: str | None = None,
     ) -> None:
-        """Scan render_case_dir for 'after' images and trigger AI enhancement for md_ai.
+        """Scan render_case_dir for 'after' images and dispatch by enhancement mode.
 
-        Phase resolution priority:
-          1. manual_phase_lookup[entry.name] — operator override from case_image_overrides
+        Mode dispatch (per ~/.claude/plans/md-ai-4-mode-router.md, 2026-05-28):
+          - resolve_mode() returns one of POLISH/ARCHIVE/FOCAL/COMPOSITE/REJECTED
+          - POLISH    → P1 run_direct_clinical_enhancement (external API)
+          - ARCHIVE   → run_clinical_archive_pipeline (PIL EXIF + WB, no AI)
+          - FOCAL     → run_comfyui_inline_enhance with G1.A.i gates
+                        (env flag + should_promote rollout safety); fallback to
+                        POLISH if rollout gates reject the case.
+          - COMPOSITE → return immediately (layout pipeline runs in
+                        render_executor.run_render — no per-image enhancement)
+          - REJECTED  → log warn + skip; fail-closed.
+
+        Phase resolution priority (unchanged):
+          1. manual_phase_lookup[entry.name] — operator override
           2. source_images._phase_from_filename(entry.name) — filename token fallback
-
-        G1.A.i dispatch logic (per 2026-05-28 design doc):
-          - default (flag false) → P1 run_direct_clinical_enhancement (Node.js PS + external API)
-          - flag true + should_promote(case_id) → P2 run_comfyui_inline_enhance (ComfyUI local)
-          - flag true + shadow / not-promoted → P1 fallback (preserves BC for unpromoted cases)
         """
-        if brand not in ("md_ai", "meiji_ai"):
-            return
-
-        tags = []
+        # Extract focus targets from tags (anatomical keyword cross-reference)
+        # — kept inline (not router responsibility) because the keyword list
+        # lives in ai_generation_adapter.
+        tags: list = []
         if case_tags_json:
             try:
-                tags = json.loads(case_tags_json)
+                parsed = json.loads(case_tags_json)
+                if isinstance(parsed, list):
+                    tags = parsed
             except (ValueError, TypeError):
                 tags = []
 
-        # Extract focus targets from tags by cross-referencing with anatomical keywords
-        focus_targets = []
-        if isinstance(tags, list):
-            for tag in tags:
-                tag_str = str(tag)
-                for key in ai_generation_adapter.MD_ANATOMICAL_KEYWORDS:
-                    if key in tag_str:
-                        focus_targets.append(key)
+        focus_targets: list[str] = []
+        for tag in tags:
+            tag_str = str(tag)
+            for key in ai_generation_adapter.MD_ANATOMICAL_KEYWORDS:
+                if key in tag_str:
+                    focus_targets.append(key)
+        focus_targets = list(dict.fromkeys(focus_targets))  # dedupe, preserve order
 
-        # Deduplicate
-        focus_targets = list(dict.fromkeys(focus_targets))
-
-        # G1.A.i: decide ComfyUI path eligibility once per render (case-level)
-        use_comfyui_inline = (
-            _RENDER_AUTO_AI_ENABLED
-            and case_id is not None
-            and should_promote(int(case_id))
+        # Resolve the enhancement mode via the central router.
+        decision = md_ai_mode_router.resolve_mode(
+            case_tags_json=case_tags_json,
+            render_job_meta_json=render_job_meta_json,
+            focus_targets=focus_targets,
+            brand=brand,
+            template=template,
+        )
+        LOGGER.info(
+            "MD-AI mode router decision: mode=%s reason=%s detail=%s "
+            "(case_id=%s render_job_id=%s brand=%s)",
+            decision.mode.value, decision.reason, decision.detail,
+            case_id, render_job_id, brand,
         )
 
-        # Scan for 'after' images in the staging directory
+        # COMPOSITE: layout-only path runs in render_executor (M4). No per-image work here.
+        if decision.mode == md_ai_mode_router.EnhancementMode.COMPOSITE:
+            return
+
+        # REJECTED: fail-closed. Operator must clarify case tags / brand defaults.
+        if decision.mode == md_ai_mode_router.EnhancementMode.REJECTED:
+            LOGGER.warning(
+                "MD-AI mode REJECTED for case_id=%s brand=%s — skipping enhancement. "
+                "Operator must set tags_json or extend brand_default map. Detail: %s",
+                case_id, brand, decision.detail,
+            )
+            return
+
+        # For FOCAL, apply G1.A.i rollout gates (env flag + should_promote bucket).
+        # If gates reject, fall back to POLISH so unpromoted cases still get the
+        # legacy P1 path (preserves BC during gradual rollout).
+        effective_mode = decision.mode
+        if effective_mode == md_ai_mode_router.EnhancementMode.FOCAL:
+            focal_allowed = (
+                _RENDER_AUTO_AI_ENABLED
+                and case_id is not None
+                and should_promote(int(case_id))
+            )
+            if not focal_allowed:
+                LOGGER.info(
+                    "MD-AI FOCAL rollout gate rejected case_id=%s "
+                    "(flag=%s, should_promote=%s); falling back to POLISH",
+                    case_id, _RENDER_AUTO_AI_ENABLED,
+                    case_id is not None and should_promote(int(case_id)) if case_id is not None else False,
+                )
+                effective_mode = md_ai_mode_router.EnhancementMode.POLISH
+
+        # Scan for 'after' images in the staging directory.
         staging_path = Path(render_case_dir)
         if not staging_path.is_dir():
             return
 
+        path_label = effective_mode.value  # "polish" / "archive" / "focal"
+
         for entry in staging_path.iterdir():
             if not entry.is_file():
                 continue
-            # K-2 hardening: skip dotfile residue (.comfyui-inline-* / .comfyui-out-*
-            # auto-tempdir cleanup contracts in run_comfyui_inline_enhance) and
-            # enhanced_ prefixed temp files left behind by prior interrupted runs.
-            # Without this, residue from earlier crashed renders would be
-            # double-enhanced on next attempt.
+            # K-2 hardening (preserved): skip dotfile residue + enhanced_ temp files.
             if entry.name.startswith(".") or entry.name.startswith("enhanced_"):
                 continue
 
@@ -1672,56 +1717,61 @@ class RenderQueue:
                     phase = override
             if phase is None:
                 phase = source_images._phase_from_filename(entry.name)
-            if phase == "after":
-                LOGGER.info(
-                    "Triggering automated MD-AI clinical enhancement for %s (path=%s)",
-                    entry.name, "comfyui-inline" if use_comfyui_inline else "ps-direct",
-                )
-                try:
-                    if use_comfyui_inline:
-                        # G1.A.i — ComfyUI local inline enhance (lightweight P2 swap)
-                        enhanced_path = ai_generation_adapter.run_comfyui_inline_enhance(
-                            entry,
-                            focus_targets=focus_targets,
-                            brand=brand,
-                            case_id=case_id,
-                        )
-                    else:
-                        # P1 default — Node.js PS direct (external API)
-                        enhanced_path = ai_generation_adapter.run_direct_clinical_enhancement(
-                            entry,
-                            brand=brand,
-                            focus_targets=focus_targets,
-                        )
-                    if enhanced_path != entry and enhanced_path.is_file():
-                        # Replace original in staging with enhanced version
-                        temp_enhanced = staging_path / f"enhanced_{entry.name}"
-                        shutil.copyfile(enhanced_path, temp_enhanced)
-                        os.replace(temp_enhanced, entry)
-                        LOGGER.info("MD-AI enhancement applied to %s", entry.name)
-                    elif enhanced_path == entry:
-                        # The adapter swallows subprocess failures (returncode != 0,
-                        # empty stdout, TimeoutExpired, parse errors) and returns
-                        # the input path. From here we cannot distinguish silent
-                        # failure from a legitimate no-op success. Surface the
-                        # ambiguity so bulk runs can be audited via grep.
-                        LOGGER.warning(
-                            "MD-AI enhancement returned original path for %s "
-                            "(silent adapter swallow — either failure or no-op)",
-                            entry.name,
-                        )
-                    else:
-                        # Adapter claimed a non-original path but it doesn't exist
-                        # on disk — broken contract from the node script.
-                        LOGGER.warning(
-                            "MD-AI enhancement reported %s but file is missing",
-                            enhanced_path,
-                        )
-                except Exception as exc:
-                    LOGGER.warning(
-                        "MD-AI enhancement raised %s for %s: %s",
-                        type(exc).__name__, entry.name, exc,
+            if phase != "after":
+                continue
+
+            LOGGER.info(
+                "Triggering MD-AI enhancement for %s (mode=%s)",
+                entry.name, path_label,
+            )
+            try:
+                if effective_mode == md_ai_mode_router.EnhancementMode.FOCAL:
+                    enhanced_path = ai_generation_adapter.run_comfyui_inline_enhance(
+                        entry,
+                        focus_targets=focus_targets,
+                        brand=brand,
+                        case_id=case_id,
                     )
+                elif effective_mode == md_ai_mode_router.EnhancementMode.ARCHIVE:
+                    enhanced_path = ai_generation_adapter.run_clinical_archive_pipeline(
+                        entry,
+                    )
+                else:  # POLISH (default md_ai/meiji_ai BC path)
+                    enhanced_path = ai_generation_adapter.run_direct_clinical_enhancement(
+                        entry,
+                        brand=brand,
+                        focus_targets=focus_targets,
+                    )
+
+                if enhanced_path != entry and enhanced_path.is_file():
+                    # Replace original in staging with enhanced version
+                    temp_enhanced = staging_path / f"enhanced_{entry.name}"
+                    shutil.copyfile(enhanced_path, temp_enhanced)
+                    os.replace(temp_enhanced, entry)
+                    LOGGER.info(
+                        "MD-AI enhancement applied to %s (mode=%s)",
+                        entry.name, path_label,
+                    )
+                elif enhanced_path == entry:
+                    # Helper swallows subprocess / pipeline failures and returns
+                    # the input path. Surface the ambiguity so bulk runs can be
+                    # audited via grep.
+                    LOGGER.warning(
+                        "MD-AI enhancement returned original path for %s (mode=%s) "
+                        "(silent fail — either error or no-op)",
+                        entry.name, path_label,
+                    )
+                else:
+                    # Helper claimed a non-original path but file missing — broken contract.
+                    LOGGER.warning(
+                        "MD-AI enhancement reported %s but file is missing (mode=%s)",
+                        enhanced_path, path_label,
+                    )
+            except Exception as exc:
+                LOGGER.warning(
+                    "MD-AI enhancement raised %s for %s (mode=%s): %s",
+                    type(exc).__name__, entry.name, path_label, exc,
+                )
 
     def _execute_render_impl(
         self,
@@ -1998,6 +2048,8 @@ class RenderQueue:
                 manual_phase_lookup=manual_phase_lookup,
                 render_job_id=job_id,
                 case_id=case_id,
+                template=template,
+                render_job_meta_json=(row["meta_json"] if "meta_json" in row.keys() else None),
             )
 
         # 2. Run the heavy subprocess.
