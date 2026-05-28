@@ -18,7 +18,7 @@ connectivity-audit (PR #28) 描述的 3-gate chain 是正确的 — G1/G2/G3 都
 |---|---|---|
 | 6.1.1 probe ComfyUI 装在哪 | ✅ done | `/Users/a1234/Desktop/飞书Claude/ComfyUI`（image-workbench 项目共享），完整安装 + .venv/ + models/ + custom_nodes/ |
 | 6.1.2 启动 ComfyUI 服务 | ✅ done | PID 91129 / mps device 34GB VRAM / py3.12.13 / pytorch 2.11 / ComfyUI 0.21.0 / curl /system_stats HTTP 200 |
-| 6.1.3 写 shadow manifest | ✅ done | `case-workbench-ai/promotion/manifest.json` schema_v1 + state="shadow" + scope="canary" + 4 bindings sha256 from `compute_manifest_hashes` / `--validate OK` / `should_promote(任意 case)=False` 但 candidate path 打通 |
+| 6.1.3 ~~写~~ **验证** shadow manifest | ✅ done（**errata: 见 §9**）| 在 phase-a worktree 写 manifest 后实际发现 origin/main **已有 manifest.json**（schema_v1 + state="shadow" + scope="production" + approver=null placeholder，自某 wave 起 tracked）；恢复回 origin/main 内容后 `should_promote=False` 行为不变，所以 6.1.3 实际是"验证 G2 一直是过的"不是"新写" |
 | 6.1.4 fresh md_ai render | ⚠️ done_with_issues | job 634 case_id=129 brand=md_ai 跑 489s (8 分钟) done_with_issues |
 | 6.1.5 验证 ComfyUI 真触发 | ❌ **NOT TRIGGERED** | `ai_usage.used_after_enhancement=false` / ComfyUI `/history` 0 entries / `vlm_usage_log` 时间窗 0 行 / `case-workbench-ai/candidates/` 空 / `ab_runs/` 无新 artifact |
 
@@ -155,10 +155,28 @@ PR #28 `delivery/comfyui-connectivity-audit.md` 的 3-gate chain **位置正确*
 - Phase A ref: `delivery/phase-a-evidence-report.md` (PR #27 `6756e2a`)
 - 当前 manifest: `case-workbench-ai/promotion/manifest.json`（worktree-only，未进 git 因 sidecar runtime state）
 
-## 8. Reviewer 复核路径
+## 9. Errata — 修订 PR #28 audit 关于 G2 manifest 的描述
+
+**Audit (PR #28) 错误描述**："`case-workbench-ai/promotion/manifest.json` 文件缺失"
+
+**实证修正**：origin/main 上**已经 tracked**（commit hash `f03ba2e`，schema_v1 + state="shadow" + scope="production" + approver/approved_at/expires_at=null + bindings 4 项 sha256 + rollback_baseline placeholder + 详细 notes 字段）。`.gitignore:35-37` 显式 `!case-workbench-ai/promotion/` exception 让 manifest 进 git。
+
+**原 audit 在 phase-a worktree 上跑 `ls` 时**worktree 落后 main 56 commits（W9 之前的 vlm-phase2 fork point），那时 manifest 还没 commit 进 main。Audit 应该在 fresh worktree 从 origin/main 拉再 ls。
+
+**对 6.1 finding 的影响**：G2 manifest gate **一直是过的**（state=shadow → fail-closed shadow path 工作正常）。**问题完全不在 G2**，**全在 P1/P2 二分**（production md_ai 走 Node.js PS path，不走 ComfyUI）。修正后 audit 3-gate chain 简化为：
+
+| Gate | 修正状态 |
+|---|---|
+| G1 brand gate | 仍未过 fumei（设计正确） |
+| G2 promotion manifest | ✅ **一直在场** state=shadow，与 P2 ComfyUI 触发模型无关 |
+| G3 ComfyUI 服务 | 6.1.2 之前未起，现已起（PID 91129） |
+
+**真正的根因始终是 production 不调 ComfyUI 入口（P2 path），不是任何 gate**。
+
+## 10. Reviewer 复核路径（原 §8）
 
 1. `curl -sm 3 http://127.0.0.1:8188/system_stats | jq .system.comfyui_version` → "0.21.0"
-2. `cat case-workbench-ai/promotion/manifest.json | jq .promotion_state` → "shadow"
+2. `git show origin/main:case-workbench-ai/promotion/manifest.json | jq .promotion_state` → "shadow"（验证 manifest 在 main，errata §9）
 3. `sqlite3 case-workbench.db "SELECT meta_json FROM render_jobs WHERE id=634;" | jq .ai_usage.used_after_enhancement` → false
 4. `curl http://127.0.0.1:8188/history` → `{}` (0 entries)
 5. `grep -n "run_direct_clinical_enhancement\|run_comfyui_local_after_simulation" backend/ai_generation_adapter.py` → 实证两 entry 独立
