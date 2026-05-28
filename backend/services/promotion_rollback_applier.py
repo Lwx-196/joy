@@ -110,6 +110,13 @@ REASON_NO_MANIFEST = "no_manifest"
 REASON_APPLIED = "rollback_applied"
 REASON_DRY_RUN = "dry_run"
 REASON_CONCURRENT_APPLY = "concurrent_apply_in_progress"
+# Wave 10 eval M-3 — baseline_unmeasured short-circuit.
+# When the SLO report recommends 'rollback' but the ONLY violation is
+# ``baseline_unmeasured`` (i.e., placeholder thresholds, no real metric
+# breach), rolling back would discard a healthy promotion state because
+# the operator hasn't yet calibrated. The right action is to alert the
+# operator to run ``calibrate_slo_baseline``, NOT to revert the manifest.
+REASON_BASELINE_UNMEASURED_ONLY = "baseline_unmeasured_only_no_real_breach"
 # K-5: stop-loss alert — audit row written, manifest untouched, operator
 # review required.
 REASON_STOP_LOSS_HALT_ALERT = "stop_loss_halt_alert"
@@ -358,6 +365,28 @@ def apply_rollback_decision(
             dry_run=dry_run,
             warning=f"unrecognized recommendation {rec!r}; treating as no-op",
         )
+
+    # Wave 10 eval M-3: short-circuit when the ONLY violation is
+    # ``baseline_unmeasured`` (placeholder thresholds, not a real SLO breach).
+    # Rolling back here would punish operators for an un-calibrated baseline
+    # rather than for an actual quality regression — the correct response is
+    # to run ``calibrate_slo_baseline --apply``, not revert the manifest.
+    violations = dec.get("violations") or []
+    if isinstance(violations, list) and violations:
+        dims = {str((v or {}).get("dimension") or "") for v in violations if isinstance(v, dict)}
+        if dims == {"baseline_unmeasured"}:
+            return _result(
+                applied=False,
+                reason=REASON_BASELINE_UNMEASURED_ONLY,
+                recommendation=rec,
+                dry_run=dry_run,
+                warning=(
+                    "rollback recommendation triggered by baseline_unmeasured alone "
+                    "(no real metric breach); run "
+                    "`python -m backend.scripts.calibrate_slo_baseline --window <N> --apply` "
+                    "to compute a real baseline. Manifest left untouched."
+                ),
+            )
 
     # 2) rec=='rollback' — load manifest and inspect current state.
     manifest = _manifest.load_manifest(target_path)
