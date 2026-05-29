@@ -1734,11 +1734,28 @@ def run_render(
     if not out:
         raise RuntimeError("render subprocess produced empty output")
     try:
-        return json.loads(out)
+        result = json.loads(out)
     except json.JSONDecodeError as e:
         raise RuntimeError(
             f"render output not valid JSON: {e}; first 500 chars: {out[:500]}"
         )
+    _maybe_annotate_board(out_root, result)
+    return result
+
+
+def _maybe_annotate_board(out_root: Path, result: dict[str, Any]) -> None:
+    """内部 QA 件（env-gated，默认关）：成品 board 旁另存带治疗区标注副本。
+
+    CASE_WORKBENCH_ANNOTATE_BOARD=1 开启。**绝不破坏渲染**：缺模型/失败都吞掉，
+    只在 result 写 board_annotation 状态。成品 final-board.jpg 不动。
+    """
+    if os.environ.get("CASE_WORKBENCH_ANNOTATE_BOARD", "").strip().lower() not in ("1", "true", "yes"):
+        return
+    try:
+        from backend.services import board_annotator
+        result["board_annotation"] = board_annotator.annotate_render_output(out_root)
+    except Exception as e:  # noqa: BLE001 — 内部 QA 件失败不影响主渲染产物
+        result["board_annotation"] = {"status": "error", "reason": str(e)[:200]}
 
 
 def run_manual_render_preview(
