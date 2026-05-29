@@ -43,6 +43,9 @@ def test_resolve_region_key():
     # substring from a procedure folder name
     assert atlas.resolve_region_key("玻尿酸注射面颊，下巴") == "面颊"
     assert atlas.resolve_region_key("童颜针全脸") is None
+    # 口语「脸颊」= 面颊（真实库批量验证抓到的 alias 缺口）
+    assert atlas.resolve_region_key("脸颊") == "面颊"
+    assert atlas.extract_regions("2025.7.30脸颊") == ["面颊"]
 
 
 def test_phase1_new_regions_present_and_resolve():

@@ -194,7 +194,7 @@ FACIAL_REGION_ATLAS: dict[str, dict[str, Any]] = {
 REGION_ALIASES: dict[str, str] = {
     "tear_trough": "泪沟", "undereye": "泪沟",
     "lip": "唇", "lips": "唇", "嘴": "唇", "丰唇": "唇",
-    "cheek": "面颊", "malar": "苹果肌",
+    "cheek": "面颊", "脸颊": "面颊", "malar": "苹果肌",
     "nasolabial": "法令纹",
     "chin": "下巴", "jaw": "下颌线", "jawline": "下颌线",
     "nose": "鼻尖", "zygomatic": "颧骨", "cheekbone": "颧骨",
