@@ -18,6 +18,7 @@ Usage:
 from __future__ import annotations
 
 import json
+import logging
 import os
 import signal
 import shutil
@@ -1746,15 +1747,30 @@ def run_render(
 def _maybe_annotate_board(out_root: Path, result: dict[str, Any]) -> None:
     """内部 QA 件（env-gated，默认关）：成品 board 旁另存带治疗区标注副本。
 
-    CASE_WORKBENCH_ANNOTATE_BOARD=1 开启。**绝不破坏渲染**：缺模型/失败都吞掉，
+    CASE_WORKBENCH_ANNOTATE_BOARD=1 开启。**绝不破坏渲染**：缺依赖/缺模型/失败都吞掉，
     只在 result 写 board_annotation 状态。成品 final-board.jpg 不动。
+
+    标注需重 CV 依赖（numpy/cv2/mediapipe），按设计**不在** backend venv（requirements
+    只有 Pillow）。在缺依赖的解释器里开启此 hook → status="skipped"（非 error，区分
+    「部署没装依赖」与「运行时模型缺失/标注失败」）；生产标注请在带 CV 依赖的解释器下跑
+    `python -m backend.scripts.annotate_board`。
     """
     if os.environ.get("CASE_WORKBENCH_ANNOTATE_BOARD", "").strip().lower() not in ("1", "true", "yes"):
         return
     try:
         from backend.services import board_annotator
+    except ImportError as e:
+        logging.getLogger(__name__).info(
+            "board annotation skipped: CV deps unavailable in this interpreter (%s)", e)
+        result["board_annotation"] = {
+            "status": "skipped",
+            "reason": f"annotation deps unavailable in this interpreter: {e}",
+        }
+        return
+    try:
         result["board_annotation"] = board_annotator.annotate_render_output(out_root)
     except Exception as e:  # noqa: BLE001 — 内部 QA 件失败不影响主渲染产物
+        logging.getLogger(__name__).warning("board annotation failed: %s", e)
         result["board_annotation"] = {"status": "error", "reason": str(e)[:200]}
 
 
