@@ -22,7 +22,9 @@ from backend.services import board_annotator as ba  # noqa: E402
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out-root", required=True, help="render 产出目录（含 final-board.jpg）")
-    ap.add_argument("--model", default=None, help="face_landmarker.task（缺省用 env / 开发 fallback）")
+    ap.add_argument("--model", default=None,
+                    help="face_landmarker.task（缺省用 CASE_WORKBENCH_FACEMESH_MODEL；"
+                         "/tmp dev fallback 需 CASE_WORKBENCH_ALLOW_DEV_MODEL=1）")
     args = ap.parse_args()
 
     res = ba.annotate_render_output(args.out_root, model_path=args.model)

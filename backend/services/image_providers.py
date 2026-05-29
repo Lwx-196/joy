@@ -16,7 +16,9 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
-DEFAULT_ENV_FILE = "/Users/a1234/Desktop/飞书Claude/claude-feishu-bridge/.env"
+# 默认从 PANEL_ENV_FILE 取（dev 机 export 一次即可）；不硬编码个人绝对路径。
+# 生产/CI 必须显式传 --env-file 或设 PANEL_ENV_FILE。
+DEFAULT_ENV_FILE = os.environ.get("PANEL_ENV_FILE", "")
 DEFAULT_TIMEOUT_MS = 120_000
 
 
@@ -40,11 +42,12 @@ def load_env_file(path: str | None = None) -> dict[str, str]:
     out: dict[str, str] = {}
     if not os.path.isfile(path):
         return out
-    for line in open(path, encoding="utf-8"):
-        line = line.strip()
-        if line and not line.startswith("#") and "=" in line:
-            k, v = line.split("=", 1)
-            out[k.strip()] = v.strip()
+    with open(path, encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, v = line.split("=", 1)
+                out[k.strip()] = v.strip()
     return out
 
 

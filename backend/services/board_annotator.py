@@ -21,9 +21,11 @@ from backend.services import case_material_coverage as cov
 from backend.services import facial_region_atlas as atlas
 from backend.services import treatment_zone_panel as tzp
 
-# 生产须 vendor 模型并设此 env；缺省指开发期 asset（ephemeral /tmp）。
+# 生产须 vendor 模型并设此 env；缺省指开发期 asset（ephemeral /tmp，world-writable）。
 DEFAULT_MODEL_ENV = "CASE_WORKBENCH_FACEMESH_MODEL"
 _DEV_MODEL_FALLBACK = "/tmp/focal-p4-asset/face_landmarker.task"
+# /tmp dev asset 是 world-writable（可被本地投毒）→ 仅显式 opt-in 才纳入回落链。
+ALLOW_DEV_MODEL_ENV = "CASE_WORKBENCH_ALLOW_DEV_MODEL"
 
 
 def multiface_landmarks(image_bgr: np.ndarray, model_path: str,
@@ -89,8 +91,15 @@ def annotate_board(board_bgr: np.ndarray, focus_text: str, model_path: str,
 
 
 def resolve_model_path(explicit: str | None = None) -> str | None:
-    """模型路径：显式 > env CASE_WORKBENCH_FACEMESH_MODEL > 开发 fallback；不存在返回 None。"""
-    for cand in (explicit, os.environ.get(DEFAULT_MODEL_ENV), _DEV_MODEL_FALLBACK):
+    """模型路径：显式 > env CASE_WORKBENCH_FACEMESH_MODEL > 开发 fallback（仅 opt-in）；不存在返回 None。
+
+    /tmp dev asset 是 world-writable，生产不该静默回落到可被本地投毒的路径 →
+    仅当显式 CASE_WORKBENCH_ALLOW_DEV_MODEL=1（本地 dev）才把它纳入候选链。
+    """
+    cands: list[str | None] = [explicit, os.environ.get(DEFAULT_MODEL_ENV)]
+    if os.environ.get(ALLOW_DEV_MODEL_ENV, "").strip().lower() in ("1", "true", "yes"):
+        cands.append(_DEV_MODEL_FALLBACK)
+    for cand in cands:
         if cand and os.path.isfile(cand):
             return cand
     return None
@@ -105,15 +114,38 @@ def _focus_from_manifest(manifest: dict, out_root: Path) -> str:
     return os.path.basename(case_dir.rstrip("/")) if case_dir else ""
 
 
+def _atomic_imwrite(out_path: Path, image: np.ndarray) -> bool:
+    """imencode → temp → os.replace 原子落地，避免 max_workers>1 下同 out_root 并发交叠写半截 JPEG。
+
+    格式由 ".jpg" 参数定（非 tmp 文件名扩展名）。返回是否成功
+    （False = 编码失败 / 磁盘满 / 权限，调用方应转 status=error）。
+    """
+    import cv2
+
+    ok, buf = cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, 92])
+    if not ok:
+        return False
+    tmp = out_path.with_name(out_path.name + f".tmp.{os.getpid()}")
+    try:
+        tmp.write_bytes(buf.tobytes())
+        os.replace(str(tmp), str(out_path))
+    except OSError:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return False
+    return True
+
+
 def annotate_render_output(out_root: str | Path, *, model_path: str | None = None,
                            board_name: str = "final-board.jpg") -> dict:
     """读 render 产出目录(final-board.jpg + manifest.final.json) → 写 final-board.annotated.jpg。
 
     内部 QA 件：成品 board 不动，另存带标注副本。返回 {status, annotated_path?, detail?, reason?}。
-    任何缺失/失败都不抛（不破坏调用方渲染流程），用 status 表达。
+    任何缺失/失败都不抛（含 cv2 缺失/检测异常/写盘失败），用 status 表达——直接调用方
+    （CLI / focal_p4 工具）无需自带 try/except，渲染流程不会被打断。
     """
-    import cv2
-
     out_root = Path(out_root)
     board_path = out_root / board_name
     manifest_path = out_root / "manifest.final.json"
@@ -122,24 +154,30 @@ def annotate_render_output(out_root: str | Path, *, model_path: str | None = Non
     model = resolve_model_path(model_path)
     if not model:
         return {"status": "skipped", "reason": "facemesh model unavailable"}
-    focus = ""
-    if manifest_path.is_file():
-        try:
-            focus = _focus_from_manifest(json.loads(manifest_path.read_text("utf-8")), out_root)
-        except (json.JSONDecodeError, OSError):
-            focus = ""
-    if not focus:
-        focus = os.path.basename(str(out_root))
-    board = cv2.imread(str(board_path))
-    if board is None:
-        return {"status": "skipped", "reason": "board unreadable"}
-    annotated, detail = annotate_board(board, focus, model)
-    if not detail:
-        return {"status": "no-annotation", "reason": "no known region / no before-face",
-                "focus": focus}
-    out_path = out_root / "final-board.annotated.jpg"
-    cv2.imwrite(str(out_path), annotated, [cv2.IMWRITE_JPEG_QUALITY, 92])
-    return {"status": "ok", "annotated_path": str(out_path), "detail": detail, "focus": focus}
+    try:
+        import cv2
+
+        focus = ""
+        if manifest_path.is_file():
+            try:
+                focus = _focus_from_manifest(json.loads(manifest_path.read_text("utf-8")), out_root)
+            except (json.JSONDecodeError, OSError):
+                focus = ""
+        if not focus:
+            focus = os.path.basename(str(out_root))
+        board = cv2.imread(str(board_path))
+        if board is None:
+            return {"status": "skipped", "reason": "board unreadable"}
+        annotated, detail = annotate_board(board, focus, model)
+        if not detail:
+            return {"status": "no-annotation", "reason": "no known region / no before-face",
+                    "focus": focus}
+        out_path = out_root / "final-board.annotated.jpg"
+        if not _atomic_imwrite(out_path, annotated):
+            return {"status": "error", "reason": "imwrite failed (disk/permission?)", "focus": focus}
+        return {"status": "ok", "annotated_path": str(out_path), "detail": detail, "focus": focus}
+    except Exception as e:  # noqa: BLE001 — 内部 QA 件：任何失败转 status，绝不抛断渲染
+        return {"status": "error", "reason": str(e)[:200]}
 
 
 __all__ = ["multiface_landmarks", "annotate_board", "annotate_render_output",

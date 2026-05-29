@@ -12,11 +12,15 @@ Phase 1（plan anchored-focal-annotation）。owner 决策 2026-05-29：
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import cv2
 import numpy as np
 
 from backend.services import facial_region_atlas as atlas
+
+if TYPE_CHECKING:
+    from backend.services.image_providers import ImageProvider
 
 # --- CJK 字体回退（与 case-layout-board 同源）---
 _FONT_PATHS = [
@@ -158,7 +162,7 @@ _LINEART_PROMPT = (
 )
 
 
-def lineart_ai(image_bgr: np.ndarray, providers, *, max_edge: int = 1536,
+def lineart_ai(image_bgr: np.ndarray, providers: list[ImageProvider], *, max_edge: int = 1536,
                prompt: str | None = None) -> tuple[np.ndarray, str]:
     """AI 线稿（img2img）：缩到长边 max_edge → provider 链生图 → 返回 (线稿 BGR, provider 名)。
 

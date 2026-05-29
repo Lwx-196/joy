@@ -62,6 +62,18 @@ def test_resolve_model_path_prefers_explicit(tmp_path, monkeypatch):
     assert ba.resolve_model_path(None) is None
 
 
+def test_resolve_model_path_dev_fallback_requires_optin(tmp_path, monkeypatch):
+    # /tmp world-writable dev fallback 仅 opt-in 才回落（投毒面收敛）
+    fallback = tmp_path / "fb.task"
+    fallback.write_bytes(b"x")
+    monkeypatch.setattr(ba, "_DEV_MODEL_FALLBACK", str(fallback))
+    monkeypatch.delenv(ba.DEFAULT_MODEL_ENV, raising=False)
+    monkeypatch.delenv(ba.ALLOW_DEV_MODEL_ENV, raising=False)
+    assert ba.resolve_model_path(None) is None          # 未 opt-in → 不回落
+    monkeypatch.setenv(ba.ALLOW_DEV_MODEL_ENV, "1")
+    assert ba.resolve_model_path(None) == str(fallback)  # opt-in → 回落
+
+
 def test_manifest_focus_roundtrip_with_real_fixture_shape():
     # focus_targets 缺省 → 退 case_dir 名（真实 manifest 的常见形态）
     m = json.loads('{"focus_targets": [], "case_dir": "/p/q/隆鼻山根下巴"}')

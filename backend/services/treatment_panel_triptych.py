@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import os
+from typing import TYPE_CHECKING
 
 import cv2
 import numpy as np
@@ -16,6 +17,9 @@ import numpy as np
 from backend.services import case_material_coverage as cov
 from backend.services import facial_region_atlas as atlas
 from backend.services import treatment_zone_panel as tzp
+
+if TYPE_CHECKING:
+    from backend.services.image_providers import ImageProvider
 
 _VIEW_CN = {"front": "正面", "oblique": "45°斜", "profile": "侧面"}
 _PANEL_ORDER = ["front", "oblique", "profile"]
@@ -69,7 +73,7 @@ def _fit(img: np.ndarray, target_h: int, target_w: int) -> np.ndarray:
     return canvas
 
 
-def build_triptych(case_dir: str, model_path: str, providers, *,
+def build_triptych(case_dir: str, model_path: str, providers: list[ImageProvider], *,
                    focus_text: str | None = None, patient: str | None = None) -> tuple[np.ndarray, cov.CaseCoverage]:
     """端到端：覆盖挑图 → 分板 → AI 线稿标注 → 三联拼图。返回 (BGR, CaseCoverage)。"""
     focus = focus_text or os.path.basename(case_dir.rstrip("/"))
