@@ -1,0 +1,12 @@
+{
+  "calibration_status": "calibrated_for_fail_closed_review",
+  "accepted_judgment_count": 64,
+  "required_judgment_count_min": 50,
+  "agreement_rate": 0.94,
+  "required_agreement_rate_min": 0.9,
+  "false_candidate_promotion_count": 0,
+  "candidate_promotion_guardrail": {
+    "guardrail_status": "pass",
+    "manual_review_required_count": 0
+  }
+}

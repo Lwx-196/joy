@@ -32,7 +32,7 @@ def _env_int(name: str, default: int) -> int:
 SQLITE_BUSY_TIMEOUT_MS = _env_int("CASE_WORKBENCH_SQLITE_BUSY_TIMEOUT_MS", 5000)
 SCHEMA_LOCK_TIMEOUT_SEC = _env_int("CASE_WORKBENCH_SCHEMA_LOCK_TIMEOUT_SEC", 30)
 SCHEMA_COMPONENT = "main"
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_versions (
@@ -424,6 +424,42 @@ CREATE TABLE IF NOT EXISTS ops_audit_log (
 CREATE INDEX IF NOT EXISTS idx_ops_audit_request      ON ops_audit_log(request_id);
 CREATE INDEX IF NOT EXISTS idx_ops_audit_endpoint_at  ON ops_audit_log(endpoint, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_ops_audit_reviewer     ON ops_audit_log(reviewer, created_at DESC);
+
+-- C0.5.1 (Data Contract Freeze): canonical AB validation unit.
+-- One row per (case, workflow, base_artifact, candidate_artifact) pair queued
+-- for human / VLM blind judgment. Distinct from `pair_candidates` (which is
+-- pre/post photo pairing for case grouping) and from `candidate_lineage`
+-- (which is per-attempt simulation lineage). This table is the source of
+-- truth feeding `generate_ab_validation_report.py` and the eventual
+-- `t47_comfyui_ab_report.json` evidence file consumed by the promotion gate.
+--
+-- `judge_result_id` is intentionally untyped (INTEGER, no FK) so downstream
+-- judge sources (vlm_usage_log, candidate_lineage.vlm_judge_result_json,
+-- or a future vlm_judge_results table) can populate it without schema
+-- coupling. `source_manifest_hash` records which manifest binding was
+-- active when the unit was generated, enabling staleness detection.
+-- `staleness_status` ∈ {fresh|stale_manifest|stale_judge|stale_artifact}.
+CREATE TABLE IF NOT EXISTS ab_validation_units (
+  id                         INTEGER PRIMARY KEY AUTOINCREMENT,
+  case_id                    INTEGER REFERENCES cases(id) ON DELETE SET NULL,
+  workflow                   TEXT NOT NULL,
+  base_artifact_sha256       TEXT NOT NULL,
+  candidate_artifact_sha256  TEXT NOT NULL,
+  judge_result_id            INTEGER,
+  human_label                TEXT,
+  generated_at               TIMESTAMP NOT NULL,
+  source_manifest_hash       TEXT,
+  staleness_status           TEXT NOT NULL DEFAULT 'fresh',
+  created_at                 TIMESTAMP NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_ab_validation_units_case
+  ON ab_validation_units(case_id, generated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_ab_validation_units_workflow
+  ON ab_validation_units(workflow, generated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_ab_validation_units_staleness
+  ON ab_validation_units(staleness_status);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_ab_validation_units_pair
+  ON ab_validation_units(workflow, base_artifact_sha256, candidate_artifact_sha256);
 """
 
 

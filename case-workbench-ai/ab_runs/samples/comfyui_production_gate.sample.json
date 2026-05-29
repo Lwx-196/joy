@@ -1,0 +1,8 @@
+{
+  "production_gate": {
+    "reason_code": "promotion_approval_required",
+    "hard_defect_codes": [],
+    "candidate_win_count": 22,
+    "required_candidate_wins_min": 20
+  }
+}
