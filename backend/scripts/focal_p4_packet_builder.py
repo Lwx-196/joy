@@ -225,24 +225,6 @@ def _stage_arm(spec: CaseSpec, arm: str, scratch_root: Path) -> Path:
     return scratch_case
 
 
-def find_existing_board(
-    spec: CaseSpec, brand: str, template: str
-) -> Path | None:
-    """The case's already-shipped product board = the 0-quota baseline.
-
-    Prefer the brand/template the candidate renders into; fall back to any
-    existing final-board so a case rendered under a different brand still
-    yields a baseline (the judge compares product-vs-product, not paths).
-    """
-    exact = list(
-        spec.case_dir.glob(f".case-layout-output/{brand}/{template}/render/final-board.*")
-    )
-    if exact and exact[0].is_file():
-        return exact[0]
-    any_board = sorted(spec.case_dir.glob(".case-layout-output/*/*/render/final-board.*"))
-    return any_board[0] if any_board and any_board[0].is_file() else None
-
-
 def detect_existing_render(spec: CaseSpec) -> dict[str, Any] | None:
     """From the case's shipped board, recover (board, brand, template, the exact
     after images the render selected).

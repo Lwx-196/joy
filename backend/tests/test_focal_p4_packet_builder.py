@@ -224,18 +224,6 @@ def _make_case_with_board(root: Path, folder: str, brand="fumei", template="sing
     return case
 
 
-def test_find_existing_board_exact_then_fallback(tmp_path):
-    _make_case_with_board(tmp_path / "src", "王某/注射泪沟", brand="fumei", template="single-compare")
-    spec = builder.discover_cases(tmp_path / "src", KW, _phase_fn)[0]
-    assert spec.has_rendered_board
-    # Exact brand/template hit.
-    b = builder.find_existing_board(spec, "fumei", "single-compare")
-    assert b is not None and b.read_bytes() == b"SHIPPED-PRODUCT-BOARD"
-    # Different brand → falls back to any existing board.
-    b2 = builder.find_existing_board(spec, "other-brand", "tri-compare")
-    assert b2 is not None and b2.name == "final-board.jpg"
-
-
 def test_build_packet_existing_board_baseline_no_render_of_baseline(tmp_path):
     _make_case_with_board(tmp_path / "src", "A/注射泪沟")
     specs = builder.discover_cases(tmp_path / "src", KW, _phase_fn)
