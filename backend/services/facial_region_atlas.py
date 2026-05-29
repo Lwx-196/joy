@@ -65,12 +65,14 @@ FACIAL_REGION_ATLAS: dict[str, dict[str, Any]] = {
         "confidence": "inferred",
     },
     "法令纹": {
-        "left_idx": [358, 429, 279, 331, 294, 327, 291, 269, 267],
-        "right_idx": [129, 209, 49, 102, 64, 98, 61, 39, 37],
+        # 校准 2026-05-29（Phase 1，8 真实正脸叠点）：旧索引含上唇点(269/267/39/37)导致
+        # 折线在嘴角回钩 + 路径贴鼻不贴沟。改为 ala→沿沟→口角外下，沿可见折线走向。
+        "left_idx": [358, 423, 426, 322, 410, 287],
+        "right_idx": [129, 203, 206, 92, 186, 57],
         "shape": "polyline",
-        "rationale": "鼻翼外缘斜向下到口角外侧的褶皱，起点贴鼻翼终点在嘴角",
-        "source": "鼻翼=官方NOSE; 嘴角=官方LIPS; 中段路径=社区图",
-        "confidence": "inferred",
+        "rationale": "鼻翼外缘斜向下到口角外侧的褶皱，起点贴鼻翼终点在口角外下方",
+        "source": "ala=官方NOSE; 口角外=官方LIPS邻接; 沟中段=社区图(校准实测)",
+        "confidence": "calibrated",
     },
     "苹果肌": {
         "left_idx": [352, 280, 425, 427, 411, 376, 345, 346, 347],
@@ -89,12 +91,16 @@ FACIAL_REGION_ATLAS: dict[str, dict[str, Any]] = {
         "confidence": "inferred",
     },
     "颧骨": {
+        # 校准 2026-05-29（Phase 1）：当前索引沿 face_oval 侧轮廓 = 颧弓(arch)解读，不是
+        # 正面颧骨突起。115 例真实 case 语料中 0 例以"颧骨"为术式 → 低优先，暂不重做。
+        # 若日后出现颧骨缩小/填充 case，需区分"骨性突起(突起椭圆)" vs"颧弓(arch折线)"再校准，
+        # 且必须与已有 苹果肌/面颊(均在中颊脂肪垫)区分，避免同区重叠。
         "left_idx": [454, 356, 389, 345, 323, 366, 352],
         "right_idx": [234, 127, 162, 116, 93, 137, 123],
         "shape": "polyline",
         "rationale": "面部最外侧骨性突起(颧弓)，在face_oval侧轮廓中段，234/454最外缘",
         "source": "外缘=官方FACE_OVAL; 内侧填充=社区",
-        "confidence": "high",
+        "confidence": "uncalibrated-unused",
     },
     "下颌线": {
         "left_idx": [152, 377, 400, 378, 379, 365, 397, 288],

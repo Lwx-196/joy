@@ -45,8 +45,13 @@ def test_resolve_region_key():
     assert atlas.resolve_region_key("童颜针全脸") is None
 
 
+# high = 官方 connections 索引; inferred = 社区图待校准;
+# calibrated = Phase 1 真实正脸叠点校准过; uncalibrated-unused = 真实语料 0 例、暂不重做
+_VALID_CONFIDENCE = {"high", "inferred", "calibrated", "uncalibrated-unused"}
+
+
 def test_confidence_values_valid():
     for region, spec in atlas.FACIAL_REGION_ATLAS.items():
-        assert spec.get("confidence") in {"high", "inferred"}, region
+        assert spec.get("confidence") in _VALID_CONFIDENCE, region
         assert spec.get("source"), f"{region} missing source"
         assert spec.get("rationale"), f"{region} missing rationale"
