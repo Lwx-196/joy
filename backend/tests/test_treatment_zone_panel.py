@@ -5,10 +5,15 @@ the geometry layer takes a synthetic (478,2) point array so it runs without medi
 """
 from __future__ import annotations
 
-import numpy as np
+import pytest
 
-from backend.services import facial_region_atlas as atlas
-from backend.services import treatment_zone_panel as tzp
+# 重 CV 依赖（numpy/cv2）按设计不在 backend venv（线稿/合成走 skill 子进程或本地 dev）。
+# CI backend venv 无这些 → 优雅跳过；本地 dev 环境照跑。
+pytest.importorskip("cv2")
+np = pytest.importorskip("numpy")
+
+from backend.services import facial_region_atlas as atlas  # noqa: E402
+from backend.services import treatment_zone_panel as tzp  # noqa: E402
 
 
 def _synthetic_pts(n: int = 478) -> np.ndarray:

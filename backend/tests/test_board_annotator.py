@@ -3,9 +3,13 @@ from __future__ import annotations
 
 import json
 
-import numpy as np
+import pytest
 
-from backend.services import board_annotator as ba
+# board_annotator top-level import numpy（重 CV 依赖按设计不在 backend venv）。
+# CI backend venv 无 numpy → 优雅跳过；本地 dev 照跑。
+np = pytest.importorskip("numpy")
+
+from backend.services import board_annotator as ba  # noqa: E402
 
 
 def _pts_at(cx: float, cy: float = 500.0) -> np.ndarray:
