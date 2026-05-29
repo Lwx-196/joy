@@ -19,6 +19,7 @@ import zhCaseGroups from "../locales/zh/caseGroups.json";
 import zhImageWorkbench from "../locales/zh/imageWorkbench.json";
 import zhQualityReview from "../locales/zh/qualityReview.json";
 import zhSourceBlockers from "../locales/zh/sourceBlockers.json";
+import zhOpsConsole from "../locales/zh/opsConsole.json";
 import enCommon from "../locales/en/common.json";
 import enCustomers from "../locales/en/customers.json";
 import enRender from "../locales/en/render.json";
@@ -37,6 +38,7 @@ import enCaseGroups from "../locales/en/caseGroups.json";
 import enImageWorkbench from "../locales/en/imageWorkbench.json";
 import enQualityReview from "../locales/en/qualityReview.json";
 import enSourceBlockers from "../locales/en/sourceBlockers.json";
+import enOpsConsole from "../locales/en/opsConsole.json";
 
 void i18n
   .use(LanguageDetector)
@@ -62,6 +64,7 @@ void i18n
         imageWorkbench: zhImageWorkbench,
         qualityReview: zhQualityReview,
         sourceBlockers: zhSourceBlockers,
+        opsConsole: zhOpsConsole,
       },
       en: {
         common: enCommon,
@@ -82,12 +85,13 @@ void i18n
         imageWorkbench: enImageWorkbench,
         qualityReview: enQualityReview,
         sourceBlockers: enSourceBlockers,
+        opsConsole: enOpsConsole,
       },
     },
     fallbackLng: "zh",
     supportedLngs: ["zh", "en"],
     defaultNS: "common",
-    ns: ["common", "customers", "render", "revisions", "customerDetail", "evaluations", "dict", "jobBatch", "dashboard", "cases", "caseDetail", "importCsv", "hotkeys", "renderHistory", "caseGroups", "imageWorkbench", "qualityReview", "sourceBlockers"],
+    ns: ["common", "customers", "render", "revisions", "customerDetail", "evaluations", "dict", "jobBatch", "dashboard", "cases", "caseDetail", "importCsv", "hotkeys", "renderHistory", "caseGroups", "imageWorkbench", "qualityReview", "sourceBlockers", "opsConsole"],
     interpolation: { escapeValue: false },
     react: { useSuspense: false },
     detection: {

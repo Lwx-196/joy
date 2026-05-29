@@ -1,0 +1,94 @@
+{
+  "header": {
+    "title": "Ops Console",
+    "subtitle": "ComfyUI/VLM 灰度发布看板 — 当前 manifest 状态 / SLO 决策 / 阻断详情",
+    "refresh": "刷新",
+    "refreshing": "刷新中…",
+    "lastUpdated": "上次更新 {{when}}"
+  },
+  "states": {
+    "loading": "加载中…",
+    "loadError": "状态接口加载失败",
+    "errorRetry": "重试"
+  },
+  "manifest": {
+    "sectionTitle": "Manifest 状态",
+    "stateLabel": "推进状态",
+    "exposureLabel": "灰度曝光",
+    "approver": "批准人",
+    "approvedAt": "批准时间",
+    "expiresAt": "过期时间",
+    "bindingsPresent": "Bindings 已绑定",
+    "bindingsMissing": "Bindings 未填充",
+    "rollbackBaselineAge": "回退基线龄期 {{days}} 天",
+    "rollbackBaselineMissing": "回退基线未捕获",
+    "stateNotSet": "（未设置）",
+    "exposureSuffix": "%"
+  },
+  "slo": {
+    "sectionTitle": "SLO 决策",
+    "recommendationLabel": "推荐动作",
+    "sampleLabel": "样本量",
+    "windowLabel": "评估窗口",
+    "windowSuffix": "小时",
+    "generatedAt": "生成时间",
+    "sampleVsMin": "{{sample}} / 最少 {{min}}",
+    "errorBlock": "SLO 评估失败：{{message}}",
+    "violations": "违规清单（{{count}}）",
+    "noViolations": "本窗口无违规",
+    "withinSlo_true": "SLO 内",
+    "withinSlo_false": "SLO 外",
+    "withinSlo_null": "暂缓判定"
+  },
+  "comfyui": {
+    "sectionTitle": "ComfyUI 实时探针",
+    "baseUrl": "URL",
+    "reachableTrue": "可达",
+    "reachableFalse": "不可达",
+    "reachableSkipped": "已跳过",
+    "queueRunning": "运行中 {{n}}",
+    "queuePending": "排队 {{n}}",
+    "probedAt": "探针时间",
+    "errorBlock": "错误：{{message}}",
+    "httpStatus": "HTTP {{status}}"
+  },
+  "latency": {
+    "sectionTitle": "渲染延迟（24h）",
+    "renderMode": "渲染模式",
+    "count": "样本",
+    "p50": "P50",
+    "p95": "P95",
+    "seconds": "秒",
+    "empty": "本窗口无完成的渲染任务",
+    "errorBlock": "延迟统计失败：{{message}}"
+  },
+  "silentFail": {
+    "sectionTitle": "静默失败（24h）",
+    "count": "次数：{{n}}",
+    "errorBlock": "静默失败统计失败：{{message}}",
+    "windowSuffix": "小时窗口"
+  },
+  "applier": {
+    "sectionTitle": "回滚最近一次",
+    "lastOutcome": "最近 outcome",
+    "lastRunAt": "时间",
+    "lastReason": "reason",
+    "lastRequestId": "request_id",
+    "empty": "尚无回滚事件",
+    "errorBlock": "查询失败：{{message}}"
+  },
+  "controls": {
+    "probeOn": "ComfyUI 探针：开",
+    "probeOff": "ComfyUI 探针：关",
+    "slo24h": "24h",
+    "slo48h": "48h",
+    "slo72h": "72h"
+  },
+  "recommendation": {
+    "continue": "继续灰度",
+    "rollback": "立即回滚",
+    "insufficient_data": "数据不足",
+    "monitoring_paused": "样本暂缓",
+    "stop_loss_halt": "止损停推"
+  }
+}

@@ -8,6 +8,10 @@ export default defineConfig({
   testDir: "./tests/e2e",
   fullyParallel: false,
   forbidOnly: !!process.env.CI,
+  // S5: snapshot-capture tests write a tracked PNG (docs/operations/screenshots).
+  // Exclude them from the default suite so CI's bare `playwright test` never
+  // overwrites + dirties the work tree. Capture on demand with `--grep @snapshot`.
+  grepInvert: /@snapshot/,
   retries: process.env.CI ? 2 : 0,
   workers: 1,
   reporter: [

@@ -28,7 +28,7 @@ from pydantic import BaseModel, Field
 
 from .. import audit, db, render_executor, render_quality, source_images, stress
 from ..render_queue import RENDER_QUEUE
-from ..services import pre_render_gate
+from ..services import ops_alerting, ops_readiness, pre_render_gate
 
 router = APIRouter(tags=["render"])
 
@@ -1835,18 +1835,44 @@ def _ops_gate_section(conn) -> dict[str, Any]:
 
 
 @router.get("/api/render/ops/vlm-comfyui/status")
-def ops_vlm_comfyui_status(days: int = Query(default=7, ge=1, le=90)) -> dict[str, Any]:
-    """P0.4 oncall 聚合面板 — VLM 校准+调用量 / ComfyUI 任务分布 / Gate 阻断 top10。"""
+def ops_vlm_comfyui_status(
+    days: int = Query(default=7, ge=1, le=90),
+    slo_window_hours: int = Query(default=24, ge=1, le=24 * 14),
+    probe_comfyui: bool = Query(default=True),
+) -> dict[str, Any]:
+    """P0.4 oncall 聚合面板 — VLM 校准+调用量 / ComfyUI 任务分布 / Gate 阻断 top10。
+
+    C3.0.1 (Ops Readiness Gate): adds ``promotion`` block carrying the 11
+    new fields defined by plan §C3.0.1 — manifest state / bucket exposure /
+    SLO recommendation+sample / violations / baseline freshness / ComfyUI
+    live probe / render latency p50/p95 / silent_fail count / applier last
+    outcome. Pre-existing top-level keys (``days`` / ``vlm`` / ``comfyui`` /
+    ``gate``) are unchanged — additive-only contract.
+
+    Query params:
+      - ``slo_window_hours`` (default 24h): width of the SLO eval window
+        passed to ``promotion_slo_monitor.evaluate_window``.
+      - ``probe_comfyui`` (default True): when False, skip the live HTTP
+        probe against ComfyUI ``/queue`` — useful for offline / CI runs.
+    """
     cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
     with db.connect() as conn:
         vlm = _ops_vlm_section(conn, cutoff)
         comfyui = _ops_comfyui_section(conn, cutoff)
         gate = _ops_gate_section(conn)
+        promotion = ops_readiness.compute_promotion_status(
+            conn,
+            slo_window_hours=slo_window_hours,
+            latency_window_hours=24,
+            silent_fail_window_hours=24,
+            probe_comfyui=probe_comfyui,
+        )
     return {
         "days": days,
         "vlm": vlm,
         "comfyui": comfyui,
         "gate": gate,
+        "promotion": promotion,
     }
 
 
@@ -2475,3 +2501,221 @@ def ops_repair_queue(
         outcome="dry_run", http_status=200,
     )
     return resp
+
+
+# ---------------------------------------------------------------------------
+# C3.0.3 — Alerting endpoints. The SLOReport + applier result are the *only*
+# allowed alert event sources; this surface compiles a synthetic version of
+# one of those two payloads (for tests / dry-runs) OR replays an in-process
+# result, then writes alert_fired / alert_acked / alert_resolved rows into
+# ops_audit_log sharing one correlation_id. No new schema; the audit log is
+# the lifecycle store.
+# ---------------------------------------------------------------------------
+
+
+class OpsAlertFireRequest(BaseModel):
+    source: str = Field(..., description="Must be one of ALLOWED_SOURCES.")
+    # Operator either provides a synthetic SLO report dict OR a synthetic
+    # applier-result dict — never both. The compile fn dispatches on `source`.
+    slo_report: dict[str, Any] | None = Field(default=None)
+    applier_result: dict[str, Any] | None = Field(default=None)
+    correlation_id: str | None = Field(default=None, max_length=128)
+    reviewer: str = Field(..., min_length=1, max_length=128)
+    reason: str | None = Field(default=None, max_length=1000)
+    dispatch: bool = Field(
+        default=False,
+        description=(
+            "When True, send through configured channels; when False (default)"
+            " only the audit row is written. Synthetic / smoke runs should "
+            "leave this False to avoid paging on-call."
+        ),
+    )
+
+
+class OpsAlertLifecycleRequest(BaseModel):
+    operator: str = Field(..., min_length=1, max_length=128)
+    note: str | None = Field(default=None, max_length=1000)
+
+
+# S4: the operator-supplied slo_report / applier_result are OPEN dicts. Never
+# persist them verbatim into ops_audit_log.payload_json — that is unbounded
+# storage growth / a DoS vector and contradicts the audit-retention policy this
+# PR introduces. Persist only the whitelisted keys the compile fns actually
+# consume, each value capped, plus the bounded request metadata.
+_OPS_ALERT_INPUT_WHITELIST: tuple[str, ...] = (
+    "recommendation", "within_slo", "sample_size", "window_hours", "notes",
+    "outcome", "reason", "from_state", "to_state", "request_id",
+)
+_OPS_ALERT_AUDIT_VALUE_CAP = 500  # chars per stringified whitelisted value
+
+
+def _ops_alert_fire_audit_payload(payload: "OpsAlertFireRequest") -> dict[str, Any]:
+    """Build the bounded ops_audit_log payload for a fire request (S4)."""
+    audit: dict[str, Any] = {
+        "source": payload.source,
+        "correlation_id": payload.correlation_id,
+        "dispatch": payload.dispatch,
+    }
+    raw = (
+        payload.slo_report
+        if payload.source == ops_alerting.SOURCE_SLO
+        else payload.applier_result
+    )
+    if isinstance(raw, dict):
+        summary: dict[str, Any] = {}
+        for key in _OPS_ALERT_INPUT_WHITELIST:
+            if key not in raw:
+                continue
+            value = raw[key]
+            text = str(value)
+            summary[key] = (
+                text[:_OPS_ALERT_AUDIT_VALUE_CAP] + "…(truncated)"
+                if len(text) > _OPS_ALERT_AUDIT_VALUE_CAP
+                else value
+            )
+        audit["input_summary"] = summary
+    return audit
+
+
+@router.post("/api/render/ops/alerts/fire")
+def ops_alerts_fire(
+    payload: OpsAlertFireRequest,
+    x_request_id: str | None = Header(default=None, alias="X-Request-Id"),
+) -> dict[str, Any]:
+    """C3.0.3 — Compile an AlertEvent from either an SLO report or an
+    applier result, then write ``alert_fired`` to ops_audit_log. Channel
+    dispatch is OFF by default (``dispatch=true`` to actually send)."""
+    request_id = _gen_request_id(x_request_id)
+    endpoint = "POST /api/render/ops/alerts/fire"
+    # S4: bounded/whitelisted payload for the audit log — never the open
+    # slo_report/applier_result dicts (unbounded payload_json / DoS vector).
+    payload_dump = _ops_alert_fire_audit_payload(payload)
+
+    if payload.source not in ops_alerting.ALLOWED_SOURCES:
+        resp = {
+            "request_id": request_id,
+            "error": (
+                f"source must be one of {sorted(ops_alerting.ALLOWED_SOURCES)}; "
+                f"got {payload.source!r}"
+            ),
+        }
+        _write_ops_audit_log(
+            request_id=request_id, endpoint=endpoint,
+            reviewer=payload.reviewer, reason=payload.reason,
+            payload=payload_dump, response=resp,
+            outcome="error", http_status=400,
+        )
+        raise HTTPException(400, resp)
+
+    if payload.source == ops_alerting.SOURCE_SLO:
+        if not payload.slo_report:
+            resp = {"request_id": request_id, "error": "slo_report required for source=slo_report"}
+            _write_ops_audit_log(
+                request_id=request_id, endpoint=endpoint,
+                reviewer=payload.reviewer, reason=payload.reason,
+                payload=payload_dump, response=resp,
+                outcome="error", http_status=400,
+            )
+            raise HTTPException(400, resp)
+        event = ops_alerting.compile_alert_from_slo_report(
+            payload.slo_report, correlation_id=payload.correlation_id
+        )
+    else:  # SOURCE_APPLIER (already validated above)
+        if not payload.applier_result:
+            resp = {
+                "request_id": request_id,
+                "error": "applier_result required for source=rollback_applier",
+            }
+            _write_ops_audit_log(
+                request_id=request_id, endpoint=endpoint,
+                reviewer=payload.reviewer, reason=payload.reason,
+                payload=payload_dump, response=resp,
+                outcome="error", http_status=400,
+            )
+            raise HTTPException(400, resp)
+        event = ops_alerting.compile_alert_from_applier_result(
+            payload.applier_result, correlation_id=payload.correlation_id
+        )
+
+    if event is None:
+        # Benign payload — no alert needed. Audit-only so the operator can
+        # see the synthetic input was accepted without paging anyone.
+        resp = {
+            "request_id": request_id,
+            "alert_compiled": False,
+            "note": "input recommendation/reason is benign — no AlertEvent produced",
+        }
+        _write_ops_audit_log(
+            request_id=request_id, endpoint=endpoint,
+            reviewer=payload.reviewer, reason=payload.reason,
+            payload=payload_dump, response=resp,
+            outcome="ok", http_status=200,
+        )
+        return resp
+
+    with db.connect() as conn:
+        fire_response = ops_alerting.fire_alert(
+            event,
+            conn=conn,
+            dispatch=payload.dispatch,
+        )
+    resp = {
+        "request_id": request_id,
+        "alert_compiled": True,
+        "correlation_id": event.correlation_id,
+        "event": event.to_dict(),
+        "fire_response": fire_response,
+    }
+    _write_ops_audit_log(
+        request_id=request_id, endpoint=endpoint,
+        reviewer=payload.reviewer, reason=payload.reason,
+        payload=payload_dump, response=resp,
+        outcome="ok", http_status=200,
+    )
+    return resp
+
+
+@router.post("/api/render/ops/alerts/{correlation_id}/ack")
+def ops_alerts_ack(
+    correlation_id: str,
+    payload: OpsAlertLifecycleRequest,
+) -> dict[str, Any]:
+    """C3.0.3 — Record an alert_acked row for the given correlation_id."""
+    if not correlation_id or len(correlation_id) > 128:
+        raise HTTPException(400, {"error": "correlation_id required (≤128 chars)"})
+    try:
+        with db.connect() as conn:
+            result = ops_alerting.ack_alert(
+                conn=conn,
+                correlation_id=correlation_id,
+                operator=payload.operator,
+                note=payload.note,
+            )
+    except ops_alerting.AlertNotFoundError as exc:
+        raise HTTPException(404, {"error": str(exc)}) from exc
+    except ops_alerting.AlertStateError as exc:
+        raise HTTPException(409, {"error": str(exc)}) from exc
+    return result
+
+
+@router.post("/api/render/ops/alerts/{correlation_id}/resolve")
+def ops_alerts_resolve(
+    correlation_id: str,
+    payload: OpsAlertLifecycleRequest,
+) -> dict[str, Any]:
+    """C3.0.3 — Record an alert_resolved row for the given correlation_id."""
+    if not correlation_id or len(correlation_id) > 128:
+        raise HTTPException(400, {"error": "correlation_id required (≤128 chars)"})
+    try:
+        with db.connect() as conn:
+            result = ops_alerting.resolve_alert(
+                conn=conn,
+                correlation_id=correlation_id,
+                operator=payload.operator,
+                note=payload.note,
+            )
+    except ops_alerting.AlertNotFoundError as exc:
+        raise HTTPException(404, {"error": str(exc)}) from exc
+    except ops_alerting.AlertStateError as exc:
+        raise HTTPException(409, {"error": str(exc)}) from exc
+    return result

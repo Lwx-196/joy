@@ -334,6 +334,103 @@ export const fetchScanLatest = () =>
 export const triggerScan = (mode: "full" | "incremental" = "incremental") =>
   api.post(`/api/scan?mode=${mode}`).then((r) => r.data);
 
+// ---------------------------------------------------------------------------
+// C3.0.1 Ops Readiness — /api/render/ops/vlm-comfyui/status (promotion block)
+// ---------------------------------------------------------------------------
+
+export type PromotionState =
+  | "shadow"
+  | "p10"
+  | "p25"
+  | "p50"
+  | "p100"
+  | "rolled_back";
+
+export type SloRecommendation =
+  | "continue"
+  | "rollback"
+  | "insufficient_data"
+  | "monitoring_paused"
+  | "stop_loss_halt";
+
+export interface PromotionBlock {
+  manifest_state: PromotionState;
+  bucket_exposure_pct: number;
+  slo_recommendation: SloRecommendation | null;
+  sample_size: number;
+  minimum_sample_size: number;
+  violations: Array<Record<string, unknown>>;
+  slo_within: boolean | null;
+  slo_notes: string;
+  slo_generated_at: string | null;
+  slo_window_hours: number;
+  slo_error: string | null;
+  baseline_freshness: {
+    bindings_present: boolean;
+    approver: string | null;
+    approved_at: string | null;
+    expires_at: string | null;
+    rollback_baseline_captured_at: string | null;
+    rollback_baseline_age_days: number | null;
+  };
+  comfyui_live_probe: {
+    reachable: boolean | null;
+    skipped?: boolean;
+    http_status?: number;
+    queue_running?: number | null;
+    queue_pending?: number | null;
+    probed_at?: string;
+    base_url?: string | null;
+    error?: string;
+  };
+  render_latency: {
+    error?: string;
+    window_hours?: number;
+    by_render_mode: Record<
+      string,
+      { count: number; p50_seconds: number; p95_seconds: number }
+    >;
+  };
+  silent_fail: {
+    error?: string;
+    window_hours?: number;
+    count: number;
+  };
+  rollback_applier_last: {
+    error?: string;
+    last_outcome: string | null;
+    last_run_at: string | null;
+    last_request_id: string | null;
+    last_reason: string | null;
+    last_http_status: number | null;
+  };
+  computed_at: string;
+  schema_version: number;
+}
+
+export interface OpsStatusResponse {
+  days: number;
+  // Legacy sections (preserved unchanged from P0.4); modeled loosely
+  // because the OpsConsole page only displays the new `promotion` block.
+  vlm: Record<string, unknown>;
+  comfyui: Record<string, unknown>;
+  gate: Record<string, unknown>;
+  promotion: PromotionBlock;
+}
+
+export const fetchOpsStatus = (params: {
+  slo_window_hours?: number;
+  probe_comfyui?: boolean;
+} = {}) =>
+  api
+    .get<OpsStatusResponse>("/api/render/ops/vlm-comfyui/status", {
+      params: {
+        slo_window_hours: params.slo_window_hours,
+        probe_comfyui: params.probe_comfyui,
+      },
+    })
+    .then((r) => r.data);
+
 export type CaseListParams = {
   page?: number;
   page_size?: number;

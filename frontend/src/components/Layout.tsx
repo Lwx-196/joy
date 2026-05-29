@@ -21,6 +21,7 @@ const CHORD_ROUTES: Record<string, string> = {
   e: "/evaluations",
   q: "/quality",
   v: "/dict",
+  p: "/ops",
 };
 
 function isEditableTarget(target: EventTarget | null): boolean {
@@ -100,6 +101,7 @@ export default function Layout() {
       { to: "/evaluations", label: t("nav.evaluations"), ico: "check" as const, key: "evaluations" },
       { to: "/quality", label: t("nav.quality"), ico: "eye" as const, key: "quality" },
       { to: "/dict", label: t("nav.dict"), ico: "merge" as const, key: "dict" },
+      { to: "/ops", label: t("nav.ops"), ico: "database" as const, key: "ops" },
     ],
     [t]
   );
