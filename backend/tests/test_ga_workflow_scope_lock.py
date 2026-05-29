@@ -196,3 +196,101 @@ def test_preflight_signature_accepts_workflow_kwarg():
     sig = inspect.signature(adapter._comfyui_preflight)
     assert "workflow_name" in sig.parameters
     assert sig.parameters["workflow_name"].default is None
+
+
+def test_runtime_renderer_threads_workflow_name_into_preflight(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """S1: the sole production renderer ``_run_comfyui_workflow_once`` must pass
+    its resolved workflow name into preflight. Before the fix it called
+    ``_comfyui_preflight()`` with no arg, so ``effective_workflow`` always fell
+    back to ``GA_APPROVED_WORKFLOW`` — making the scope check a tautology that a
+    routing mistake (e.g. local_region_enhance_v1) would silently bypass."""
+    captured: dict[str, object] = {}
+
+    def fake_preflight(*, workflow_name=None):
+        captured["workflow_name"] = workflow_name
+        # Short-circuit the renderer immediately after preflight so we never
+        # touch the network (core node "missing" raises in the next line).
+        return {"node_status": {"core_missing": ["__stop__"]}}
+
+    monkeypatch.setattr(adapter, "_comfyui_preflight", fake_preflight)
+    with pytest.raises(RuntimeError, match="missing required nodes"):
+        adapter._run_comfyui_workflow_once(
+            tmp_path / "in.png",
+            output_dir=tmp_path,
+            workflow_name="local_region_enhance_v1",
+        )
+    assert captured["workflow_name"] == "local_region_enhance_v1"
+
+
+def _stub_comfyui_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stub the ComfyUI HTTP boundary + model profile so ``_comfyui_preflight``
+    runs hermetically (no live server, no real model registry)."""
+
+    def fake_json(path, payload=None, *, timeout=30):
+        if path == "/system_stats":
+            return {"system": {"comfyui_version": "test"}}
+        if path == "/object_info":
+            return {n: {} for n in ("LoadImage", "SaveImage", "KSampler", "VAEEncodeForInpaint")}
+        raise AssertionError(f"unexpected ComfyUI call in unit test: {path}")
+
+    monkeypatch.setattr(adapter, "_comfyui_json", fake_json)
+    monkeypatch.setattr(
+        adapter,
+        "_build_comfyui_model_profile",
+        lambda *a, **k: {
+            "production_ready": True,
+            "readiness_reasons": [],
+            "capabilities": {},
+            "models": {},
+        },
+    )
+
+
+def test_preflight_non_ga_runtime_workflow_surfaces_scope_blocker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """S1 production-path assertion: a non-GA runtime workflow routed through
+    the real ``_comfyui_preflight`` must surface ``workflow_not_approved_for_default``
+    (the approval is signed for the GA workflow only). This is the end-to-end
+    proof — through preflight, not the gate directly — that the threaded
+    workflow name reaches the scope check."""
+    env = _build_aligned_env(tmp_path, approved_workflows=[adapter.GA_APPROVED_WORKFLOW])
+    monkeypatch.setattr(manifest_loader, "DEFAULT_MANIFEST_PATH", env["manifest"])
+    monkeypatch.setattr(adapter, "COMFYUI_AB_VALIDATION_REPORT_PATH", env["ab_path"])
+    monkeypatch.setattr(adapter, "COMFYUI_VLM_GUARDRAIL_REPORT_PATH", env["vlm_path"])
+    monkeypatch.setattr(adapter, "COMFYUI_PRODUCTION_GATE_REPORT_PATH", env["pg_path"])
+    _stub_comfyui_probe(monkeypatch)
+
+    result = adapter._comfyui_preflight(workflow_name="local_region_enhance_v1")
+    assert result["gated_workflow"] == "local_region_enhance_v1"
+    blockers = result["ab_validation"]["default_promotion_blockers"]
+    assert "workflow_not_approved_for_default" in blockers
+
+
+def test_preflight_gated_workflow_reflects_input_else_defaults_to_ga(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Low (preflight behavior): ``gated_workflow`` echoes the passed workflow
+    name, and falls back to ``GA_APPROVED_WORKFLOW`` when omitted or blank."""
+    missing = tmp_path / "nope.json"
+    monkeypatch.setattr(adapter, "COMFYUI_AB_VALIDATION_REPORT_PATH", missing)
+    monkeypatch.setattr(adapter, "COMFYUI_VLM_GUARDRAIL_REPORT_PATH", missing)
+    monkeypatch.setattr(adapter, "COMFYUI_PRODUCTION_GATE_REPORT_PATH", missing)
+    _stub_comfyui_probe(monkeypatch)
+
+    assert adapter._comfyui_preflight(workflow_name="custom_wf_v9")["gated_workflow"] == "custom_wf_v9"
+    assert adapter._comfyui_preflight()["gated_workflow"] == adapter.GA_APPROVED_WORKFLOW
+    assert adapter._comfyui_preflight(workflow_name="   ")["gated_workflow"] == adapter.GA_APPROVED_WORKFLOW
+
+
+def test_validator_cli_default_required_workflow_binds_ga_constant():
+    """Low (validator argparse default): the ``--required-workflow`` default must
+    be the named GA constant — and that constant must equal the gate's SoT — so
+    the standalone validator and the runtime gate cannot drift apart."""
+    from backend.scripts import validate_ab_validation_reports as v
+
+    assert v.GA_APPROVED_WORKFLOW == adapter.GA_APPROVED_WORKFLOW
+    parser = v._build_arg_parser()
+    assert parser.get_default("required_workflow") == adapter.GA_APPROVED_WORKFLOW

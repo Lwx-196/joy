@@ -1520,7 +1520,12 @@ def _run_comfyui_workflow_once(
     timeout_seconds: int = 900,
     wait_seconds: float = 0.0,
 ) -> dict[str, Any]:
-    preflight = _comfyui_preflight()
+    # S1: thread the actually-resolved workflow name so the GA scope check
+    # (`workflow_not_approved_for_default`) and `gated_workflow` reflect the
+    # real runtime workflow. Calling preflight with no arg made
+    # `effective_workflow` fall back to GA_APPROVED_WORKFLOW unconditionally —
+    # a tautology that let a routing mistake bypass the gate.
+    preflight = _comfyui_preflight(workflow_name=workflow_name)
     missing = ((preflight.get("node_status") or {}).get("core_missing") or [])
     if missing:
         raise RuntimeError(f"ComfyUI missing required nodes: {', '.join(missing)}")

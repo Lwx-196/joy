@@ -34,6 +34,11 @@ from typing import Any
 REPO_ROOT_DEFAULT = Path(__file__).resolve().parents[2]
 AB_RUNS_DIR_RELPATH = Path("case-workbench-ai/ab_runs")
 
+# SoT: backend.ai_generation_adapter.GA_APPROVED_WORKFLOW. Mirrored here as a
+# named constant (this validator stays stdlib-only / zero-dep, so it must not
+# import the adapter). test_ga_workflow_scope_lock locks the two together.
+GA_APPROVED_WORKFLOW = "portrait_focal_enhance_v1"
+
 CANONICAL_AB_REPORT_FILENAME = "t47_comfyui_ab_report.json"
 CANONICAL_VLM_GUARDRAIL_FILENAME = "vlm_guardrail_report.json"
 CANONICAL_PRODUCTION_GATE_FILENAME = "comfyui_production_gate.json"
@@ -607,7 +612,7 @@ def _flatten_issues(results: dict[str, list[ValidationIssue]]) -> list[tuple[str
 # ---------------------------------------------------------------------------
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Validate the C0.5 A/B validation evidence reports",
     )
@@ -633,8 +638,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--required-workflow",
         type=str,
-        default="portrait_focal_enhance_v1",
-        help="workflow name that must appear in approved_workflows (default: portrait_focal_enhance_v1)",
+        default=GA_APPROVED_WORKFLOW,
+        help=f"workflow name that must appear in approved_workflows (default: {GA_APPROVED_WORKFLOW})",
     )
     parser.add_argument(
         "--samples",
@@ -642,6 +647,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="validate the bundled sample fixtures instead of canonical paths",
     )
     parser.add_argument("--format", choices=("text", "json"), default="text")
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = _build_arg_parser()
     args = parser.parse_args(argv)
 
     repo_root: Path = args.repo_root.resolve()
