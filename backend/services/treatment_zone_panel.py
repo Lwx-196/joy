@@ -1,0 +1,259 @@
+"""Treatment-zone annotation panel — 患者真实脸 → cv2 线稿 + atlas 治疗区精准标注.
+
+Phase 1（plan anchored-focal-annotation）。owner 决策 2026-05-29：
+  底图 = cv2 边缘线稿（0 付费，不烧 img2img）；交付 = 独立 panel 图（不动 case-layout-board）。
+
+管线：
+  术前照 → cv2 线稿化 → FaceLandmarker(478) → 每个 focus_target 区按 atlas 形状
+  (ellipse/polygon/polyline/ribbon) 算像素几何 → 半透明色块 + CJK 标签 → 独立 panel。
+
+几何层（region_geometry/_*）是纯函数，可脱离 mediapipe 单测；landmark 检测与线稿是 IO 层。
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+import cv2
+import numpy as np
+
+from backend.services import facial_region_atlas as atlas
+
+# --- CJK 字体回退（与 case-layout-board 同源）---
+_FONT_PATHS = [
+    "/System/Library/Fonts/PingFang.ttc",
+    "/System/Library/Fonts/Hiragino Sans GB.ttc",
+    "/System/Library/Fonts/STHeiti Medium.ttc",
+    "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+    "/Library/Fonts/Arial Unicode.ttf",
+]
+
+# 区域配色（BGR→后续转 RGB），克制的医学示意色
+_REGION_COLORS: dict[str, tuple[int, int, int]] = {
+    "泪沟": (90, 200, 90), "卧蚕": (120, 210, 120), "眼袋": (70, 170, 70),
+    "法令纹": (70, 130, 240), "苹果肌": (40, 170, 250), "面颊": (200, 120, 255),
+    "颧骨": (40, 150, 255), "下颌线": (240, 140, 40), "下巴": (230, 170, 60),
+    "鼻基底": (180, 180, 80), "鼻翼": (160, 200, 90), "鼻尖": (200, 200, 70),
+    "唇": (120, 100, 240), "咬肌": (90, 210, 90), "川字": (220, 100, 220),
+    "太阳穴": (230, 200, 60),
+}
+_DEFAULT_COLOR = (120, 180, 240)
+
+
+@dataclass(frozen=True)
+class RegionShape:
+    """一个治疗区的一笔可绘几何（对称区有左右两笔）。"""
+    region: str
+    kind: str            # "fill" (椭圆/多边形闭合填充) | "stroke" (折线/带状描边)
+    points: np.ndarray   # (N,2) int32 像素坐标（fill=多边形顶点; stroke=有序路径）
+    width: int = 0       # stroke 描边宽（fill 忽略）
+    label_anchor: tuple[int, int] = (0, 0)
+
+
+# --------------------------- 几何层（纯函数）---------------------------
+
+def _ellipse_poly(pts: np.ndarray) -> np.ndarray:
+    """点组 → 椭圆多边形顶点。≥5 点用 fitEllipse，否则 bbox 内切椭圆。"""
+    pts = pts.astype(np.float32)
+    if len(pts) >= 5:
+        (cx, cy), (w, h), ang = cv2.fitEllipse(pts)
+        axes = (max(w / 2, 2.0), max(h / 2, 2.0))
+        poly = cv2.ellipse2Poly((int(cx), int(cy)), (int(axes[0]), int(axes[1])),
+                                int(ang), 0, 360, 12)
+        return poly.astype(np.int32)
+    x0, y0 = pts.min(0)
+    x1, y1 = pts.max(0)
+    cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+    ax, ay = max((x1 - x0) / 2, 3.0), max((y1 - y0) / 2, 3.0)
+    poly = cv2.ellipse2Poly((int(cx), int(cy)), (int(ax), int(ay)), 0, 0, 360, 12)
+    return poly.astype(np.int32)
+
+
+def _hull_poly(pts: np.ndarray) -> np.ndarray:
+    return cv2.convexHull(pts.astype(np.int32)).reshape(-1, 2)
+
+
+def _face_scale(all_pts: np.ndarray) -> float:
+    """脸宽（face_oval 极值）作为描边宽/标签字号的尺度基准。"""
+    xs = all_pts[:, 0]
+    return float(xs.max() - xs.min())
+
+
+def region_geometry(region_key: str, pts: np.ndarray) -> list[RegionShape]:
+    """把一个 atlas 区 + 该脸 478 landmark → 可绘 RegionShape 列表（左右各一笔）。
+
+    pts: (478,2) 像素坐标。返回 [] 表示该区无定义。
+    """
+    spec = atlas.FACIAL_REGION_ATLAS.get(region_key)
+    if not spec:
+        return []
+    shape = spec.get("shape", "ellipse")
+    groups = atlas.region_landmark_groups(region_key)
+    scale = _face_scale(pts)
+    shapes: list[RegionShape] = []
+    for idxs in groups:
+        idxs = [i for i in idxs if 0 <= i < len(pts)]
+        if len(idxs) < 2:
+            continue
+        gp = pts[idxs]
+        if shape in ("ellipse",):
+            poly = _ellipse_poly(gp)
+            anchor = poly.mean(0).astype(int)
+            shapes.append(RegionShape(region_key, "fill", poly, 0, tuple(anchor)))
+        elif shape in ("polygon",):
+            poly = _hull_poly(gp)
+            anchor = poly.mean(0).astype(int)
+            shapes.append(RegionShape(region_key, "fill", poly, 0, tuple(anchor)))
+        elif shape in ("polyline",):
+            w = max(3, int(scale * 0.013))
+            path = gp.astype(np.int32)
+            anchor = path.mean(0).astype(int)
+            shapes.append(RegionShape(region_key, "stroke", path, w, tuple(anchor)))
+        elif shape in ("ribbon",):
+            # 窄弧带：沿下睑缘点序向下偏移半带宽，描细带（不吃眼球）
+            w = max(3, int(scale * 0.018))
+            path = gp.astype(np.float32)
+            path[:, 1] += w * 0.6
+            path = path.astype(np.int32)
+            anchor = path.mean(0).astype(int)
+            shapes.append(RegionShape(region_key, "stroke", path, w, tuple(anchor)))
+    return shapes
+
+
+# --------------------------- IO 层 ---------------------------
+
+def lineart(image_bgr: np.ndarray) -> np.ndarray:
+    """真实照 → 干净线稿（白底深线）。cv2.pencilSketch 优先，退回 adaptiveThreshold。"""
+    try:
+        gray, _color = cv2.pencilSketch(image_bgr, sigma_s=60, sigma_r=0.07,
+                                        shade_factor=0.04)
+        return cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+    except Exception:
+        g = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
+        g = cv2.bilateralFilter(g, 9, 75, 75)
+        edges = cv2.adaptiveThreshold(g, 255, cv2.ADAPTIVE_THRESH_MEAN_C,
+                                      cv2.THRESH_BINARY, 9, 5)
+        return cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR)
+
+
+def facemesh_landmarks(image_bgr: np.ndarray, model_path: str) -> np.ndarray | None:
+    """FaceLandmarker(478) → (478,2) 像素坐标；无脸返回 None。lazy import mediapipe。"""
+    import mediapipe as mp
+    from mediapipe.tasks import python as mp_python
+    from mediapipe.tasks.python import vision
+
+    base = mp_python.BaseOptions(model_asset_path=model_path)
+    opts = vision.FaceLandmarkerOptions(base_options=base, num_faces=1)
+    lm = vision.FaceLandmarker.create_from_options(opts)
+    rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+    res = lm.detect(mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb))
+    if not res.face_landmarks:
+        return None
+    h, w = image_bgr.shape[:2]
+    return np.array([[p.x * w, p.y * h] for p in res.face_landmarks[0]], dtype=np.float32)
+
+
+# --------------------------- 合成层（PIL，CJK）---------------------------
+
+def _load_font(size: int):
+    from PIL import ImageFont
+    for p in _FONT_PATHS:
+        try:
+            return ImageFont.truetype(p, size)
+        except OSError:
+            continue
+    return ImageFont.load_default()
+
+
+def render_panel(image_bgr: np.ndarray, pts: np.ndarray, region_keys: list[str],
+                 *, alpha: float = 0.38, title: str | None = None) -> np.ndarray:
+    """线稿底图 + 各区半透明色块 + CJK 标签 → panel（返回 BGR）。"""
+    from PIL import Image, ImageDraw
+
+    base = lineart(image_bgr)
+    h, w = base.shape[:2]
+    scale = _face_scale(pts)
+    pil = Image.fromarray(cv2.cvtColor(base, cv2.COLOR_BGR2RGB)).convert("RGBA")
+    overlay = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    od = ImageDraw.Draw(overlay)
+
+    a = int(255 * alpha)
+    label_jobs: list[tuple[tuple[int, int], str, tuple[int, int, int]]] = []
+    for region in region_keys:
+        b, g, r = _REGION_COLORS.get(region, _DEFAULT_COLOR)
+        rgb = (r, g, b)
+        for sh in region_geometry(region, pts):
+            poly = [tuple(p) for p in sh.points]
+            if sh.kind == "fill":
+                od.polygon(poly, fill=(r, g, b, a), outline=(r, g, b, 255))
+            else:  # stroke
+                od.line(poly, fill=(r, g, b, min(255, a + 40)), width=sh.width,
+                        joint="curve")
+            label_jobs.append((sh.label_anchor, region, rgb))
+
+    out = Image.alpha_composite(pil, overlay)
+    od2 = ImageDraw.Draw(out)
+    font = _load_font(max(16, int(scale * 0.055)))
+    placed: list[tuple[int, int, int, int]] = []
+    for (ax, ay), region, rgb in label_jobs:
+        ax, ay = _avoid(ax, ay, placed, font, region, od2, w, h)
+        _draw_label(od2, (ax, ay), region, rgb, font, placed)
+
+    if title:
+        tfont = _load_font(max(20, int(scale * 0.07)))
+        od2.text((16, 12), title, font=tfont, fill=(30, 30, 30, 255))
+
+    rgb_arr = np.array(out.convert("RGB"))
+    return cv2.cvtColor(rgb_arr, cv2.COLOR_RGB2BGR)
+
+
+def _text_size(draw, text, font) -> tuple[int, int]:
+    x0, y0, x1, y1 = draw.textbbox((0, 0), text, font=font)
+    return x1 - x0, y1 - y0
+
+
+def _avoid(ax, ay, placed, font, text, draw, w, h) -> tuple[int, int]:
+    """简单去重叠：若标签盒与已放置重叠，下移直到不撞或越界。"""
+    tw, th = _text_size(draw, text, font)
+    pad = 6
+    for _ in range(8):
+        box = (ax - tw // 2 - pad, ay - th // 2 - pad, ax + tw // 2 + pad, ay + th // 2 + pad)
+        if all(not _overlap(box, p) for p in placed):
+            break
+        ay += th + 8
+    ax = int(min(max(ax, tw // 2 + pad), w - tw // 2 - pad))
+    ay = int(min(max(ay, th // 2 + pad), h - th // 2 - pad))
+    return ax, ay
+
+
+def _overlap(a, b) -> bool:
+    return not (a[2] < b[0] or a[0] > b[2] or a[3] < b[1] or a[1] > b[3])
+
+
+def _draw_label(draw, anchor, text, rgb, font, placed) -> None:
+    tw, th = _text_size(draw, text, font)
+    ax, ay = anchor
+    pad = 6
+    box = (ax - tw // 2 - pad, ay - th // 2 - pad, ax + tw // 2 + pad, ay + th // 2 + pad)
+    draw.rounded_rectangle(box, radius=6, fill=(255, 255, 255, 235), outline=rgb + (255,),
+                           width=2)
+    draw.text((ax - tw // 2, ay - th // 2), text, font=font, fill=rgb + (255,))
+    placed.append(box)
+
+
+def panel_for_targets(image_bgr: np.ndarray, focus_text: str, model_path: str,
+                      *, title: str | None = None) -> tuple[np.ndarray | None, list[str]]:
+    """端到端：术式描述 → 抽取全部区 → 检测 landmark → 渲染 panel。
+
+    返回 (panel_bgr|None, region_keys)。无脸检出 → (None, regions)。
+    """
+    regions = atlas.extract_regions(focus_text)
+    pts = facemesh_landmarks(image_bgr, model_path)
+    if pts is None:
+        return None, regions
+    return render_panel(image_bgr, pts, regions, title=title), regions
+
+
+__all__ = [
+    "RegionShape", "region_geometry", "lineart", "facemesh_landmarks",
+    "render_panel", "panel_for_targets",
+]

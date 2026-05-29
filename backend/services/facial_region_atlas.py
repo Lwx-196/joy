@@ -197,7 +197,7 @@ REGION_ALIASES: dict[str, str] = {
 
 
 def resolve_region_key(target: str) -> str | None:
-    """把一个 focus_target（中/英、可能含修饰）解析到 atlas 标准键。"""
+    """把一个 focus_target（中/英、可能含修饰）解析到 atlas 标准键（单个，第一匹配）。"""
     t = target.strip()
     if t in FACIAL_REGION_ATLAS:
         return t
@@ -211,6 +211,26 @@ def resolve_region_key(target: str) -> str | None:
         if alias in t:
             return key
     return None
+
+
+def extract_regions(text: str) -> list[str]:
+    """从一段术式描述里抽取**全部**命中的 atlas 区（多术式目录用）。
+
+    真实 case 目录常含多术式（如「下颌线、颈阔肌咬肌」「面颊，下巴」），
+    resolve_region_key 只返回第一个 → panel 会漏区。本函数返回去重后的全部命中，
+    保持 atlas 定义顺序（稳定输出）。
+    """
+    found: list[str] = []
+    seen: set[str] = set()
+    for key in FACIAL_REGION_ATLAS:
+        if key in text and key not in seen:
+            found.append(key)
+            seen.add(key)
+    for alias, key in REGION_ALIASES.items():
+        if alias in text and key not in seen:
+            found.append(key)
+            seen.add(key)
+    return found
 
 
 _IDX_KEYS = ("idx", "left_idx", "right_idx", "center_idx", "upper_idx", "lower_idx")
@@ -252,5 +272,5 @@ def region_shape(region_key: str) -> str:
 
 __all__ = [
     "FACEMESH_ANCHORS", "FACIAL_REGION_ATLAS", "REGION_ALIASES",
-    "resolve_region_key", "region_landmark_groups", "region_shape",
+    "resolve_region_key", "extract_regions", "region_landmark_groups", "region_shape",
 ]
