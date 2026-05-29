@@ -218,14 +218,46 @@ def _face_crop_box(pts: np.ndarray, w: int, h: int, pad: float = 0.45) -> tuple[
             min(w, int(x1 + px)), min(h, int(y1 + py)))
 
 
+def _near_side_x(pts: np.ndarray) -> tuple[float, float] | None:
+    """斜位近侧判定。返回 (midline_x, near_cheek_x)；正面(近似对称)返回 None。
+
+    近侧 = 离鼻中线更远的那侧颊（透视下展得更开 = 朝镜头）。
+    """
+    nose_x = float(pts[4, 0])
+    lc, rc = float(pts[454, 0]), float(pts[234, 0])   # patient-left / patient-right 颊极值
+    dl, dr = abs(nose_x - lc), abs(nose_x - rc)
+    if max(dl, dr) < 1e-6:
+        return None
+    # 近似对称（正面）→ 不过滤
+    if abs(dl - dr) / max(dl + dr, 1e-6) < 0.12:
+        return None
+    near_cheek_x = lc if dl > dr else rc
+    return nose_x, near_cheek_x
+
+
+def _keep_near_side(shapes: list[RegionShape], near: tuple[float, float]) -> list[RegionShape]:
+    """斜位过滤：保留近侧 + 近中线的笔；丢远侧（透视压缩）。"""
+    midline_x, near_cheek_x = near
+    near_sign = 1.0 if near_cheek_x >= midline_x else -1.0
+    span = abs(near_cheek_x - midline_x) or 1.0
+    out = []
+    for sh in shapes:
+        dx = sh.label_anchor[0] - midline_x
+        if abs(dx) < span * 0.25 or (dx * near_sign) > 0:  # 近中线 或 在近侧
+            out.append(sh)
+    return out or shapes  # 全被滤掉则不过滤（兜底）
+
+
 def render_panel(image_bgr: np.ndarray, pts: np.ndarray, region_keys: list[str],
                  *, alpha: float = 0.38, title: str | None = None,
-                 crop_to_face: bool = True, substrate_bgr: np.ndarray | None = None) -> np.ndarray:
+                 crop_to_face: bool = True, substrate_bgr: np.ndarray | None = None,
+                 near_side_only: bool = False) -> np.ndarray:
     """线稿底图 + 各区半透明色块 + CJK 标签 → panel（返回 BGR）。
 
     substrate_bgr: 已备好的线稿底图（AI 线稿路径用）。None 时本地 cv2 lineart(image_bgr)。
                    注意：用 AI 线稿时 pts 必须在该线稿上检测（保证标注与线稿几何对齐）。
     crop_to_face: 独立 panel 默认裁到脸+留白，让脸填满画面（源照常框很松/带杂物）。
+    near_side_only: 斜位用——双侧区只标朝镜头的近侧（远侧透视压缩/遮挡）。正面自动不过滤。
     接 board 时传 False（board 自己做对齐裁切）。
     """
     from PIL import Image, ImageDraw
@@ -233,6 +265,7 @@ def render_panel(image_bgr: np.ndarray, pts: np.ndarray, region_keys: list[str],
     base = substrate_bgr if substrate_bgr is not None else lineart(image_bgr)
     h, w = base.shape[:2]
     scale = _face_scale(pts)
+    near = _near_side_x(pts) if near_side_only else None
     pil = Image.fromarray(cv2.cvtColor(base, cv2.COLOR_BGR2RGB)).convert("RGBA")
     overlay = Image.new("RGBA", (w, h), (0, 0, 0, 0))
     od = ImageDraw.Draw(overlay)
@@ -244,6 +277,8 @@ def render_panel(image_bgr: np.ndarray, pts: np.ndarray, region_keys: list[str],
         b, g, r = _REGION_COLORS.get(region, _DEFAULT_COLOR)
         rgb = (r, g, b)
         shapes = region_geometry(region, pts)
+        if near is not None:
+            shapes = _keep_near_side(shapes, near)
         for sh in shapes:
             poly = [tuple(p) for p in sh.points]
             if sh.kind == "fill":

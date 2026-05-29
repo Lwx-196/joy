@@ -129,10 +129,11 @@ def generate_with_fallback(providers: list[ImageProvider], image_bytes: bytes, p
         raise RuntimeError("no ready image provider (check env: TUZI_IMAGE_PRIMARY_* / PANEL_IMG_*)")
     last: Exception | None = None
     for p in providers:
-        try:
-            return images_edit(p, image_bytes, prompt, mime=mime), p.name
-        except Exception as e:  # noqa: BLE001 — 逐家试，记下最后一个
-            last = e
+        for attempt in (1, 2):   # 瞬时网络/代理错误重试一次再换 provider
+            try:
+                return images_edit(p, image_bytes, prompt, mime=mime), p.name
+            except Exception as e:  # noqa: BLE001 — 逐家试，记下最后一个
+                last = e
     raise RuntimeError(f"all providers failed; last={last}")
 
 
