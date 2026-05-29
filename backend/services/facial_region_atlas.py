@@ -196,6 +196,57 @@ REGION_ALIASES: dict[str, str] = {
 }
 
 
+# 部位 → 可观察角度（按优先级；首个可用的角度即标注所在板）。
+# 原则：中线/眶周扁平特征→正面看全；突度类→看正面**高光区变化**也能辨（owner 2026-05-30：
+# 山根/鼻背垫高后正面高光带变、下巴前突正面高光可辨）；凹陷/轮廓流畅度类→斜/侧才显
+# （太阳穴填充、下颌线流畅在正面投影占比极小）。侧面板留作突度类的轮廓确认。
+VIEW_FRONT, VIEW_OBLIQUE, VIEW_PROFILE = "front", "oblique", "profile"
+REGION_VIEWS: dict[str, list[str]] = {
+    "川字": [VIEW_FRONT],
+    "泪沟": [VIEW_FRONT, VIEW_OBLIQUE],      # 眶下阴影正面(侧光)，斜看辅助 (A.S.S.E.S.S.)
+    "卧蚕": [VIEW_FRONT],
+    "眼袋": [VIEW_FRONT],
+    "唇": [VIEW_FRONT],
+    "鼻基底": [VIEW_FRONT],
+    "鼻翼": [VIEW_FRONT],
+    "鼻尖": [VIEW_FRONT, VIEW_PROFILE],      # 山根/鼻背垫高→正面高光带变化可辨；侧面看鼻背线
+    "下巴": [VIEW_FRONT, VIEW_PROFILE],      # 前突→正面高光可辨 + 宽度；侧面看前突轮廓
+    "苹果肌": [VIEW_FRONT, VIEW_OBLIQUE],    # 位置正面、顶点高光/饱满斜看(亚洲取内侧)
+    "法令纹": [VIEW_FRONT, VIEW_OBLIQUE],    # 沟阴影正面、沟深斜看
+    "颧骨": [VIEW_OBLIQUE, VIEW_FRONT],      # ogee 突度斜看，正面高光辅助
+    "面颊": [VIEW_OBLIQUE, VIEW_FRONT],      # ogee S 曲线只有斜看
+    "太阳穴": [VIEW_OBLIQUE, VIEW_PROFILE],  # 颞凹陷正面占比极小 (A.S.S.E.S.S. lateral+oblique)
+    "下颌线": [VIEW_OBLIQUE, VIEW_PROFILE],  # 流畅度/轮廓正面占比极小
+    "咬肌": [VIEW_FRONT, VIEW_OBLIQUE],      # 方→V 宽度正面为主(瘦脸)，轮廓斜看辅助
+}
+
+# 部位 → 治疗效果在照片上的视觉信号（驱动标注样式 + 未来 before/after eval"该看什么变化"）。
+# 循证见 delivery/region-view-effect-knowledge.md（A.S.S.E.S.S. 光影原理 + ogee + 亚洲面型）。
+SIG_HIGHLIGHT = "highlight"  # 垫高凸起→正面新高光带（投影类）
+SIG_SHADOW = "shadow"        # 填平凹陷→阴影减少（凹陷类，侧光显影）
+SIG_OGEE = "ogee"            # 颊→颌 S 形轮廓连续（45° 斜位唯一可辨）
+SIG_LINE = "line"            # 动态皱纹松解
+SIG_WIDTH = "width"          # 瘦脸宽度变窄（方→V）
+SIG_VOLUME = "volume"        # 形态/容量
+REGION_EFFECTS: dict[str, str] = {
+    "川字": SIG_LINE, "泪沟": SIG_SHADOW, "卧蚕": SIG_VOLUME, "眼袋": SIG_SHADOW,
+    "唇": SIG_VOLUME, "鼻基底": SIG_VOLUME, "鼻翼": SIG_VOLUME,
+    "鼻尖": SIG_HIGHLIGHT, "下巴": SIG_HIGHLIGHT, "苹果肌": SIG_HIGHLIGHT,
+    "法令纹": SIG_SHADOW, "颧骨": SIG_OGEE, "面颊": SIG_OGEE,
+    "太阳穴": SIG_SHADOW, "下颌线": SIG_OGEE, "咬肌": SIG_WIDTH,
+}
+
+
+def region_views(region_key: str) -> list[str]:
+    """该部位按优先级的可观察角度列表（未登记 → 默认 [front]）。"""
+    return REGION_VIEWS.get(region_key, [VIEW_FRONT])
+
+
+def region_effect(region_key: str) -> str:
+    """该部位治疗效果的视觉信号（highlight/shadow/ogee/line/width/volume；默认 volume）。"""
+    return REGION_EFFECTS.get(region_key, SIG_VOLUME)
+
+
 def resolve_region_key(target: str) -> str | None:
     """把一个 focus_target（中/英、可能含修饰）解析到 atlas 标准键（单个，第一匹配）。"""
     t = target.strip()
@@ -271,6 +322,8 @@ def region_shape(region_key: str) -> str:
 
 
 __all__ = [
-    "FACEMESH_ANCHORS", "FACIAL_REGION_ATLAS", "REGION_ALIASES",
+    "FACEMESH_ANCHORS", "FACIAL_REGION_ATLAS", "REGION_ALIASES", "REGION_VIEWS",
+    "REGION_EFFECTS", "VIEW_FRONT", "VIEW_OBLIQUE", "VIEW_PROFILE",
+    "region_views", "region_effect",
     "resolve_region_key", "extract_regions", "region_landmark_groups", "region_shape",
 ]

@@ -67,6 +67,27 @@ def test_phase1_new_regions_present_and_resolve():
 _VALID_CONFIDENCE = {"high", "inferred", "calibrated", "uncalibrated-unused"}
 
 
+def test_region_views_and_effects_consistent():
+    valid_views = {atlas.VIEW_FRONT, atlas.VIEW_OBLIQUE, atlas.VIEW_PROFILE}
+    valid_sig = {atlas.SIG_HIGHLIGHT, atlas.SIG_SHADOW, atlas.SIG_OGEE,
+                 atlas.SIG_LINE, atlas.SIG_WIDTH, atlas.SIG_VOLUME}
+    # every atlas region has a view list and an effect signal
+    for region in atlas.FACIAL_REGION_ATLAS:
+        views = atlas.region_views(region)
+        assert views and all(v in valid_views for v in views), region
+        assert atlas.region_effect(region) in valid_sig, region
+    # literature-grounded routing (knowledge base): projection→front-first,
+    # ogee/contour→oblique-first, hollow→shadow signal
+    assert atlas.region_views("鼻尖")[0] == atlas.VIEW_FRONT      # 高光 frontal
+    assert atlas.region_views("下巴")[0] == atlas.VIEW_FRONT      # 高光 frontal
+    assert atlas.region_views("太阳穴")[0] == atlas.VIEW_OBLIQUE  # 颞凹陷正面占比小
+    assert atlas.region_views("下颌线")[0] == atlas.VIEW_OBLIQUE  # ogee/轮廓
+    assert atlas.region_views("咬肌")[0] == atlas.VIEW_FRONT      # 瘦脸宽度正面
+    assert atlas.region_effect("泪沟") == atlas.SIG_SHADOW
+    assert atlas.region_effect("鼻尖") == atlas.SIG_HIGHLIGHT
+    assert atlas.region_effect("面颊") == atlas.SIG_OGEE
+
+
 def test_confidence_values_valid():
     for region, spec in atlas.FACIAL_REGION_ATLAS.items():
         assert spec.get("confidence") in _VALID_CONFIDENCE, region
