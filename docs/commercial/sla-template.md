@@ -31,7 +31,7 @@
 
 | 指标 | 目标 | 测量 | 数据源 | 当前基线 |
 |---|---|---|---|---|
-| 胜率 | ≥ `<<TELEMETRY_PENDING>>` %（最低 60% 红线） | VLM judge `winner` == enhancement | `vlm_judgements` | N=10 + C4.5 真客户 case = `<<TELEMETRY_PENDING>>`% |
+| 胜率 | ≥ `<<TELEMETRY_PENDING>>` %（最低 60% 红线） | VLM judge `winner` == enhancement | `candidate_lineage.vlm_judge_result_json`（经 `promotion_slo_monitor`） | N=10 + C4.5 真客户 case = `<<TELEMETRY_PENDING>>`% |
 | 样本量 | ≥ `<<TELEMETRY_PENDING>>` / 7 天 | sample_size from `slo_thresholds.json` | `promotion_slo_check` audit | min 974（PR #31 calibrate） |
 
 **Breach handling**：连续 7 天胜率 < 红线 → `promotion_rollback_applier` 自动 demote 一档 → CS broadcast。
@@ -40,7 +40,7 @@
 
 | 指标 | 目标 | 计算 | 数据源 |
 |---|---|---|---|
-| 增强成功率 | ≥ `<<TELEMETRY_PENDING>>` %（最低 99%） | 1 - (silent_fail_count + gpu_oom_count + paused_state_write_failed) / total_eligible | `ai_usage` / `promotion_audit_log` |
+| 增强成功率 | ≥ `<<TELEMETRY_PENDING>>` %（最低 99%） | 1 - (silent_fail_count + gpu_oom_count + paused_state_write_failed) / total_eligible | `simulation_jobs` + `render_jobs.meta_json.ai_usage`（JSON 字段，非独立表）/ `promotion_audit_log`（C3.0.4 future） |
 | Layout fallback 透明度 | 100% 客户可见 | failure-mode 文案 + billing not-charged | `docs/customer/failure-modes.md` |
 
 **Breach handling**：详见 `docs/customer/failure-modes.md`。

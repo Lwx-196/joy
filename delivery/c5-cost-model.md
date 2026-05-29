@@ -101,7 +101,7 @@ CASE_WORKBENCH_DB_PATH=/tmp/staging.db \
 
 ## 7. References
 
-- 数据源：`vlm_usage_log` / `render_jobs` / `ai_usage`
+- 数据源：`vlm_usage_log` / `render_jobs`（含 `meta_json.ai_usage` JSON 字段，非独立表）
 - 关联：`docs/commercial/billing-policy.md` / `docs/customer/billing.md`
 - Plan: `.claude/plan/comfyui-vlm-ga.md` Phase C5.3 / C5.3.1
 - RACI: `docs/commercial/raci-matrix.md` D4

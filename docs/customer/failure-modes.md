@@ -2,6 +2,16 @@
 
 > 对客户公开版。每种失败模式必须有：客户体感 + 兜底动作 + 客户可见文案 + 计费规则。
 > 来源：plan `.claude/plan/comfyui-vlm-ga.md` "Customer Failure Mode Surface" 5-mode 表。
+>
+> **⚠️ 实现状态（Beta / PLANNED-FOR-GA）**：本文档描述 **GA 目标行为**。下列客户可见信号
+> 为 **GA deliverable，尚未出货**，对客户发布前必须由 Stream A（交付明细 flag）/ Stream B
+> （后台 banner / status page）真实实现：
+> - 交付明细 flag `ai_enhancement_failed` / `bucket_hit` / `vlm_gate_blocked`（F1/F2/F4，**planned**）
+> - eligibility 百分比 banner（F2，**planned**）
+> - status page（`<<STATUS_PAGE_URL_PENDING>>`，**planned**）
+>
+> 标 `<<*_PENDING>>` 的数字等 A 流 C4.5 telemetry 回填；标 **(planned)** 的信号在真实出货前
+> 不得作为对客户的现状承诺。
 
 ## 总览
 
@@ -22,7 +32,7 @@
 **我方兜底**：
 - 自动 fallback 到 layout-only path
 - `silent_fail_count` metric 实时监控（C3.0.1 dashboard）
-- 单 case 标记 `ai_enhancement_failed=true` 在交付明细
+- 单 case 标记 `ai_enhancement_failed=true` 在交付明细 **(planned — GA deliverable，尚未出货)**
 - CS 触达：当日累计 ≥ `<<THRESHOLD_PENDING>>` 时主动通知
 
 **客户可见文案**（在交付物 / 后台明细）：
@@ -37,8 +47,8 @@
 **客户体感**：同一批 case 部分走了 AI 增强 / 部分没有。
 
 **我方兜底**：
-- 客户后台 banner 实时显示当前 eligibility 百分比（来自 manifest state）
-- 在 case 交付明细标记 `bucket_hit=true/false`
+- 客户后台 banner 实时显示当前 eligibility 百分比（来自 manifest state）**(planned — GA deliverable)**
+- 在 case 交付明细标记 `bucket_hit=true/false` **(planned — GA deliverable)**
 
 **客户可见文案**（status banner / FAQ）：
 > "AI 增强当前处于 Beta 阶段，约 {{eligibility_pct}}% 的符合条件的 case 会自动走 AI 增强路径。未命中的 case 使用 layout-only 标准交付，按 base 价计费。"
@@ -68,7 +78,7 @@
 **客户体感**：增强成品已生成但未交付，case 卡在 review 状态。
 
 **我方兜底**：
-- 成品标记 `vlm_gate_blocked=true` + 拦截原因（quality_below_threshold / clinical_review_required / 等）
+- 成品标记 `vlm_gate_blocked=true` + 拦截原因（quality_below_threshold / clinical_review_required / 等）**(planned — GA deliverable)**
 - 客户后台 / 邮件通知：当前 stage / ETA / 是否进入人工 review
 - 人工 review 通道：CS → Clinical owner 7 工作日内决议
 

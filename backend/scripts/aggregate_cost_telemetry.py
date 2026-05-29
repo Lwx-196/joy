@@ -65,8 +65,10 @@ Output schema (v1):
         "failure_reasons": {<reason>: <count>, ...}
       },
       "cost_per_case": {
-        "vlm_api_cost_usd": <float>,         # VLM cost / unique case
+        "vlm_api_cost_usd": <float>,         # matched_vlm_cost_usd / estimated_eligible_cases
         "estimated_eligible_cases": <int>,    # finished render_jobs uniqued by case_id
+        "matched_vlm_cost_usd": <float>,      # VLM cost joined on finished-case case_id
+        "total_vlm_api_cost_usd": <float>,    # all-window VLM cost (incl. classifier / non-finished)
         "_note": "GPU amortized cost + fixed cost are added by finance, not derivable from DB"
       },
       "limitations": [
@@ -83,7 +85,6 @@ import argparse
 import json
 import os
 import sqlite3
-import statistics
 import sys
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
@@ -120,7 +121,7 @@ def _aggregate_vlm_usage(conn: sqlite3.Connection, cutoff: str) -> dict[str, Any
     """Aggregate vlm_usage_log over the window. Pure SELECT."""
     rows = conn.execute(
         """
-        SELECT purpose, provider, model, cost_usd, latency_ms, status
+        SELECT purpose, provider, model, case_id, cost_usd, latency_ms, status
           FROM vlm_usage_log
          WHERE created_at >= ?
         """,
@@ -136,6 +137,9 @@ def _aggregate_vlm_usage(conn: sqlite3.Connection, cutoff: str) -> dict[str, Any
     )
     by_provider_model: Counter[tuple[str, str]] = Counter()
     by_provider_model_cost: dict[tuple[str, str], float] = defaultdict(float)
+    # S6: per-case cost so cost_per_case can join numerator to the finished
+    # case_id set (avoids dividing all-window cost by finished-case count).
+    cost_by_case_id: dict[int, float] = defaultdict(float)
 
     for r in rows:
         purpose = r["purpose"] or "unknown"
@@ -146,6 +150,9 @@ def _aggregate_vlm_usage(conn: sqlite3.Connection, cutoff: str) -> dict[str, Any
         key = (r["provider"] or "unknown", r["model"] or "unknown")
         by_provider_model[key] += 1
         by_provider_model_cost[key] += float(r["cost_usd"] or 0.0)
+
+        if r["case_id"] is not None:
+            cost_by_case_id[int(r["case_id"])] += float(r["cost_usd"] or 0.0)
 
     purpose_out = {
         p: {
@@ -175,6 +182,7 @@ def _aggregate_vlm_usage(conn: sqlite3.Connection, cutoff: str) -> dict[str, Any
         "latency_ms_p95": round(_percentile(latencies, 95), 2),
         "by_purpose": purpose_out,
         "by_provider_model": provider_model_out,
+        "_cost_by_case_id": dict(cost_by_case_id),
     }
 
 
@@ -217,7 +225,7 @@ def _aggregate_render_jobs(conn: sqlite3.Connection, cutoff: str) -> dict[str, A
         "duration_ms_p50": round(_percentile(durations, 50), 2),
         "duration_ms_p95": round(_percentile(durations, 95), 2),
         "by_status": dict(by_status),
-        "_finished_case_ids_size": len(finished_case_ids),
+        "_finished_case_ids": finished_case_ids,
     }
 
 
@@ -291,17 +299,37 @@ def _compute_cost_per_case(
     """Derive a first-cut VLM cost-per-eligible-case. Conservative.
 
     Eligible cases = unique case_ids with a finished render_job in window.
+
+    S6 fix: the numerator is the VLM cost *attributed to those same finished
+    case_ids* (join on `case_id`), not the all-window VLM total. Dividing the
+    all-window total (which includes classifier calls and cases that never
+    finished) by the finished-case count systematically over-estimated the
+    per-case cost. We still surface `total_vlm_api_cost_usd` (all-window) for
+    transparency.
+
     Excludes GPU amortized / electricity / hardware / human review (out of DB).
     """
-    eligible = max(int(render_jobs.get("_finished_case_ids_size") or 0), 0)
+    finished_case_ids: set[int] = render_jobs.get("_finished_case_ids") or set()
+    eligible = len(finished_case_ids)
+    cost_by_case_id: dict[int, float] = vlm_usage.get("_cost_by_case_id") or {}
     total_vlm_cost = float(vlm_usage.get("total_cost_usd") or 0.0)
+
+    # Numerator: VLM cost for case_ids that actually finished a render in window.
+    matched_vlm_cost = sum(
+        cost_by_case_id.get(cid, 0.0) for cid in finished_case_ids
+    )
     return {
-        "vlm_api_cost_usd": round(total_vlm_cost / eligible, 6) if eligible else 0.0,
+        "vlm_api_cost_usd": round(matched_vlm_cost / eligible, 6) if eligible else 0.0,
         "estimated_eligible_cases": eligible,
+        "matched_vlm_cost_usd": round(matched_vlm_cost, 6),
         "total_vlm_api_cost_usd": round(total_vlm_cost, 6),
         "_note": (
-            "GPU amortized / electricity / hardware / human review cost lives "
-            "outside DB; finance must add to derive end-to-end per-case cost"
+            "vlm_api_cost_usd = VLM cost joined on finished-case case_id "
+            "(matched_vlm_cost_usd / estimated_eligible_cases); "
+            "total_vlm_api_cost_usd is the all-window total incl. classifier + "
+            "non-finished cases. GPU amortized / electricity / hardware / human "
+            "review cost lives outside DB; finance must add to derive end-to-end "
+            "per-case cost"
         ),
     }
 
@@ -314,8 +342,9 @@ def _aggregate(conn: sqlite3.Connection, window_days: int) -> dict[str, Any]:
     lineage = _aggregate_candidate_lineage(conn, cutoff)
     cost_per_case = _compute_cost_per_case(vlm, renders)
 
-    # Strip internal scratch field before serializing
-    renders.pop("_finished_case_ids_size", None)
+    # Strip internal scratch fields before serializing (sets aren't JSON-able)
+    renders.pop("_finished_case_ids", None)
+    vlm.pop("_cost_by_case_id", None)
 
     return {
         "schema_version": SCHEMA_VERSION,
@@ -332,6 +361,7 @@ def _aggregate(conn: sqlite3.Connection, window_days: int) -> dict[str, Any]:
             "GPU rental / electricity / hardware cost lives outside DB",
             "Drill exclusion is best-effort via simulation_jobs.audit_json substring sniff; will tighten post-C3.0.4",
             "render_jobs.duration computed via julianday diff (ms granularity); does not include queue wait time",
+            "cost_per_case joins VLM cost on finished-case case_id, but VLM window uses created_at while render window uses enqueued_at; a case's judge call may fall just outside the render window edge",
         ],
     }
 
