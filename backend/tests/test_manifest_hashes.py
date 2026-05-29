@@ -17,8 +17,6 @@ import json
 from copy import deepcopy
 from pathlib import Path
 
-import pytest
-
 from backend.scripts.compute_manifest_hashes import (
     APPROVAL_TTL_DAYS,
     BINDING_NAMES,

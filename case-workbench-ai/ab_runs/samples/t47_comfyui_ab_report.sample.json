@@ -1,0 +1,22 @@
+{
+  "validation_status": "ready_for_human_review",
+  "ready_for_human_review": true,
+  "promote_to_default": true,
+  "comparable_pair_count": 32,
+  "winner_evidence_count": 24,
+  "candidate_win_count": 22,
+  "promotion_approval": {
+    "status": "approved",
+    "approved": true,
+    "scope": "comfyui_default_promotion_v1",
+    "decision": "approve_default_promotion",
+    "approver": "linweixiang0301@gmail.com",
+    "approved_at": "2026-05-28T22:55:00+00:00",
+    "expires_at": "2026-06-04T22:55:00+00:00",
+    "approved_workflows": ["portrait_focal_enhance_v1"],
+    "approved_evidence_sha256": {
+      "vlm_guardrail_report": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "production_gate_report": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+    }
+  }
+}
