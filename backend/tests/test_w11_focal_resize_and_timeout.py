@@ -241,3 +241,44 @@ class TestFocalEnhanceIntegratesResizeAndTimeout:
         # must be upscaled back to the ORIGINAL resolution.
         with Image.open(result) as out:
             assert out.size == (1920, 1280)
+
+    def test_nonresize_non8_source_restored_to_exact_dims(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ):
+        """W11.5: a non-resized source whose dims aren't ÷8 must be restored.
+
+        Source 853x1280 (long_edge=1280 == cap, so NO W11 resize → needs_upscale
+        is False). SDXL/VAE snaps the working dims to a multiple of 8, so the
+        generated artifact comes back 848x1280. Pre-W11.5 the ``needs_upscale``
+        guard skipped restoration and the output stayed 848x1280 (5px short,
+        surfaced in the C1.2 smoke for case 134). W11.5 conditions on the actual
+        generated dims, so the output is restored to the exact 853x1280 source.
+        """
+        src = tmp_path / "input_853.jpg"
+        Image.new("RGB", (853, 1280), color=(140, 110, 90)).save(src, "JPEG")
+
+        captured: dict = {}
+
+        def fake_workflow(input_path, *, output_dir, workflow_name,
+                          workflow_parameters, focus_mask_path,
+                          positive_prompt, negative_prompt,
+                          timeout_seconds, **kwargs):
+            with Image.open(input_path) as im:
+                captured["w"], captured["h"] = im.size
+            # Simulate SDXL ÷8 snap: 853 -> 848 (nearest multiple of 8 down).
+            generated = output_dir / "comfyui-generated.png"
+            Image.new("RGB", (848, 1280), color=(0, 255, 0)).save(generated, "PNG")
+            return {"generated_path": str(generated)}
+
+        monkeypatch.setattr(ai, "_run_comfyui_workflow", fake_workflow)
+
+        result = ai.run_comfyui_focal_enhance(
+            src, focus_targets=["泪沟"], brand="md_ai", case_id=129,
+        )
+        assert Path(result).is_file()
+        # Workflow saw the un-resized 853-wide input (long_edge 1280 == cap).
+        assert (captured["w"], captured["h"]) == (853, 1280)
+        # W11.5: despite no W11 resize, the ÷8-snapped 848 output is restored
+        # to the EXACT 853x1280 source dims (not left 5px short).
+        with Image.open(result) as out:
+            assert out.size == (853, 1280)

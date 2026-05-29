@@ -3240,26 +3240,33 @@ def run_comfyui_focal_enhance(
         else:
             stable_path = generated_path
 
-        if needs_upscale:
-            try:
-                from PIL import Image
-                with Image.open(generated_path) as src_im:
-                    upscaled = src_im.convert("RGB").resize((orig_w, orig_h), Image.LANCZOS)
-                # Write via a sibling temp + atomic replace so the in-place case
-                # (stable_path == generated_path, i.e. caller-supplied output_dir)
-                # never leaves a half-written file.
-                tmp_out = stable_path.with_name(f".upscale-{os.getpid()}-{stable_path.name}")
-                upscaled.save(tmp_out, format="PNG")
-                os.replace(tmp_out, stable_path)
-            except Exception as exc:  # noqa: BLE001
-                LOGGER.warning(
-                    "ComfyUI focal enhance: upscale-back failed for %s (%s); using non-upscaled output",
-                    image_path.name, exc,
-                )
-                if stable_path != generated_path:
+        # W11.5: restore the output to EXACT source dims whenever the *generated*
+        # image differs from the source — not only when W11 resized the input
+        # (``needs_upscale``). SDXL/VAE snaps working dims to a multiple of 8
+        # (e.g. 853 -> 848), so a non-resized, non-divisible-by-8 source would
+        # otherwise emit a few-px-short output (case 134: 853x1280 -> 848x1280,
+        # surfaced in C1.2 smoke). Conditioning on the actual generated dims
+        # generalizes the W11.4 upscale-back contract to every path.
+        try:
+            from PIL import Image
+            with Image.open(generated_path) as gen_im:
+                if gen_im.size != (orig_w, orig_h):
+                    restored = gen_im.convert("RGB").resize((orig_w, orig_h), Image.LANCZOS)
+                    # Sibling temp + atomic replace so the in-place case
+                    # (stable_path == generated_path, caller-supplied output_dir)
+                    # never leaves a half-written file.
+                    tmp_out = stable_path.with_name(f".restore-{os.getpid()}-{stable_path.name}")
+                    restored.save(tmp_out, format="PNG")
+                    os.replace(tmp_out, stable_path)
+                elif stable_path != generated_path:
                     shutil.copyfile(generated_path, stable_path)
-        elif stable_path != generated_path:
-            shutil.copyfile(generated_path, stable_path)
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning(
+                "ComfyUI focal enhance: output dim-restore failed for %s (%s); using raw output",
+                image_path.name, exc,
+            )
+            if stable_path != generated_path:
+                shutil.copyfile(generated_path, stable_path)
         return stable_path
     except Exception as exc:  # noqa: BLE001
         LOGGER.warning(
