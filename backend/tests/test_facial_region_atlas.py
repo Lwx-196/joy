@@ -45,6 +45,23 @@ def test_resolve_region_key():
     assert atlas.resolve_region_key("童颜针全脸") is None
 
 
+def test_phase1_new_regions_present_and_resolve():
+    # 4 regions added/redone in Phase 1 (real-case keywords 咬肌/川字/太阳穴 + 颧骨 redo).
+    for region in ("咬肌", "川字", "太阳穴", "颧骨"):
+        assert region in atlas.FACIAL_REGION_ATLAS, region
+        assert atlas.region_landmark_groups(region), f"{region} has no groups"
+    # resolve from procedure substrings (single-region strings; multi-region dirs
+    # need a separate all-matches extractor — see panel design)
+    assert atlas.resolve_region_key("瘦脸针咬肌注射") == "咬肌"
+    assert atlas.resolve_region_key("骨性1支注射川字纹") == "川字"
+    assert atlas.resolve_region_key("太阳穴填充") == "太阳穴"
+    # 川字 is a midline single-group zone
+    assert len(atlas.region_landmark_groups("川字")) == 1
+    # 颧骨 redone to an ellipse, symmetric L/R
+    assert atlas.region_shape("颧骨") == "ellipse"
+    assert len(atlas.region_landmark_groups("颧骨")) == 2
+
+
 # high = 官方 connections 索引; inferred = 社区图待校准;
 # calibrated = Phase 1 真实正脸叠点校准过; uncalibrated-unused = 真实语料 0 例、暂不重做
 _VALID_CONFIDENCE = {"high", "inferred", "calibrated", "uncalibrated-unused"}

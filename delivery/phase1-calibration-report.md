@@ -66,7 +66,25 @@ confidence: inferred → calibrated
 - 显式叠点 overlay → 人眼可见每点落位（这次不再「不可感知」）。
 - 单测 `test_facial_region_atlas.py` 5 passed（含校准 confidence 值）；ruff clean。
 
-## 待 owner 决策（影响 Phase 2 panel 区域覆盖）
-1. 颧骨：确认暂不重做（0 命中）？
-2. 补 咬肌/川字/太阳穴 进 atlas（各 4 例）？若是，本 session 继续校准这三个。
-3. 还是先用现有已校准区（泪沟/下巴/法令纹/下颌线/唇/鼻/卧蚕/苹果肌/面颊）做 panel，缺的区后补？
+## owner 决策（2026-05-29）：补缺 3 区 + 重做颧骨 — ✅ 已完成
+
+owner 钦定最全路线。本 session 用同样 explorer→hypothesis→validate 循环完成：
+
+| 区 | shape | 真实例 | 索引（patient-right / 单区）| 验证 |
+|---|---|---|---|---|
+| **咬肌** | ellipse | 4 | `[58,172,136,150,169,210,214,138,135]` | ✅ 落下颌角/下颌支肌腹 |
+| **川字** | ellipse | 4 | `[9,8,168,107,336,55,285,66,296]`(midline 单区) | ✅ 落眉间纵纹带 |
+| **太阳穴** | ellipse | 4 | `[21,54,68,46,70,156,139,162]` | ✅ 落颞窝凹陷 |
+| **颧骨**(重做) | polyline→**ellipse** | 0 | `[116,117,118,119,100,101,50,36]` | ✅ 正面骨性突起，高于/外于苹果肌 |
+
+全部 `confidence: calibrated`，左右用标准 MediaPipe 镜像对。黄阿红(深纹老脸)+黄艺玲(年轻脸)
+双验证；证据 `4新区-from-atlas-{黄阿红,黄艺玲}.jpg`（直接读 committed atlas 渲染）。
+单测 `test_facial_region_atlas.py` 6 passed（+`test_phase1_new_regions_present_and_resolve`）；ruff clean。
+
+atlas 现覆盖 **16 区**：泪沟/卧蚕/眼袋/法令纹/苹果肌/面颊/颧骨/下颌线/下巴/鼻基底/鼻翼/鼻尖/唇/咬肌/川字/太阳穴。
+真实语料剩余未覆盖：印第安纹(1，泪沟外延)/山根(1)/额头(1)/颈纹(7，FaceMesh 网格外)。
+
+## ⚠️ 给 Phase 2 panel 设计的已知约束
+- `resolve_region_key()` 只返回**单个**区。真实 case 目录常是多术式（如「下颌线、颈阔肌咬肌」
+  「面颊，下巴」），panel 需画**全部** focus_targets → 要新增「全匹配抽取器」（返回 list）。
+  当前 substring 匹配按 dict 顺序命中第一个，多区会漏。
