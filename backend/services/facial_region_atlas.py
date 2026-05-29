@@ -237,6 +237,31 @@ REGION_EFFECTS: dict[str, str] = {
 }
 
 
+# 乔雅登三阶光影美学：光/影/灰三区（光影对比越强→脸越立体，如化妆 T 区高光+外侧阴影）。
+# 光区=打高光点吸光拉伸轮廓(含填平致影凹陷)；影区=内收收缩定深邃；灰区=正脸侧脸交界/转折(↔45°斜位 ogee)。
+# 见 delivery/region-view-effect-knowledge.md。
+ZONE_LIGHT, ZONE_SHADOW, ZONE_TRANSITION = "light", "shadow", "transition"
+REGION_ZONES: dict[str, str] = {
+    "川字": ZONE_LIGHT, "泪沟": ZONE_LIGHT, "卧蚕": ZONE_LIGHT, "眼袋": ZONE_SHADOW,
+    "唇": ZONE_LIGHT, "鼻基底": ZONE_LIGHT, "鼻翼": ZONE_LIGHT, "鼻尖": ZONE_LIGHT,
+    "下巴": ZONE_LIGHT, "苹果肌": ZONE_LIGHT, "法令纹": ZONE_LIGHT,
+    "颧骨": ZONE_TRANSITION,                                    # 颧凸=灰区转折
+    "面颊": ZONE_SHADOW, "太阳穴": ZONE_SHADOW, "下颌线": ZONE_SHADOW, "咬肌": ZONE_SHADOW,
+}
+
+# MD Codes FCR 层级（de Maio）：Foundation 地基→Contour 轮廓→Refinement 精修。
+# = owner 说的"面部轮廓 vs 精细化部位"：foundation+contour=轮廓骨架，refinement=精细化。
+TIER_FOUNDATION, TIER_CONTOUR, TIER_REFINEMENT = "foundation", "contour", "refinement"
+REGION_TIERS: dict[str, str] = {
+    "苹果肌": TIER_FOUNDATION, "面颊": TIER_FOUNDATION,          # 中颊地基(Ck)
+    "太阳穴": TIER_CONTOUR, "下巴": TIER_CONTOUR, "下颌线": TIER_CONTOUR,
+    "咬肌": TIER_CONTOUR, "颧骨": TIER_CONTOUR, "鼻尖": TIER_CONTOUR,  # 轮廓/投影结构
+    "泪沟": TIER_REFINEMENT, "法令纹": TIER_REFINEMENT, "川字": TIER_REFINEMENT,
+    "唇": TIER_REFINEMENT, "卧蚕": TIER_REFINEMENT, "眼袋": TIER_REFINEMENT,
+    "鼻基底": TIER_REFINEMENT, "鼻翼": TIER_REFINEMENT,          # 精细化
+}
+
+
 def region_views(region_key: str) -> list[str]:
     """该部位按优先级的可观察角度列表（未登记 → 默认 [front]）。"""
     return REGION_VIEWS.get(region_key, [VIEW_FRONT])
@@ -245,6 +270,16 @@ def region_views(region_key: str) -> list[str]:
 def region_effect(region_key: str) -> str:
     """该部位治疗效果的视觉信号（highlight/shadow/ogee/line/width/volume；默认 volume）。"""
     return REGION_EFFECTS.get(region_key, SIG_VOLUME)
+
+
+def region_zone(region_key: str) -> str:
+    """乔雅登光影灰三区归属（light/shadow/transition；默认 light）。"""
+    return REGION_ZONES.get(region_key, ZONE_LIGHT)
+
+
+def region_tier(region_key: str) -> str:
+    """MD Codes FCR 层级（foundation/contour/refinement；默认 refinement）。"""
+    return REGION_TIERS.get(region_key, TIER_REFINEMENT)
 
 
 def resolve_region_key(target: str) -> str | None:
@@ -323,7 +358,10 @@ def region_shape(region_key: str) -> str:
 
 __all__ = [
     "FACEMESH_ANCHORS", "FACIAL_REGION_ATLAS", "REGION_ALIASES", "REGION_VIEWS",
-    "REGION_EFFECTS", "VIEW_FRONT", "VIEW_OBLIQUE", "VIEW_PROFILE",
-    "region_views", "region_effect",
+    "REGION_EFFECTS", "REGION_ZONES", "REGION_TIERS",
+    "VIEW_FRONT", "VIEW_OBLIQUE", "VIEW_PROFILE",
+    "ZONE_LIGHT", "ZONE_SHADOW", "ZONE_TRANSITION",
+    "TIER_FOUNDATION", "TIER_CONTOUR", "TIER_REFINEMENT",
+    "region_views", "region_effect", "region_zone", "region_tier",
     "resolve_region_key", "extract_regions", "region_landmark_groups", "region_shape",
 ]

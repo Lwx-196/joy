@@ -88,6 +88,22 @@ def test_region_views_and_effects_consistent():
     assert atlas.region_effect("面颊") == atlas.SIG_OGEE
 
 
+def test_zone_and_tier_cover_all_regions():
+    # 乔雅登光影灰 + MD Codes FCR：每个 atlas 区都有归属
+    valid_zone = {atlas.ZONE_LIGHT, atlas.ZONE_SHADOW, atlas.ZONE_TRANSITION}
+    valid_tier = {atlas.TIER_FOUNDATION, atlas.TIER_CONTOUR, atlas.TIER_REFINEMENT}
+    for region in atlas.FACIAL_REGION_ATLAS:
+        assert atlas.region_zone(region) in valid_zone, region
+        assert atlas.region_tier(region) in valid_tier, region
+    # 灰区=正脸侧脸交界(颧凸)；中颊=地基；颧弓下/下颌缘=影区
+    assert atlas.region_zone("颧骨") == atlas.ZONE_TRANSITION
+    assert atlas.region_zone("下颌线") == atlas.ZONE_SHADOW
+    assert atlas.region_zone("苹果肌") == atlas.ZONE_LIGHT
+    assert atlas.region_tier("苹果肌") == atlas.TIER_FOUNDATION   # 中颊地基
+    assert atlas.region_tier("下巴") == atlas.TIER_CONTOUR        # 轮廓
+    assert atlas.region_tier("泪沟") == atlas.TIER_REFINEMENT     # 精细化
+
+
 def test_confidence_values_valid():
     for region, spec in atlas.FACIAL_REGION_ATLAS.items():
         assert spec.get("confidence") in _VALID_CONFIDENCE, region

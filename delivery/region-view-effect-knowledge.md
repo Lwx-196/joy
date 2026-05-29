@@ -89,6 +89,39 @@
 5. Explore Plastic Surgery — Ogee curve（45° 斜位最佳，frontal 压缩深度/lateral 遮双曲）+
    3D chin assessment（正面高光 tip-defining point）。
 
+## 乔雅登光影美学 + MD Codes（owner 指定深挖）
+
+### 乔雅登三阶光影美学：光/影/灰三区（全脸光影地图）
+> "光影灰之间的对比越明显，面部就会显得越立体，就像化妆在 T 区打高光和外侧打阴影是同样的道理。"
+
+| 区 | 定义 | 部位 | 注射策略 |
+|---|---|---|---|
+| **光区** | 打高光点吸光、拉伸轮廓（含填平致影的凹陷）| 额、鼻、唇、颏、泪沟/黑眼圈、法令纹、颧低平 | 高光点 |
+| **影区** | 内收收缩、增紧致深邃 | 颧弓下方、咬肌前缘、颏下点、颞部、颊部、下颌缘 | 内收/收紧 |
+| **灰区** | **正脸与侧脸交界面**、定宽窄/转折弧度 | 额结节、眉峰、颧凸、口角、颏结节 | 调转折度 |
+
+**关键收敛**：**灰区 = 正脸↔侧脸交界 = 45° 斜位看的 ogee 转折**。三框架在此合一：
+光影灰(乔雅登) × 角度路由(摄影规范) × ogee(整形文献) 指向同一件事 —— **轮廓转折在斜位**。
+
+### MD Codes（de Maio，乔雅登全球框架）：FCR 层级 = 轮廓 vs 精细化
+75 注射点 / 13 区，三阶**顺序**（也是结构重要性）：
+
+| 层级 | 区 | 含义（= owner 的"轮廓 vs 精细化"）|
+|---|---|---|
+| **Foundation 地基** | 中颊 Ck1–5（苹果肌/面颊）| 先立中颊结构支撑 |
+| **Contour 轮廓** | 颞 T、颏 C1–6、下颌 Jw1–5（太阳穴/下巴/下颌线/咬肌/颧骨）| 构建轮廓框架 |
+| **Refinement 精修** | 泪沟 Tt、额 F、眶外 O、法令 NL、唇 Lp、木偶 M（+卧蚕/眼袋/鼻翼）| 精细化收尾 |
+
+→ **Foundation+Contour = 轮廓骨架；Refinement = 精细化部位**。原则："先打地基(foundation)，
+再构轮廓(contour)，最后精修(refinement)" —— 不是逐个治缺陷，而是分层重建。
+
+### 已落 atlas（4 轴）
+每个部位现有 4 个正交属性，供标注样式 + 分组 + eval：
+1. `REGION_VIEWS` 视角（front/oblique/profile）
+2. `REGION_EFFECTS` 效果信号（highlight/shadow/ogee/line/width/volume）
+3. `REGION_ZONES` 光影灰（light/shadow/transition）← 乔雅登
+4. `REGION_TIERS` FCR 层级（foundation/contour/refinement）← MD Codes
+
 ## 对当前实现的指导
 - `REGION_VIEWS` 按"角度优先级"列更新（已落 atlas）。
 - 新增 `REGION_EFFECTS`：部位→信号（highlight/shadow/ogee/line/width/volume）→ 供标注样式与
