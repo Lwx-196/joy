@@ -160,7 +160,65 @@ boards produced under `/tmp/focal-p4-stub/{baseline,candidate}/<case>/`. The ful
 discovery → selection → scratch-staging → real layout render → packet path is
 **proven end-to-end at 0 quota** (only the enhancement step is deferred to T4.3).
 
-## T4.3 — real gate run (next, owner-gated: PAID POLISH + ComfyUI)
+## T4.3 — N=2 trial REVERSED the baseline (POLISH unviable → existing-board)
+
+The first real N=2 trial (baseline=POLISH) **surfaced two fatal problems with the
+POLISH baseline arm, exactly what the small trial was for** (no big spend wasted):
+
+| case | POLISH (gpt-image-2) behaviour | outcome |
+|---|---|---|
+| 王嘉琦 | output **1086×1448** (original 术后 = 4284×5712) — gpt-image-2 regenerates at ~1024-scale, **drops resolution** | 术前/术后 res mismatch → layout render "没有可渲染的角度槽位" → dropped |
+| 赵建芬 | POLISH **timed out at 240s** (`DEFAULT_TIMEOUT_SEC`) + retry | 2nd paid call; process killed to stop waste |
+
+Root cause: gpt-image-2 is a slow ~1024-scale **whole-face regeneration** — it both
+loses the high resolution the layout render needs (breaking angle pairing) and is
+operationally slow. POLISH-as-baseline cannot produce a comparable board via the
+standalone render path. **Process killed before further paid waste; 0-item packet.**
+
+Contrast: FOCAL (candidate) crop+composite **preserves the original 4284×5712**, so
+its render keeps angle pairing — focal is *more renderable* than POLISH, not less.
+
+**Owner decision 2026-05-29 (revised):** baseline = **existing shipped final-board**
+(`--baseline existing-board`, default). Each proven-renderable case already has
+`.case-layout-output/<brand>/<template>/render/final-board.jpg` — the literal
+product the customer currently gets (e.g. 王嘉琦 1920×1207, status ok). Baseline =
+that board (0 quota, no re-render, no POLISH, no timeout); candidate = FOCAL
+re-render. This is the faithful "FOCAL vs current shipped product" gate and
+sidesteps every POLISH failure. Builder updated + tested (17 unit tests, 1039
+backend pass, ruff clean). N=2 trial re-running with the existing-board baseline
+to verify the FOCAL candidate arm renders end-to-end (0 paid).
+
+## T4.3 — first real signal (N=1 王嘉琦) + 3 confounds fixed
+
+**FOCAL candidate arm renders end-to-end (proven):** 王嘉琦's focal output is a
+19 MB full-res PNG (crop+composite preserves 4284×5712, unlike POLISH's 1086×1448)
+→ composited → layout board rendered OK.
+
+**First judge verdict (Vertex gemini-3.5-flash) — surfaced 3 confounds, each fixed:**
+1. *Header underscores*: candidate lost — "raw system labels and underscores" in
+   the title (my slug-named scratch dir leaked into the board header). Fixed:
+   scratch leaf = original 术式 name.
+2. *Lost patient name*: candidate lost — "generic placeholder name" (flat scratch
+   dir dropped the patient parent). Fixed: mirror ``<患者>/<术式>`` two levels.
+3. *Template mismatch*: the shipped boards use **per-case** templates (王嘉琦
+   single-compare / 林真呈 tri-compare). Fixed: ``detect_existing_render`` reads
+   brand+template from the board path and the **selected after images** from the
+   manifest ``selected_slots`` → candidate renders the SAME layout and only
+   focal-enhances the 1–3 afters the board actually composes (not all 5–10).
+
+**Real signal after confounds removed (N=1, 王嘉琦 卧蚕/泪沟):** judge = **TIE**
+("completely identical", 3:3). Pixel-diff: focal genuinely changed the source
+(6.36% of pixels, the under-eye region) but the layout board's downscale makes the
+board diff perceptually negligible (meanΔ≈1.2/255) → **the focal under-eye change
+is below the VLM judge's perceptual threshold at board scale.**
+
+**Owner decision:** verify the *mechanism* on 3–4 **large-region** cases
+(法令纹/面颊/下巴) — does a bigger focal change survive board downscaling? Builder
+ready (`--select 林真呈,江佳慧,黄婧`, --baseline existing-board). 20 unit tests,
+1042 backend pass, ruff clean. **Blocked: ComfyUI on :8188 keeps dying (3×) —
+needs a stable restart before the big-region run.**
+
+## T4.3 — big-region mechanism check (next; needs stable ComfyUI)
 
 1. Select N≥10 (propose ~12) cases from the 86, diverse focus regions + ≥2
    large-union (79-style) cases. Copy each to a scratch staging dir (never mutate

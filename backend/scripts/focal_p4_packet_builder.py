@@ -200,8 +200,18 @@ def _stage_arm(spec: CaseSpec, arm: str, scratch_root: Path) -> Path:
     """Copy the before/after pair into an isolated scratch case dir for ``arm``.
 
     Returns the scratch case dir. Originals are never touched.
+
+    The scratch must replicate the original two-level ``<患者>/<术式>`` structure:
+    the layout render derives the board header from BOTH the procedure dir name
+    (术式 title) AND the parent dir name (the patient identifier). Two confounds
+    the VLM judge penalised on the candidate (P4 N=1 first-signal, 2026-05-29):
+      1. slug leaf ('…卧蚕_泪沟') → underscores/"raw system labels" in the title;
+      2. flat dir → lost patient name → "generic placeholder" identifier.
+    So mirror ``scratch/<arm>/<patient>/<procedure>`` to match the baseline board.
     """
-    scratch_case = scratch_root / arm / spec.slug
+    patient = spec.case_dir.parent.name or "case"
+    procedure = spec.case_dir.name
+    scratch_case = scratch_root / arm / patient / procedure
     if scratch_case.exists():
         shutil.rmtree(scratch_case)
     scratch_case.mkdir(parents=True, exist_ok=True)
@@ -215,6 +225,62 @@ def _stage_arm(spec: CaseSpec, arm: str, scratch_root: Path) -> Path:
     return scratch_case
 
 
+def find_existing_board(
+    spec: CaseSpec, brand: str, template: str
+) -> Path | None:
+    """The case's already-shipped product board = the 0-quota baseline.
+
+    Prefer the brand/template the candidate renders into; fall back to any
+    existing final-board so a case rendered under a different brand still
+    yields a baseline (the judge compares product-vs-product, not paths).
+    """
+    exact = list(
+        spec.case_dir.glob(f".case-layout-output/{brand}/{template}/render/final-board.*")
+    )
+    if exact and exact[0].is_file():
+        return exact[0]
+    any_board = sorted(spec.case_dir.glob(".case-layout-output/*/*/render/final-board.*"))
+    return any_board[0] if any_board and any_board[0].is_file() else None
+
+
+def detect_existing_render(spec: CaseSpec) -> dict[str, Any] | None:
+    """From the case's shipped board, recover (board, brand, template, the exact
+    after images the render selected).
+
+    The candidate MUST render with the SAME brand/template (single- vs
+    tri-compare differ in layout → otherwise a confound) and need only focal the
+    after images actually composed into the board (manifest ``selected_slots``),
+    not all 5–10 — the others are never shown.
+    """
+    boards = sorted(spec.case_dir.glob(".case-layout-output/*/*/render/final-board.*"))
+    board = next((b for b in boards if b.is_file()), None)
+    if board is None:
+        return None
+    # path: .../.case-layout-output/<brand>/<template>/render/final-board.*
+    parts = board.parts
+    try:
+        brand = parts[-4]
+        template = parts[-3]
+    except IndexError:
+        return None
+    after_names: list[str] = []
+    manifest = board.parent / "manifest.final.json"
+    if manifest.is_file():
+        try:
+            m = json.loads(manifest.read_text(encoding="utf-8"))
+            for group in m.get("groups", []) or []:
+                for slot in (group.get("selected_slots") or {}).values():
+                    after = (slot or {}).get("after") or {}
+                    name = after.get("name") or after.get("render_filename")
+                    if name and name not in after_names:
+                        after_names.append(name)
+        except (ValueError, OSError):
+            after_names = []
+    if not after_names:
+        after_names = spec.after_names or [spec.after_path.name]
+    return {"board": board, "brand": brand, "template": template, "after_names": after_names}
+
+
 def build_arm(
     spec: CaseSpec,
     arm: str,
@@ -224,6 +290,8 @@ def build_arm(
     template: str,
     enhance_fn: Callable[[Path, str, CaseSpec], Path] | None,
     render_fn: Callable[[Path, str, str], dict[str, Any]],
+    require_enhancement: bool = False,
+    after_names_override: list[str] | None = None,
 ) -> Path:
     """Stage → enhance the after image (unless stubbed) → real layout render.
 
@@ -231,13 +299,24 @@ def build_arm(
     originals; we copy its result over the scratch after image (mimicking the
     ``render_queue`` dispatch in-place replacement) before rendering.
     Returns the rendered board path.
+
+    ``after_names_override``: enhance only these after images (the ones the
+    shipped board actually composed, per manifest ``selected_slots``) instead of
+    every after in the dir — avoids focal-ing 5–10 images when the board shows 1–3.
+
+    ``require_enhancement``: if True (the candidate FOCAL arm), raise when the
+    enhancement no-ops on EVERY after image — FOCAL's K-1 contract returns the
+    input path on silent failure (e.g. ComfyUI down), which would otherwise
+    silently produce a candidate board identical to the raw input and a
+    meaningless gate. Fail loud so build_packet drops the case.
     """
     scratch_case = _stage_arm(spec, arm, scratch_root)
 
     if enhance_fn is not None:
-        # Enhance every after-phase image in scratch (mirrors render_queue
-        # dispatch, which replaces each 'after' image in place pre-render).
-        after_names = spec.after_names or [spec.after_path.name]
+        # Enhance only the after images the shipped board composed (or every
+        # after as a fallback) — mirrors render_queue dispatch in-place replace.
+        after_names = after_names_override or spec.after_names or [spec.after_path.name]
+        enhanced_count = 0
         for name in after_names:
             after_in_scratch = scratch_case / name
             if not after_in_scratch.is_file():
@@ -245,6 +324,13 @@ def build_arm(
             enhanced = enhance_fn(after_in_scratch, arm, spec)
             if enhanced != after_in_scratch and Path(enhanced).is_file():
                 shutil.copyfile(enhanced, after_in_scratch)
+                enhanced_count += 1
+        if require_enhancement and enhanced_count == 0:
+            raise RuntimeError(
+                f"enhancement no-op for {spec.slug} arm={arm} on all "
+                f"{len(after_names)} after image(s) — FOCAL silently failed "
+                "(ComfyUI down / silent fail); candidate would equal raw input."
+            )
 
     result = render_fn(scratch_case, brand, template)
     board = result.get("output_path")
@@ -269,26 +355,54 @@ def build_packet(
     enhance_fn: Callable[[Path, str, CaseSpec], Path] | None,
     render_fn: Callable[[Path, str, str], dict[str, Any]],
     stub: bool,
+    baseline_strategy: str = "existing-board",
 ) -> dict[str, Any]:
-    """Render both arms for every spec and assemble the t51 judge packet.
+    """Build both arms for every spec and assemble the t51 judge packet.
+
+    baseline_strategy:
+      - ``existing-board`` (default, 0 quota): baseline = the case's
+        already-shipped final-board (owner decision 2026-05-29; POLISH re-render
+        proved unviable — gpt-image-2 downscales to ~1024 + 240s timeouts).
+      - ``render``: baseline = fresh layout render (via enhance_fn/render_fn).
+
+    candidate is always the FOCAL crop+composite re-render.
 
     Per-case failures (a render that returns no board — e.g. blurry after image
-    or missing angle slots) are **non-fatal**: the case is dropped, logged, and
-    the build continues. Dropped cases are reported in the packet (no silent cap).
+    or missing angle slots, or a missing existing board) are **non-fatal**: the
+    case is dropped, logged, reported in ``dropped`` (no silent cap).
     """
     items: list[dict[str, Any]] = []
     dropped: list[dict[str, str]] = []
     for spec in specs:
         try:
-            baseline_board = build_arm(
-                spec, "baseline", scratch_root,
-                brand=brand, template=template,
-                enhance_fn=enhance_fn, render_fn=render_fn,
-            )
+            # Recover the shipped board's brand/template + the after images it
+            # actually composed, so the candidate renders a COMPARABLE board
+            # (same layout) and only focal-enhances the shown afters.
+            detected = detect_existing_render(spec)
+            if baseline_strategy == "existing-board":
+                if detected is None:
+                    raise RuntimeError("no existing final-board for baseline")
+                baseline_board = detected["board"]
+                baseline_note = "existing shipped final-board (current product, 0 quota)"
+                arm_brand = detected["brand"]
+                arm_template = detected["template"]
+                selected_afters = detected["after_names"]
+            else:
+                arm_brand, arm_template, selected_afters = brand, template, None
+                baseline_board = build_arm(
+                    spec, "baseline", scratch_root,
+                    brand=arm_brand, template=arm_template,
+                    enhance_fn=enhance_fn, render_fn=render_fn,
+                )
+                baseline_note = "fresh layout-render baseline"
             candidate_board = build_arm(
                 spec, "candidate", scratch_root,
-                brand=brand, template=template,
+                brand=arm_brand, template=arm_template,
                 enhance_fn=enhance_fn, render_fn=render_fn,
+                after_names_override=selected_afters,
+                # A real candidate must actually apply FOCAL; a no-op (ComfyUI
+                # down) must drop the case, not yield a raw-input candidate.
+                require_enhancement=enhance_fn is not None and not stub,
             )
         except RuntimeError as exc:
             reason = str(exc)
@@ -304,7 +418,7 @@ def build_packet(
                 "focus_targets": spec.focus_targets,
                 "baseline": {
                     "source_path": str(baseline_board),
-                    "role_note": "POLISH layout-render (current production default)",
+                    "role_note": baseline_note,
                 },
                 "candidate": {
                     "source_path": str(candidate_board),
@@ -312,11 +426,15 @@ def build_packet(
                 },
             }
         )
+    baseline_desc = (
+        "existing shipped final-board" if baseline_strategy == "existing-board"
+        else "fresh layout-render"
+    )
     note = (
-        "P4 formal gate (crisp-focal-crop). baseline=POLISH layout-render, "
+        f"P4 formal gate (crisp-focal-crop). baseline={baseline_desc}, "
         "candidate=FOCAL crop+composite layout-render. "
-        + ("STUB-ENHANCE dry-run: enhancement skipped, boards from raw after." if stub
-           else "Real double-arm render.")
+        + ("STUB-ENHANCE dry-run: candidate enhancement skipped." if stub
+           else "Real candidate FOCAL render.")
     )
     return {
         "scope": PACKET_SCOPE,
@@ -375,6 +493,16 @@ def main(argv: list[str] | None = None) -> int:
              "existing final-board = proven renderable, which avoids blurry/"
              "missing-angle render failures).",
     )
+    parser.add_argument(
+        "--baseline", choices=["existing-board", "render"], default="existing-board",
+        help="existing-board (default, 0 quota): baseline = the case's shipped "
+             "final-board. render: fresh layout render (POLISH proved unviable).",
+    )
+    parser.add_argument(
+        "--select", default=None,
+        help="Comma-separated substrings; keep only cases whose dir path matches "
+             "ANY (e.g. '林真呈,胡志超,黄婧'). Overrides diversity selection.",
+    )
     args = parser.parse_args(argv)
 
     from backend import ai_generation_adapter, source_images
@@ -389,7 +517,13 @@ def main(argv: list[str] | None = None) -> int:
     if not args.all_cases:
         print(f"  {len(pool)} proven-renderable (existing final-board); "
               f"{len(specs) - len(pool)} unrendered excluded", file=sys.stderr)
-    selected = select_cases(pool, args.n)
+    if args.select:
+        needles = [t.strip() for t in args.select.split(",") if t.strip()]
+        pool = [s for s in pool if any(t in str(s.case_dir) for t in needles)]
+        print(f"  --select matched {len(pool)} cases", file=sys.stderr)
+        selected = pool[: args.n]
+    else:
+        selected = select_cases(pool, args.n)
     print(f"selected {len(selected)} cases:", file=sys.stderr)
     for s in selected:
         print(f"  - {s.slug}  focus={s.focus_targets}", file=sys.stderr)
@@ -408,6 +542,7 @@ def main(argv: list[str] | None = None) -> int:
         selected, args.scratch_root,
         brand=args.brand, template=args.template,
         enhance_fn=enhance_fn, render_fn=render_fn, stub=args.stub_enhance,
+        baseline_strategy=args.baseline,
     )
     args.output_packet.parent.mkdir(parents=True, exist_ok=True)
     args.output_packet.write_text(json.dumps(packet, ensure_ascii=False, indent=2), encoding="utf-8")

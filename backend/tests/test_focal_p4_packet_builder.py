@@ -11,6 +11,7 @@ render have their own tests; here we mock both and assert builder behaviour):
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -199,6 +200,7 @@ def test_build_packet_shape(tmp_path):
         specs, tmp_path / "scratch",
         brand="fumei", template="single-compare",
         enhance_fn=None, render_fn=fake_render, stub=True,
+        baseline_strategy="render",  # this test exercises the dual-render path
     )
     assert packet["scope"] == "t51_blind_judge_packet_v1"
     assert packet["judge_item_count"] == 2
@@ -210,3 +212,149 @@ def test_build_packet_shape(tmp_path):
         # baseline + candidate boards live in distinct arm scratch dirs.
         assert "/baseline/" in item["baseline"]["source_path"]
         assert "/candidate/" in item["candidate"]["source_path"]
+
+
+# --- existing-board baseline strategy (owner decision 2026-05-29) ------------
+
+def _make_case_with_board(root: Path, folder: str, brand="fumei", template="single-compare") -> Path:
+    case = _make_case(root, folder)
+    board_dir = case / ".case-layout-output" / brand / template / "render"
+    board_dir.mkdir(parents=True)
+    (board_dir / "final-board.jpg").write_bytes(b"SHIPPED-PRODUCT-BOARD")
+    return case
+
+
+def test_find_existing_board_exact_then_fallback(tmp_path):
+    _make_case_with_board(tmp_path / "src", "王某/注射泪沟", brand="fumei", template="single-compare")
+    spec = builder.discover_cases(tmp_path / "src", KW, _phase_fn)[0]
+    assert spec.has_rendered_board
+    # Exact brand/template hit.
+    b = builder.find_existing_board(spec, "fumei", "single-compare")
+    assert b is not None and b.read_bytes() == b"SHIPPED-PRODUCT-BOARD"
+    # Different brand → falls back to any existing board.
+    b2 = builder.find_existing_board(spec, "other-brand", "tri-compare")
+    assert b2 is not None and b2.name == "final-board.jpg"
+
+
+def test_build_packet_existing_board_baseline_no_render_of_baseline(tmp_path):
+    _make_case_with_board(tmp_path / "src", "A/注射泪沟")
+    specs = builder.discover_cases(tmp_path / "src", KW, _phase_fn)
+
+    rendered_arms = []
+
+    def fake_render(case_dir: Path, brand: str, template: str):
+        # scratch layout: <scratch>/<arm>/<slug>/<case_dir.name>
+        rendered_arms.append(case_dir.parent.parent.name)  # "baseline"/"candidate"
+        board = case_dir / "board.jpg"
+        board.write_bytes(b"render")
+        return {"output_path": str(board)}
+
+    packet = builder.build_packet(
+        specs, tmp_path / "scratch",
+        brand="fumei", template="single-compare",
+        enhance_fn=None, render_fn=fake_render, stub=True,
+        baseline_strategy="existing-board",
+    )
+    assert packet["judge_item_count"] == 1
+    item = packet["judge_items"][0]
+    # Baseline = the shipped board, NOT a re-render.
+    assert item["baseline"]["source_path"].endswith("final-board.jpg")
+    assert item["baseline"]["source_path"].count(".case-layout-output") == 1
+    assert "shipped" in item["baseline"]["role_note"]
+    # Only the CANDIDATE arm was rendered (baseline arm never touched render).
+    assert rendered_arms == ["candidate"]
+
+
+def test_candidate_focal_noop_is_dropped(tmp_path):
+    # FOCAL silently fails (ComfyUI down) → returns input unchanged → the case
+    # must be DROPPED, never yield a candidate board identical to the raw input.
+    _make_case_with_board(tmp_path / "src", "A/注射泪沟")
+    specs = builder.discover_cases(tmp_path / "src", KW, _phase_fn)
+
+    def noop_enhance(after_path: Path, arm: str, sp):
+        return after_path  # K-1 silent-fail contract: returns input unchanged
+
+    def fake_render(case_dir: Path, brand: str, template: str):
+        board = case_dir / "board.jpg"
+        board.write_bytes(b"render")
+        return {"output_path": str(board)}
+
+    packet = builder.build_packet(
+        specs, tmp_path / "scratch",
+        brand="fumei", template="single-compare",
+        enhance_fn=noop_enhance, render_fn=fake_render, stub=False,
+        baseline_strategy="existing-board",
+    )
+    assert packet["judge_item_count"] == 0
+    assert packet["dropped_count"] == 1
+    assert "no-op" in packet["dropped"][0]["reason"]
+
+
+def test_detect_existing_render_parses_brand_template_and_selected_afters(tmp_path):
+    case = _make_case(tmp_path / "src", "林某/注射面颊，下巴")
+    render_dir = case / ".case-layout-output" / "fumei" / "tri-compare" / "render"
+    render_dir.mkdir(parents=True)
+    (render_dir / "final-board.jpg").write_bytes(b"board")
+    (render_dir / "manifest.final.json").write_text(json.dumps({
+        "groups": [{"selected_slots": {
+            "front": {"after": {"name": "术后1.jpg"}},
+            "oblique": {"after": {"name": "术后2.jpg"}},
+            "side": {"after": {"render_filename": "术后3.jpg"}},
+        }}]
+    }), encoding="utf-8")
+    spec = builder.discover_cases(tmp_path / "src", KW, _phase_fn)[0]
+    det = builder.detect_existing_render(spec)
+    assert det is not None
+    assert det["brand"] == "fumei" and det["template"] == "tri-compare"
+    assert det["after_names"] == ["术后1.jpg", "术后2.jpg", "术后3.jpg"]
+
+
+def test_build_arm_after_names_override_limits_enhancement(tmp_path):
+    # Case with many after images; override → only the listed ones get enhanced.
+    case = tmp_path / "src" / "多图" / "注射下巴"
+    case.mkdir(parents=True)
+    (case / "术前.jpg").write_bytes(b"b")
+    for i in range(1, 6):
+        (case / f"术后{i}.jpg").write_bytes(b"a")
+    spec = builder.discover_cases(tmp_path / "src", KW, _phase_fn)[0]
+    enhanced_names = []
+
+    def fake_enhance(after_path: Path, arm: str, sp):
+        enhanced_names.append(after_path.name)
+        out = after_path.parent / f"enh_{after_path.name}"
+        out.write_bytes(b"E")
+        return out
+
+    def fake_render(case_dir, brand, template):
+        b = case_dir / "board.jpg"
+        b.write_bytes(b"x")
+        return {"output_path": str(b)}
+
+    builder.build_arm(
+        spec, "candidate", tmp_path / "scratch",
+        brand="fumei", template="single-compare",
+        enhance_fn=fake_enhance, render_fn=fake_render,
+        after_names_override=["术后1.jpg", "术后3.jpg"],
+    )
+    assert sorted(enhanced_names) == ["术后1.jpg", "术后3.jpg"]
+
+
+def test_build_packet_existing_board_missing_is_dropped(tmp_path):
+    # A case WITHOUT an existing board → dropped under existing-board strategy.
+    _make_case(tmp_path / "src", "B/注射下巴")  # no .case-layout-output
+    specs = builder.discover_cases(tmp_path / "src", KW, _phase_fn)
+
+    def fake_render(case_dir: Path, brand: str, template: str):
+        board = case_dir / "board.jpg"
+        board.write_bytes(b"render")
+        return {"output_path": str(board)}
+
+    packet = builder.build_packet(
+        specs, tmp_path / "scratch",
+        brand="fumei", template="single-compare",
+        enhance_fn=None, render_fn=fake_render, stub=True,
+        baseline_strategy="existing-board",
+    )
+    assert packet["judge_item_count"] == 0
+    assert packet["dropped_count"] == 1
+    assert "no existing final-board" in packet["dropped"][0]["reason"]
