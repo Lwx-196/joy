@@ -31,7 +31,7 @@ _FONT_PATHS = [
 _REGION_COLORS: dict[str, tuple[int, int, int]] = {
     "泪沟": (90, 200, 90), "卧蚕": (120, 210, 120), "眼袋": (70, 170, 70),
     "法令纹": (70, 130, 240), "苹果肌": (40, 170, 250), "面颊": (200, 120, 255),
-    "颧骨": (40, 150, 255), "下颌线": (240, 140, 40), "下巴": (230, 170, 60),
+    "颧骨": (40, 150, 255), "下颌线": (190, 90, 160), "下巴": (235, 165, 55),
     "鼻基底": (180, 180, 80), "鼻翼": (160, 200, 90), "鼻尖": (200, 200, 70),
     "唇": (120, 100, 240), "咬肌": (90, 210, 90), "川字": (220, 100, 220),
     "太阳穴": (230, 200, 60),
@@ -104,7 +104,7 @@ def region_geometry(region_key: str, pts: np.ndarray) -> list[RegionShape]:
             anchor = poly.mean(0).astype(int)
             shapes.append(RegionShape(region_key, "fill", poly, 0, tuple(anchor)))
         elif shape in ("polyline",):
-            w = max(3, int(scale * 0.013))
+            w = max(3, int(scale * 0.011))
             path = gp.astype(np.int32)
             anchor = path.mean(0).astype(int)
             shapes.append(RegionShape(region_key, "stroke", path, w, tuple(anchor)))
@@ -122,11 +122,25 @@ def region_geometry(region_key: str, pts: np.ndarray) -> list[RegionShape]:
 # --------------------------- IO 层 ---------------------------
 
 def lineart(image_bgr: np.ndarray) -> np.ndarray:
-    """真实照 → 干净线稿（白底深线）。cv2.pencilSketch 优先，退回 adaptiveThreshold。"""
+    """真实照 → 干净线稿（白底深线，医学示意图风）。
+
+    pyrMeanShift 抹平肤色斑点保留结构边 → Canny 抽干净轮廓 → 反相成白底深线。
+    比 pencilSketch 干净得多（无肤色 grain/阴影脏块）。大图先降采样跑 meanshift 提速。
+    退回 bilateral+adaptiveThreshold。
+    """
     try:
-        gray, _color = cv2.pencilSketch(image_bgr, sigma_s=60, sigma_r=0.07,
-                                        shade_factor=0.04)
-        return cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+        h, w = image_bgr.shape[:2]
+        # meanshift 在大图很慢 → 限制到长边 ~1400 跑，再放回
+        scale = 1400.0 / max(h, w) if max(h, w) > 1400 else 1.0
+        small = cv2.resize(image_bgr, (int(w * scale), int(h * scale)),
+                           interpolation=cv2.INTER_AREA) if scale < 1.0 else image_bgr
+        sm = cv2.pyrMeanShiftFiltering(small, sp=18, sr=40)
+        g = cv2.cvtColor(sm, cv2.COLOR_BGR2GRAY)
+        edges = cv2.Canny(g, 40, 110)
+        edges = cv2.dilate(edges, np.ones((2, 2), np.uint8))
+        if scale < 1.0:
+            edges = cv2.resize(edges, (w, h), interpolation=cv2.INTER_NEAREST)
+        return cv2.cvtColor(255 - edges, cv2.COLOR_GRAY2BGR)
     except Exception:
         g = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
         g = cv2.bilateralFilter(g, 9, 75, 75)
@@ -164,9 +178,24 @@ def _load_font(size: int):
     return ImageFont.load_default()
 
 
+def _face_crop_box(pts: np.ndarray, w: int, h: int, pad: float = 0.45) -> tuple[int, int, int, int]:
+    """脸 landmark bbox + padding（给标签留白），夹到图像边界。"""
+    x0, y0 = pts.min(0)
+    x1, y1 = pts.max(0)
+    fw, fh = x1 - x0, y1 - y0
+    px, py = fw * pad, fh * pad
+    return (max(0, int(x0 - px)), max(0, int(y0 - py * 1.1)),
+            min(w, int(x1 + px)), min(h, int(y1 + py)))
+
+
 def render_panel(image_bgr: np.ndarray, pts: np.ndarray, region_keys: list[str],
-                 *, alpha: float = 0.38, title: str | None = None) -> np.ndarray:
-    """线稿底图 + 各区半透明色块 + CJK 标签 → panel（返回 BGR）。"""
+                 *, alpha: float = 0.38, title: str | None = None,
+                 crop_to_face: bool = True) -> np.ndarray:
+    """线稿底图 + 各区半透明色块 + CJK 标签 → panel（返回 BGR）。
+
+    crop_to_face: 独立 panel 默认裁到脸+留白，让脸填满画面（源照常框很松/带杂物）。
+    接 board 时传 False（board 自己做对齐裁切）。
+    """
     from PIL import Image, ImageDraw
 
     base = lineart(image_bgr)
@@ -177,18 +206,24 @@ def render_panel(image_bgr: np.ndarray, pts: np.ndarray, region_keys: list[str],
     od = ImageDraw.Draw(overlay)
 
     a = int(255 * alpha)
+    # one label per region (both L/R zones colored, single label on the highest zone)
     label_jobs: list[tuple[tuple[int, int], str, tuple[int, int, int]]] = []
     for region in region_keys:
         b, g, r = _REGION_COLORS.get(region, _DEFAULT_COLOR)
         rgb = (r, g, b)
-        for sh in region_geometry(region, pts):
+        shapes = region_geometry(region, pts)
+        for sh in shapes:
             poly = [tuple(p) for p in sh.points]
             if sh.kind == "fill":
                 od.polygon(poly, fill=(r, g, b, a), outline=(r, g, b, 255))
             else:  # stroke
                 od.line(poly, fill=(r, g, b, min(255, a + 40)), width=sh.width,
                         joint="curve")
-            label_jobs.append((sh.label_anchor, region, rgb))
+        if shapes:
+            # label anchor = the zone whose centroid is highest (smallest y), keeps
+            # labels off the busy lower face when a region is bilateral
+            top = min(shapes, key=lambda s: s.label_anchor[1])
+            label_jobs.append((top.label_anchor, region, rgb))
 
     out = Image.alpha_composite(pil, overlay)
     od2 = ImageDraw.Draw(out)
@@ -198,9 +233,13 @@ def render_panel(image_bgr: np.ndarray, pts: np.ndarray, region_keys: list[str],
         ax, ay = _avoid(ax, ay, placed, font, region, od2, w, h)
         _draw_label(od2, (ax, ay), region, rgb, font, placed)
 
+    if crop_to_face:
+        out = out.crop(_face_crop_box(pts, w, h))
+
     if title:
-        tfont = _load_font(max(20, int(scale * 0.07)))
-        od2.text((16, 12), title, font=tfont, fill=(30, 30, 30, 255))
+        od3 = ImageDraw.Draw(out)
+        tfont = _load_font(max(22, int(scale * 0.07)))
+        od3.text((18, 14), title, font=tfont, fill=(30, 30, 30, 255))
 
     rgb_arr = np.array(out.convert("RGB"))
     return cv2.cvtColor(rgb_arr, cv2.COLOR_RGB2BGR)

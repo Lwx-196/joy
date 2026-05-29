@@ -11,7 +11,6 @@
 from __future__ import annotations
 
 import argparse
-import glob
 import os
 import sys
 
@@ -22,9 +21,12 @@ from backend.services import treatment_zone_panel as tzp  # noqa: E402
 
 
 def _pick_before(case_dir: str) -> str | None:
-    befores = sorted(glob.glob(os.path.join(case_dir, "术前*.jpg")) +
-                     glob.glob(os.path.join(case_dir, "术前*.jpeg")))
-    return befores[0] if befores else None
+    befores = [
+        os.path.join(case_dir, f)
+        for f in os.listdir(case_dir)
+        if f.startswith("术前") and f.lower().endswith((".jpg", ".jpeg", ".png"))
+    ]
+    return sorted(befores)[0] if befores else None
 
 
 def main() -> int:
