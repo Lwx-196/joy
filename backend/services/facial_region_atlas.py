@@ -168,6 +168,14 @@ FACIAL_REGION_ATLAS: dict[str, dict[str, Any]] = {
         "source": "官方 FACEMESH_NOSE; 多源确认 4=tip",
         "confidence": "high",
     },
+    "鼻背": {
+        "idx": [168, 6, 197, 195, 5],
+        "center_idx": 197,
+        "shape": "polyline",
+        "rationale": "鼻梁中线 radix(168鼻根)→dorsum(6→197→195)→supratip(5)；隆鼻/山根垫高=正面高光带变、侧面鼻背线轮廓",
+        "source": "官方 FACEMESH_NOSE 中线；168=鼻根/5=鼻尖上端(2026-05-30 真实正脸+40°斜叠点校准)",
+        "confidence": "calibrated",
+    },
     "唇": {
         "upper_idx": [61, 185, 40, 39, 37, 0, 267, 269, 270, 409, 291, 78, 80, 81, 82,
                       13, 312, 311, 310, 415, 308],
@@ -190,6 +198,8 @@ REGION_ALIASES: dict[str, str] = {
     "nasolabial": "法令纹",
     "chin": "下巴", "jaw": "下颌线", "jawline": "下颌线",
     "nose": "鼻尖", "zygomatic": "颧骨", "cheekbone": "颧骨",
+    "隆鼻": "鼻背", "山根": "鼻背", "鼻梁": "鼻背", "鼻子": "鼻背",
+    "nose_bridge": "鼻背", "dorsum": "鼻背", "radix": "鼻背",
     "masseter": "咬肌", "瘦脸": "咬肌",
     "川字纹": "川字", "眉间": "川字", "glabella": "川字", "frown": "川字",
     "temple": "太阳穴", "颞": "太阳穴", "颞部": "太阳穴",
@@ -210,6 +220,7 @@ REGION_VIEWS: dict[str, list[str]] = {
     "鼻基底": [VIEW_FRONT],
     "鼻翼": [VIEW_FRONT],
     "鼻尖": [VIEW_FRONT, VIEW_PROFILE],      # 山根/鼻背垫高→正面高光带变化可辨；侧面看鼻背线
+    "鼻背": [VIEW_FRONT, VIEW_OBLIQUE, VIEW_PROFILE],  # 正面高光带(owner钦定oracle)→斜看鼻梁脊→侧面鼻背线(silhouette,Layer2)
     "下巴": [VIEW_FRONT, VIEW_PROFILE],      # 前突→正面高光可辨 + 宽度；侧面看前突轮廓
     "苹果肌": [VIEW_FRONT, VIEW_OBLIQUE],    # 位置正面、顶点高光/饱满斜看(亚洲取内侧)
     "法令纹": [VIEW_FRONT, VIEW_OBLIQUE],    # 沟阴影正面、沟深斜看
@@ -231,7 +242,7 @@ SIG_VOLUME = "volume"        # 形态/容量
 REGION_EFFECTS: dict[str, str] = {
     "川字": SIG_LINE, "泪沟": SIG_SHADOW, "卧蚕": SIG_VOLUME, "眼袋": SIG_SHADOW,
     "唇": SIG_VOLUME, "鼻基底": SIG_VOLUME, "鼻翼": SIG_VOLUME,
-    "鼻尖": SIG_HIGHLIGHT, "下巴": SIG_HIGHLIGHT, "苹果肌": SIG_HIGHLIGHT,
+    "鼻尖": SIG_HIGHLIGHT, "鼻背": SIG_HIGHLIGHT, "下巴": SIG_HIGHLIGHT, "苹果肌": SIG_HIGHLIGHT,
     "法令纹": SIG_SHADOW, "颧骨": SIG_OGEE, "面颊": SIG_OGEE,
     "太阳穴": SIG_SHADOW, "下颌线": SIG_OGEE, "咬肌": SIG_WIDTH,
 }
@@ -244,6 +255,7 @@ ZONE_LIGHT, ZONE_SHADOW, ZONE_TRANSITION = "light", "shadow", "transition"
 REGION_ZONES: dict[str, str] = {
     "川字": ZONE_LIGHT, "泪沟": ZONE_LIGHT, "卧蚕": ZONE_LIGHT, "眼袋": ZONE_SHADOW,
     "唇": ZONE_LIGHT, "鼻基底": ZONE_LIGHT, "鼻翼": ZONE_LIGHT, "鼻尖": ZONE_LIGHT,
+    "鼻背": ZONE_LIGHT,                                          # T 区高光脊
     "下巴": ZONE_LIGHT, "苹果肌": ZONE_LIGHT, "法令纹": ZONE_LIGHT,
     "颧骨": ZONE_TRANSITION,                                    # 颧凸=灰区转折
     "面颊": ZONE_SHADOW, "太阳穴": ZONE_SHADOW, "下颌线": ZONE_SHADOW, "咬肌": ZONE_SHADOW,
@@ -256,6 +268,7 @@ REGION_TIERS: dict[str, str] = {
     "苹果肌": TIER_FOUNDATION, "面颊": TIER_FOUNDATION,          # 中颊地基(Ck)
     "太阳穴": TIER_CONTOUR, "下巴": TIER_CONTOUR, "下颌线": TIER_CONTOUR,
     "咬肌": TIER_CONTOUR, "颧骨": TIER_CONTOUR, "鼻尖": TIER_CONTOUR,  # 轮廓/投影结构
+    "鼻背": TIER_CONTOUR,                                        # 鼻梁投影=轮廓骨架
     "泪沟": TIER_REFINEMENT, "法令纹": TIER_REFINEMENT, "川字": TIER_REFINEMENT,
     "唇": TIER_REFINEMENT, "卧蚕": TIER_REFINEMENT, "眼袋": TIER_REFINEMENT,
     "鼻基底": TIER_REFINEMENT, "鼻翼": TIER_REFINEMENT,          # 精细化

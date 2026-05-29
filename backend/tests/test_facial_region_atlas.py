@@ -62,6 +62,25 @@ def test_phase1_new_regions_present_and_resolve():
     assert len(atlas.region_landmark_groups("颧骨")) == 2
 
 
+def test_nasal_dorsum_region_and_aliases():
+    # 鼻背(鼻梁中线 polyline) — 闭合隆鼻/山根类术式 0 标注的覆盖洞
+    assert "鼻背" in atlas.FACIAL_REGION_ATLAS
+    assert atlas.region_shape("鼻背") == "polyline"
+    groups = atlas.region_landmark_groups("鼻背")
+    assert len(groups) == 1 and groups[0] == [168, 6, 197, 195, 5]  # radix→supratip 中线
+    # front-first(owner 钦定高光 oracle)，含 oblique/profile 备选
+    assert atlas.region_views("鼻背")[0] == atlas.VIEW_FRONT
+    assert atlas.VIEW_PROFILE in atlas.region_views("鼻背")
+    assert atlas.region_effect("鼻背") == atlas.SIG_HIGHLIGHT
+    # 抽词 alias：隆鼻/山根/鼻梁 → 鼻背（不误伤已有 鼻基底/鼻翼）
+    assert atlas.extract_regions("菲林隆鼻") == ["鼻背"]
+    assert "鼻背" in atlas.extract_regions("山根+下巴")
+    assert atlas.extract_regions("丰鼻基底") == ["鼻基底"]   # 不被 鼻* alias 误伤
+    # 鼻背 与 鼻尖 是不同部位（中线脊 vs 鼻头）
+    assert atlas.resolve_region_key("隆鼻") == "鼻背"
+    assert atlas.resolve_region_key("鼻尖") == "鼻尖"
+
+
 # high = 官方 connections 索引; inferred = 社区图待校准;
 # calibrated = Phase 1 真实正脸叠点校准过; uncalibrated-unused = 真实语料 0 例、暂不重做
 _VALID_CONFIDENCE = {"high", "inferred", "calibrated", "uncalibrated-unused"}
