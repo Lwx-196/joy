@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from backend.scripts import focal_p4_gate_report as gr
 
 
@@ -69,6 +71,9 @@ def _png(path: Path, color, size=(40, 40)):
 
 
 def test_board_diff_identical_and_different(tmp_path):
+    # board_diff 像素数学需 numpy（按设计不在 backend venv）→ CI 跳过，本地 dev 跑。
+    # numpy 缺失时 board_diff 优雅返回 {"error":...}（见 test_board_diff_missing_file）。
+    pytest.importorskip("numpy")
     from PIL import Image
     a = tmp_path / "a.png"
     b = tmp_path / "b.png"
