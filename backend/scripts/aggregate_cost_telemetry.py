@@ -44,6 +44,7 @@ Output schema (v1):
         "latency_ms_avg": <float>,
         "latency_ms_p50": <float>,
         "latency_ms_p95": <float>,
+        "latency_ms_p99": <float>,
         "by_purpose": {<purpose>: {calls, cost_usd, latency_ms_avg}, ...},
         "by_provider_model": [...]
       },
@@ -52,6 +53,7 @@ Output schema (v1):
         "duration_ms_avg": <float>,
         "duration_ms_p50": <float>,
         "duration_ms_p95": <float>,
+        "duration_ms_p99": <float>,
         "by_status": {<status>: <count>, ...}
       },
       "simulation_jobs": {
@@ -180,6 +182,7 @@ def _aggregate_vlm_usage(conn: sqlite3.Connection, cutoff: str) -> dict[str, Any
         "latency_ms_avg": round(sum(latencies) / total_calls, 2) if total_calls else 0.0,
         "latency_ms_p50": round(_percentile(latencies, 50), 2),
         "latency_ms_p95": round(_percentile(latencies, 95), 2),
+        "latency_ms_p99": round(_percentile(latencies, 99), 2),
         "by_purpose": purpose_out,
         "by_provider_model": provider_model_out,
         "_cost_by_case_id": dict(cost_by_case_id),
@@ -224,6 +227,7 @@ def _aggregate_render_jobs(conn: sqlite3.Connection, cutoff: str) -> dict[str, A
         "duration_ms_avg": round(sum(durations) / len(durations), 2) if durations else 0.0,
         "duration_ms_p50": round(_percentile(durations, 50), 2),
         "duration_ms_p95": round(_percentile(durations, 95), 2),
+        "duration_ms_p99": round(_percentile(durations, 99), 2),
         "by_status": dict(by_status),
         "_finished_case_ids": finished_case_ids,
     }
