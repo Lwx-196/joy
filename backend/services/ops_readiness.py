@@ -29,15 +29,19 @@ Failure modes: every field falls back to a structured ``{"error": "..."}``
 sentinel rather than raising — the dashboard must keep rendering even when a
 single section's source is down. Tests pin each fallback explicitly.
 
-This module is **read-only** w.r.t. manifest / SLO / applier modules; it
-never writes to disk. Stream A retains exclusive ownership of every write
+This module is **read-only** w.r.t. manifest / SLO / applier modules. The SLO
+path's only write side effects are redirected to a throwaway per-request copy
+of the stop-loss sidecar (M1 fix in :func:`_evaluate_slo`) — the production
+files are never touched. Stream A retains exclusive ownership of every write
 path (manifest, applier, slo_monitor sidecar).
 """
 
 from __future__ import annotations
 
 import json
+import shutil
 import sqlite3
+import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -136,14 +140,38 @@ def _evaluate_slo(
     """Wrap evaluate_window with a graceful failure path so the dashboard
     keeps rendering when (e.g.) thresholds JSON is missing.
 
+    M1 fix: ``evaluate_window`` maintains Stream A's stop-loss paused-state
+    sidecar as a side effect (seeds the anchor on first under-sample, clears it
+    on recovery / state change). This OpsConsole status path is READ-ONLY and is
+    polled every 30s — it must never create, mutate, or delete the production
+    sidecar (Stream A's exclusive writer, maintained by the SLO cron). Redirect
+    those side effects onto a throwaway per-request copy of the real sidecar so
+    the SLO computation still reads the real ``paused_since`` anchor (stop-loss
+    duration stays accurate) while the production file is never touched.
+
     Returns dict with keys: recommendation, sample_size, minimum_sample_size,
     violations, within_slo, notes, error (only when failed).
     """
+    scratch_dir: Path | None = None
     try:
+        scratch_dir = Path(tempfile.mkdtemp(prefix=".ops-readiness-slo-"))
+        scratch_path = scratch_dir / "paused_state.json"
+        real_sidecar = _slo._DEFAULT_PAUSED_STATE_FILE
+        try:
+            if Path(real_sidecar).is_file():
+                # _write_paused_state lands via os.replace (atomic), so this
+                # copy reads a consistent file even if the cron writes mid-poll.
+                shutil.copyfile(real_sidecar, scratch_path)
+        except OSError:
+            # Can't read the real anchor — evaluate against an absent scratch
+            # file (worst case: dashboard shows a fresh pause window). The real
+            # sidecar is still never touched.
+            pass
         report = _slo.evaluate_window(
             window_hours=window_hours,
             conn=conn,
             promotion_state=promotion_state,
+            paused_state_path=scratch_path,
         )
     except Exception as exc:  # pragma: no cover  — defensive surface
         return {
@@ -155,6 +183,9 @@ def _evaluate_slo(
             "notes": "",
             "error": f"{exc.__class__.__name__}: {exc}",
         }
+    finally:
+        if scratch_dir is not None:
+            shutil.rmtree(scratch_dir, ignore_errors=True)
     evidence = report.evidence or {}
     return {
         "recommendation": report.recommendation,

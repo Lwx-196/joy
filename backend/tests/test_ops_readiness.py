@@ -622,3 +622,38 @@ def test_status_endpoint_slo_window_hours_query_passes_through(
     )
     body = resp.json()
     assert body["promotion"]["slo_window_hours"] == 6
+
+
+def test_evaluate_slo_never_touches_production_paused_state_sidecar(
+    temp_db, _isolate_slo_paused_state_sidecar,
+):
+    """M1 regression: the OpsConsole status path is read-only and polled every
+    30s. Computing SLO for a PROMOTED manifest under an empty DB (the
+    under-sample branch that maintains the stop-loss sidecar) must NOT create,
+    mutate, or delete Stream A's production paused-state sidecar.
+
+    Pre-M1 ``_evaluate_slo`` called ``evaluate_window`` with the default sidecar
+    path, so the promoted under-sample branch wrote the anchor → the sidecar
+    appeared. (The autouse ``_isolate_slo_paused_state_sidecar`` fixture is what
+    hid this in every other test — it redirected the default to a tmp file, so
+    the production-path side effect was never asserted.)
+    """
+    from backend import db
+
+    sidecar = _isolate_slo_paused_state_sidecar  # fixture-redirected default path
+    assert not sidecar.exists()
+
+    conn = db.get_conn()
+    try:
+        result = ops_readiness._evaluate_slo(
+            conn, window_hours=24, promotion_state="p10",
+        )
+    finally:
+        conn.close()
+
+    # The promoted + empty-DB under-sample branch WAS exercised (sample_size 0),
+    # but the production sidecar must remain absent.
+    assert "error" not in result, result
+    assert not sidecar.exists(), (
+        "OpsConsole read-path created/mutated the production stop-loss sidecar"
+    )

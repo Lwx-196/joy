@@ -2537,6 +2537,46 @@ class OpsAlertLifecycleRequest(BaseModel):
     note: str | None = Field(default=None, max_length=1000)
 
 
+# S4: the operator-supplied slo_report / applier_result are OPEN dicts. Never
+# persist them verbatim into ops_audit_log.payload_json — that is unbounded
+# storage growth / a DoS vector and contradicts the audit-retention policy this
+# PR introduces. Persist only the whitelisted keys the compile fns actually
+# consume, each value capped, plus the bounded request metadata.
+_OPS_ALERT_INPUT_WHITELIST: tuple[str, ...] = (
+    "recommendation", "within_slo", "sample_size", "window_hours", "notes",
+    "outcome", "reason", "from_state", "to_state", "request_id",
+)
+_OPS_ALERT_AUDIT_VALUE_CAP = 500  # chars per stringified whitelisted value
+
+
+def _ops_alert_fire_audit_payload(payload: "OpsAlertFireRequest") -> dict[str, Any]:
+    """Build the bounded ops_audit_log payload for a fire request (S4)."""
+    audit: dict[str, Any] = {
+        "source": payload.source,
+        "correlation_id": payload.correlation_id,
+        "dispatch": payload.dispatch,
+    }
+    raw = (
+        payload.slo_report
+        if payload.source == ops_alerting.SOURCE_SLO
+        else payload.applier_result
+    )
+    if isinstance(raw, dict):
+        summary: dict[str, Any] = {}
+        for key in _OPS_ALERT_INPUT_WHITELIST:
+            if key not in raw:
+                continue
+            value = raw[key]
+            text = str(value)
+            summary[key] = (
+                text[:_OPS_ALERT_AUDIT_VALUE_CAP] + "…(truncated)"
+                if len(text) > _OPS_ALERT_AUDIT_VALUE_CAP
+                else value
+            )
+        audit["input_summary"] = summary
+    return audit
+
+
 @router.post("/api/render/ops/alerts/fire")
 def ops_alerts_fire(
     payload: OpsAlertFireRequest,
@@ -2547,7 +2587,9 @@ def ops_alerts_fire(
     dispatch is OFF by default (``dispatch=true`` to actually send)."""
     request_id = _gen_request_id(x_request_id)
     endpoint = "POST /api/render/ops/alerts/fire"
-    payload_dump = payload.model_dump()
+    # S4: bounded/whitelisted payload for the audit log — never the open
+    # slo_report/applier_result dicts (unbounded payload_json / DoS vector).
+    payload_dump = _ops_alert_fire_audit_payload(payload)
 
     if payload.source not in ops_alerting.ALLOWED_SOURCES:
         resp = {
@@ -2641,13 +2683,18 @@ def ops_alerts_ack(
     """C3.0.3 — Record an alert_acked row for the given correlation_id."""
     if not correlation_id or len(correlation_id) > 128:
         raise HTTPException(400, {"error": "correlation_id required (≤128 chars)"})
-    with db.connect() as conn:
-        result = ops_alerting.ack_alert(
-            conn=conn,
-            correlation_id=correlation_id,
-            operator=payload.operator,
-            note=payload.note,
-        )
+    try:
+        with db.connect() as conn:
+            result = ops_alerting.ack_alert(
+                conn=conn,
+                correlation_id=correlation_id,
+                operator=payload.operator,
+                note=payload.note,
+            )
+    except ops_alerting.AlertNotFoundError as exc:
+        raise HTTPException(404, {"error": str(exc)}) from exc
+    except ops_alerting.AlertStateError as exc:
+        raise HTTPException(409, {"error": str(exc)}) from exc
     return result
 
 
@@ -2659,11 +2706,16 @@ def ops_alerts_resolve(
     """C3.0.3 — Record an alert_resolved row for the given correlation_id."""
     if not correlation_id or len(correlation_id) > 128:
         raise HTTPException(400, {"error": "correlation_id required (≤128 chars)"})
-    with db.connect() as conn:
-        result = ops_alerting.resolve_alert(
-            conn=conn,
-            correlation_id=correlation_id,
-            operator=payload.operator,
-            note=payload.note,
-        )
+    try:
+        with db.connect() as conn:
+            result = ops_alerting.resolve_alert(
+                conn=conn,
+                correlation_id=correlation_id,
+                operator=payload.operator,
+                note=payload.note,
+            )
+    except ops_alerting.AlertNotFoundError as exc:
+        raise HTTPException(404, {"error": str(exc)}) from exc
+    except ops_alerting.AlertStateError as exc:
+        raise HTTPException(409, {"error": str(exc)}) from exc
     return result

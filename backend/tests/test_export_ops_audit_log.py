@@ -96,6 +96,48 @@ def test_export_buckets_rows_into_monthly_shards(
     assert {r["request_id"] for r in sep_rows} == {"req-old-1", "req-old-2"}
 
 
+def test_export_routes_unparseable_created_at_to_dedicated_shard(
+    tmp_path: Path, conn: sqlite3.Connection
+) -> None:
+    """S3: a single malformed created_at must not crash the nightly export
+    (which would leave a silent backup gap). The poison row is routed to a
+    dedicated ``unparseable`` shard + counted, while well-formed rows still
+    export to their monthly shards."""
+    now = datetime(2027, 1, 15, tzinfo=timezone.utc)
+    _seed_row(conn, when=datetime(2026, 9, 5, tzinfo=timezone.utc), request_id="req-good")
+    # Poison row: string-sorts before the cutoff (so the SQL filter selects it)
+    # but is not a valid ISO timestamp (month 13 / minute 61).
+    conn.execute(
+        """
+        INSERT INTO ops_audit_log
+          (request_id, endpoint, reviewer, reason,
+           payload_json, response_json, outcome, http_status, created_at)
+        VALUES ('req-poison', 'POST /x', 'op', NULL, '{}', '{}', 'ok', 200,
+                '2020-13-40T25:61:00')
+        """
+    )
+    conn.commit()
+
+    result = export_rows(
+        conn=conn,
+        output_dir=tmp_path / "out",
+        min_age_days=90,
+        overwrite=False,
+        now=now,
+    )
+    assert result["rows_unparseable"] == 1
+    # Both the good row and the poison row are persisted (nothing dropped).
+    assert result["rows_written"] == 2
+    unparseable = tmp_path / "out" / "unparseable.jsonl"
+    assert unparseable.exists()
+    poison_rows = [
+        json.loads(line) for line in unparseable.read_text(encoding="utf-8").splitlines()
+    ]
+    assert {r["request_id"] for r in poison_rows} == {"req-poison"}
+    # The well-formed row still lands in its monthly shard.
+    assert (tmp_path / "out" / "2026" / "09.jsonl").exists()
+
+
 def test_export_refuses_overwrite_without_flag(
     tmp_path: Path, conn: sqlite3.Connection
 ) -> None:

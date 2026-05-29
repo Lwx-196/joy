@@ -315,6 +315,35 @@ def compile_alert_from_applier_result(
 # ---------------------------------------------------------------------------
 
 
+class AlertNotFoundError(Exception):
+    """A lifecycle op (ack/resolve) targeted a correlation_id with no
+    ``alert_fired`` row. The REST layer maps this to HTTP 404."""
+
+
+class AlertStateError(Exception):
+    """An illegal lifecycle transition (e.g. ack/resolve after the alert was
+    already resolved). The REST layer maps this to HTTP 409."""
+
+
+def _lifecycle_stages(
+    conn: sqlite3.Connection, correlation_id: str
+) -> set[str]:
+    """Return the set of lifecycle endpoints already recorded for this
+    correlation_id (subset of {fire, ack, resolve}).
+
+    The audit log is the lifecycle store (no separate alert table), so the
+    current state of an alert is derived from which stage rows exist.
+    """
+    rows = conn.execute(
+        """
+        SELECT DISTINCT endpoint FROM ops_audit_log
+        WHERE request_id = ? AND endpoint IN (?, ?, ?)
+        """,
+        (correlation_id, ENDPOINT_FIRE, ENDPOINT_ACK, ENDPOINT_RESOLVE),
+    ).fetchall()
+    return {row[0] for row in rows}
+
+
 def _insert_audit_row(
     conn: sqlite3.Connection,
     *,
@@ -363,6 +392,18 @@ def fire_alert(
     """
     if event.source not in ALLOWED_SOURCES:
         raise ValueError(f"event.source must be one of {sorted(ALLOWED_SOURCES)}")
+    # Idempotent by correlation_id: a second fire for an already-fired alert is
+    # a no-op (don't duplicate the audit row or re-dispatch to channels). The
+    # applier path reuses the applier request_id as the correlation_id, so a
+    # replayed result must not page on-call twice.
+    if ENDPOINT_FIRE in _lifecycle_stages(conn, event.correlation_id):
+        return {
+            "event": event.to_dict(),
+            "dispatched": False,
+            "channels": [],
+            "idempotent": True,
+            "note": "alert already fired for this correlation_id",
+        }
     chans = list(channels) if channels is not None else default_channels()
     results: list[dict[str, Any]] = []
     aggregate_http = 0
@@ -402,7 +443,21 @@ def ack_alert(
     note: str | None = None,
 ) -> dict[str, Any]:
     """Mark an alert correlation_id as acknowledged. Operator must supply
-    their identity (from ``on-call-rotation.md``)."""
+    their identity (from ``on-call-rotation.md``).
+
+    Raises :class:`AlertNotFoundError` when no ``alert_fired`` row exists for
+    the correlation_id, and :class:`AlertStateError` when the alert was already
+    resolved (acking a closed alert is a no-op the operator should not be able
+    to record silently)."""
+    stages = _lifecycle_stages(conn, correlation_id)
+    if ENDPOINT_FIRE not in stages:
+        raise AlertNotFoundError(
+            f"no fired alert for correlation_id {correlation_id!r}"
+        )
+    if ENDPOINT_RESOLVE in stages:
+        raise AlertStateError(
+            f"alert {correlation_id!r} already resolved; cannot ack"
+        )
     payload = {"operator": operator, "note": note}
     response = {"correlation_id": correlation_id, "stage": "acked"}
     _insert_audit_row(
@@ -425,7 +480,20 @@ def resolve_alert(
     operator: str,
     note: str | None = None,
 ) -> dict[str, Any]:
-    """Mark an alert correlation_id as resolved."""
+    """Mark an alert correlation_id as resolved.
+
+    Raises :class:`AlertNotFoundError` when no ``alert_fired`` row exists for
+    the correlation_id, and :class:`AlertStateError` on a double-resolve (the
+    alert was already resolved)."""
+    stages = _lifecycle_stages(conn, correlation_id)
+    if ENDPOINT_FIRE not in stages:
+        raise AlertNotFoundError(
+            f"no fired alert for correlation_id {correlation_id!r}"
+        )
+    if ENDPOINT_RESOLVE in stages:
+        raise AlertStateError(
+            f"alert {correlation_id!r} already resolved"
+        )
     payload = {"operator": operator, "note": note}
     response = {"correlation_id": correlation_id, "stage": "resolved"}
     _insert_audit_row(
@@ -445,6 +513,8 @@ __all__ = [
     "ALLOWED_SOURCES",
     "AlertChannel",
     "AlertEvent",
+    "AlertNotFoundError",
+    "AlertStateError",
     "ENDPOINT_ACK",
     "ENDPOINT_FIRE",
     "ENDPOINT_RESOLVE",

@@ -8,8 +8,12 @@ const __dirname = path.dirname(__filename);
 /**
  * Capture a golden-path screenshot of OpsConsole to docs/operations/screenshots.
  * Used by Phase C3.0.2 exit criterion: "Dashboard at least 1 usable... screenshot
- * 存档". Run manually via:
- *   npx playwright test tests/e2e/ops-console-screenshot.spec.ts --headed --update-snapshots
+ * 存档".
+ *
+ * Tagged ``@snapshot`` and excluded from the default suite via the config's
+ * ``grepInvert`` (S5) so a bare ``playwright test`` never overwrites the tracked
+ * PNG. Capture on demand with:
+ *   npx playwright test tests/e2e/ops-console-screenshot.spec.ts --grep @snapshot
  */
 
 test("capture ops console golden-path screenshot @snapshot", async ({ page }) => {

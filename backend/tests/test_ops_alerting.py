@@ -447,3 +447,149 @@ def test_post_alerts_fire_applier_source(client, temp_db: Path) -> None:
     assert body["correlation_id"] == "rb-cid-987"
     assert body["event"]["severity"] == "critical"
     assert body["event"]["source"] == "rollback_applier"
+
+
+# ---------------------------------------------------------------------------
+# S2 — lifecycle fire-state validation + fire idempotency
+# ---------------------------------------------------------------------------
+
+
+def _fire_synthetic(client) -> str:
+    """Fire a synthetic critical SLO alert and return its correlation_id."""
+    resp = client.post(
+        "/api/render/ops/alerts/fire",
+        json={
+            "source": "slo_report",
+            "slo_report": {
+                "recommendation": "rollback",
+                "violations": [],
+                "sample_size": 50,
+            },
+            "reviewer": "operator-1",
+            "dispatch": False,
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    return resp.json()["correlation_id"]
+
+
+def test_ack_unknown_correlation_id_returns_404(client, temp_db: Path) -> None:
+    resp = client.post(
+        "/api/render/ops/alerts/never-fired-cid/ack",
+        json={"operator": "on-call"},
+    )
+    assert resp.status_code == 404, resp.text
+    assert "no fired alert" in resp.json()["detail"]["error"]
+
+
+def test_resolve_unknown_correlation_id_returns_404(client, temp_db: Path) -> None:
+    resp = client.post(
+        "/api/render/ops/alerts/never-fired-cid/resolve",
+        json={"operator": "on-call"},
+    )
+    assert resp.status_code == 404, resp.text
+    assert "no fired alert" in resp.json()["detail"]["error"]
+
+
+def test_ack_after_resolve_returns_409(client, temp_db: Path) -> None:
+    cid = _fire_synthetic(client)
+    assert (
+        client.post(
+            f"/api/render/ops/alerts/{cid}/resolve", json={"operator": "oc"}
+        ).status_code
+        == 200
+    )
+    late_ack = client.post(
+        f"/api/render/ops/alerts/{cid}/ack", json={"operator": "oc"}
+    )
+    assert late_ack.status_code == 409, late_ack.text
+    assert "already resolved" in late_ack.json()["detail"]["error"]
+
+
+def test_double_resolve_returns_409(client, temp_db: Path) -> None:
+    cid = _fire_synthetic(client)
+    assert (
+        client.post(
+            f"/api/render/ops/alerts/{cid}/resolve", json={"operator": "oc"}
+        ).status_code
+        == 200
+    )
+    second = client.post(
+        f"/api/render/ops/alerts/{cid}/resolve", json={"operator": "oc"}
+    )
+    assert second.status_code == 409, second.text
+    assert "already resolved" in second.json()["detail"]["error"]
+
+
+def test_fire_alert_is_idempotent_by_correlation_id(
+    client, temp_db: Path, tmp_path: Path
+) -> None:
+    """A second fire for the same correlation_id is a no-op: no duplicate
+    audit row, no re-dispatch (the applier path replays its request_id)."""
+    from backend import db
+
+    event = ops_alerting.compile_alert_from_applier_result(
+        {
+            "request_id": "rb-idem-1",
+            "reason": "rollback_applied",
+            "outcome": "rollback_completed",
+        }
+    )
+    assert event is not None
+
+    class _RecordingChannel:
+        name = "rec"
+
+        def __init__(self) -> None:
+            self.sent: list = []
+
+        def send(self, ev):
+            self.sent.append(ev)
+            return {"ok": True, "http_status": 200, "error": None, "channel": "rec"}
+
+    ch = _RecordingChannel()
+    with db.connect() as conn:
+        first = ops_alerting.fire_alert(event, conn=conn, channels=[ch])
+        second = ops_alerting.fire_alert(event, conn=conn, channels=[ch])
+        n = conn.execute(
+            "SELECT COUNT(*) AS n FROM ops_audit_log WHERE request_id = ? AND endpoint = ?",
+            (event.correlation_id, ops_alerting.ENDPOINT_FIRE),
+        ).fetchone()["n"]
+    assert first.get("idempotent") is not True
+    assert second.get("idempotent") is True
+    assert len(ch.sent) == 1  # only the first fire dispatched
+    assert n == 1  # only one alert_fired row
+
+
+def test_fire_audit_payload_omits_open_input_dict(client, temp_db: Path) -> None:
+    """S4: the unbounded slo_report dict must not land verbatim in
+    ops_audit_log.payload_json — only the whitelisted bounded summary."""
+    from backend import db
+
+    huge_note = "x" * 5000
+    resp = client.post(
+        "/api/render/ops/alerts/fire",
+        json={
+            "source": "slo_report",
+            "slo_report": {
+                "recommendation": "rollback",
+                "violations": [],
+                "sample_size": 50,
+                "notes": huge_note,
+                "operator_blob": "y" * 100000,  # not whitelisted → dropped
+            },
+            "reviewer": "operator-1",
+            "dispatch": False,
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    with db.connect() as conn:
+        row = conn.execute(
+            "SELECT payload_json FROM ops_audit_log "
+            "WHERE endpoint = 'POST /api/render/ops/alerts/fire' ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    payload_json = row["payload_json"]
+    assert "operator_blob" not in payload_json  # non-whitelisted key dropped
+    assert "yyyyy" not in payload_json  # the 100k blob never persisted
+    assert "truncated" in payload_json  # the 5k note was capped
+    assert len(payload_json) < 2000  # bounded

@@ -46,9 +46,18 @@ COLUMNS: tuple[str, ...] = (
 RESTORED_PREFIX = "restored_from_archive:"
 
 
-def _parse_iso(text: str) -> datetime:
-    """Tolerant ISO-8601 parse. Naive timestamps are interpreted as UTC."""
-    dt = datetime.fromisoformat(text)
+def _parse_iso(text: str) -> datetime | None:
+    """Tolerant ISO-8601 parse. Naive timestamps are interpreted as UTC.
+
+    Returns ``None`` on a malformed / non-ISO ``created_at`` instead of
+    raising — a single poison timestamp must not abort the whole nightly
+    export (which would leave a silent backup gap). The caller routes
+    ``None`` rows to a dedicated ``unparseable`` shard so nothing is lost.
+    """
+    try:
+        dt = datetime.fromisoformat(text)
+    except (ValueError, TypeError):
+        return None
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt
@@ -58,13 +67,24 @@ def _row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     return {col: row[col] for col in COLUMNS}
 
 
-def _bucket_by_month(rows: Iterable[dict[str, Any]]) -> dict[tuple[int, int], list[dict[str, Any]]]:
-    """Group rows by (year, month) parsed from ``created_at``."""
+def _bucket_by_month(
+    rows: Iterable[dict[str, Any]],
+) -> tuple[dict[tuple[int, int], list[dict[str, Any]]], list[dict[str, Any]]]:
+    """Group rows by (year, month) parsed from ``created_at``.
+
+    Returns ``(buckets, unparseable)`` — rows whose ``created_at`` cannot be
+    parsed are collected separately so the caller can shard them under an
+    ``unparseable`` bucket rather than crash or silently drop them.
+    """
     buckets: dict[tuple[int, int], list[dict[str, Any]]] = defaultdict(list)
+    unparseable: list[dict[str, Any]] = []
     for row in rows:
         when = _parse_iso(str(row["created_at"]))
+        if when is None:
+            unparseable.append(row)
+            continue
         buckets[(when.year, when.month)].append(row)
-    return buckets
+    return buckets, unparseable
 
 
 def _write_shard(path: Path, rows: list[dict[str, Any]], *, overwrite: bool) -> int:
@@ -110,15 +130,26 @@ def export_rows(
         (cutoff_iso,),
     )
     rows = [_row_to_dict(r) for r in cur.fetchall()]
-    buckets = _bucket_by_month(rows)
+    buckets, unparseable = _bucket_by_month(rows)
     shards: list[dict[str, Any]] = []
     for (year, month), bucket_rows in sorted(buckets.items()):
         shard_path = output_dir / f"{year:04d}" / f"{month:02d}.jsonl"
         written = _write_shard(shard_path, bucket_rows, overwrite=overwrite)
         shards.append({"path": str(shard_path), "rows": written})
+    # Route rows with a malformed created_at to a dedicated shard rather than
+    # dropping them or crashing the export. _write_shard sorts by id, so this
+    # stays byte-identical on re-run too.
+    rows_unparseable = 0
+    if unparseable:
+        unparseable_path = output_dir / "unparseable.jsonl"
+        rows_unparseable = _write_shard(
+            unparseable_path, unparseable, overwrite=overwrite
+        )
+        shards.append({"path": str(unparseable_path), "rows": rows_unparseable})
     return {
         "cutoff_iso": cutoff_iso,
         "rows_written": sum(s["rows"] for s in shards),
+        "rows_unparseable": rows_unparseable,
         "shards": shards,
     }
 
