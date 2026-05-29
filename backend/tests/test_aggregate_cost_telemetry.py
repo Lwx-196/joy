@@ -78,8 +78,10 @@ def test_empty_db_zeros():
     assert vlm["total_cost_usd"] == 0.0
     assert vlm["cost_usd_per_call_avg"] == 0.0
     assert vlm["latency_ms_p50"] == 0.0
+    assert vlm["latency_ms_p99"] == 0.0
     assert renders["total_finished"] == 0
     assert renders["duration_ms_p50"] == 0.0
+    assert renders["duration_ms_p99"] == 0.0
     assert cost["vlm_api_cost_usd"] == 0.0
     assert cost["estimated_eligible_cases"] == 0
 
@@ -178,6 +180,59 @@ def test_render_finished_states_and_duration():
     assert renders["_finished_case_ids"] == {1, 2}
     # 10s and 30s → p50 midpoint ≈ 20000 ms (±2ms: julianday float granularity)
     assert renders["duration_ms_p50"] == pytest.approx(20000.0, abs=2.0)
+
+
+# --- p99 emitted + monotonic (closes cost-telemetry-cli-usage.md p99 blind spot) ---
+
+def test_latency_p99_emitted_and_monotonic():
+    conn = _make_db()
+    # 100 rows latency = 1..100 → deterministic percentiles via linear interp.
+    conn.executemany(
+        "INSERT INTO vlm_usage_log (purpose, provider, model, case_id, "
+        "cost_usd, latency_ms, status, created_at) VALUES (?,?,?,?,?,?,?,?)",
+        [
+            ("judge", "p", "m", i, 0.0, i, "ok", "2026-05-01T00:00:00+00:00")
+            for i in range(1, 101)
+        ],
+    )
+    conn.commit()
+    vlm = agg._aggregate_vlm_usage(conn, ALL)
+    assert vlm["latency_ms_p50"] == 50.5
+    assert vlm["latency_ms_p95"] == 95.05
+    assert vlm["latency_ms_p99"] == 99.01
+    assert vlm["latency_ms_p99"] > vlm["latency_ms_p95"] > vlm["latency_ms_p50"]
+
+
+def test_render_duration_p99_present():
+    conn = _make_db()
+    conn.executemany(
+        "INSERT INTO render_jobs (case_id, status, enqueued_at, started_at, "
+        "finished_at) VALUES (?,?,?,?,?)",
+        [
+            (i, "done", "2026-05-01T00:00:00+00:00",
+             "2026-05-01T00:00:00+00:00", f"2026-05-01T00:00:{i:02d}+00:00")
+            for i in range(1, 21)
+        ],
+    )
+    conn.commit()
+    renders = agg._aggregate_render_jobs(conn, ALL)
+    assert "duration_ms_p99" in renders
+    # p99 >= p95 >= p50 (>= because small sample can tie near the top).
+    assert renders["duration_ms_p99"] >= renders["duration_ms_p95"]
+    assert renders["duration_ms_p95"] >= renders["duration_ms_p50"]
+
+
+def test_p99_keys_in_serialized_output():
+    conn = _make_db()
+    conn.execute(
+        "INSERT INTO render_jobs (case_id, status, enqueued_at, started_at, "
+        "finished_at) VALUES (1,'done','2026-05-01T00:00:00+00:00',"
+        "'2026-05-01T00:00:00+00:00','2026-05-01T00:00:05+00:00')"
+    )
+    conn.commit()
+    out = agg._aggregate(conn, window_days=36500)
+    assert "latency_ms_p99" in out["vlm_usage"]
+    assert "duration_ms_p99" in out["render_jobs"]
 
 
 # --- drill exclusion --------------------------------------------------------

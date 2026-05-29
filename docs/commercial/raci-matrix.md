@@ -61,10 +61,11 @@ Evidence: <PR / 文档 / 邮件 / 审批单链接>
 
 - [ ] 7 个 role owner 全部点名到具体人
 - [ ] 10 个决策点 R/A/C/I 商业团队签字
-- [ ] Decision log 模板 + 目录建好
-- [ ] 与 `legal-signoff-checklist.md` 双向引用对齐
+- [x] Decision log 模板 + 目录建好 —— `decision-log/_TEMPLATE.md` + `decision-log/README.md`
+- [ ] 与 `legal-signoff-checklist.md` 双向引用对齐 —— doc-level 双向引用已对齐（本文 §6 ↔ legal §5）；item-level L→D 映射见 `decision-log/README.md`；L13 retention 无专属 D-row，待商业团队拍（fold 进 D5 或新增 D11）
 
 ## 6. References
 
 - Plan: `.claude/plan/comfyui-vlm-ga.md` Phase C5.0.1
 - 关联文档：`docs/commercial/sla-template.md` / `docs/commercial/billing-policy.md` / `docs/commercial/legal-signoff-checklist.md`
+- 决策记录：`docs/commercial/decision-log/`（`_TEMPLATE.md` + `README.md` 索引 + L↔D 映射）

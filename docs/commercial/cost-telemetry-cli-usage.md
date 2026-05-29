@@ -95,7 +95,7 @@ CASE_WORKBENCH_DB_PATH=/Users/a1234/Desktop/案例生成器/case-workbench/case-
 |---|---|---|---|
 | `<<P50_PENDING>>` / latency p50 | `c5-sla-commitment.md` / `sla-template.md` | `render_jobs.duration_ms_p50` ÷ 1000 → 秒 | ✅ 直接映射 |
 | `<<P95_PENDING>>` / latency p95 | 同上 | `render_jobs.duration_ms_p95` ÷ 1000 → 秒 | ✅ 直接映射 |
-| `<<P99_PENDING>>` / latency p99 | 同上 | **❌ 本脚本不算 p99** | 需扩脚本或 ad-hoc SQL；当前盲区 |
+| `<<P99_PENDING>>` / latency p99 | 同上 | `render_jobs.duration_ms_p99` ÷ 1000 → 秒 | ✅ 脚本现已计算（chore/cvga-longtail-followup）；⚠ 仍需真实增强路径样本才能填 SLA（当前 0 条，勿用历史/layout-only 数据） |
 | `<<VLM_API_PENDING>>` 可变成本 | `c5-cost-model.md` | `cost_per_case.vlm_api_cost_usd` | ✅ 单 case VLM 成本 |
 | `<<MONTHLY_CASES_PENDING>>` | `c5-cost-model.md` | `cost_per_case.estimated_eligible_cases` × (30 / window) | 按窗口外推月度量 |
 | `<<MIN_SAMPLE_PENDING>>` / 样本量 | `c5-sla-commitment.md` | `render_jobs.total_finished` 作下界代理 | 正式样本量以 `slo_thresholds.json` 为准 |
@@ -105,7 +105,7 @@ CASE_WORKBENCH_DB_PATH=/Users/a1234/Desktop/案例生成器/case-workbench/case-
 
 > **⚠️ 三个最易踩的坑**：
 > 1. **`vlm_usage.latency_ms` ≠ 客户 SLA latency**。客户 SLA 的 p50/p95/p99 是 **`render_jobs.duration`**（端到端出图时长）。VLM latency 只是其中一段 judge 调用耗时，别混填。
-> 2. **脚本只产 p50/p95，没有 p99**。`<<P99_PENDING>>` 不能用本脚本回填——需另跑 SQL 或扩脚本。
+> 2. **脚本现产 p50/p95/p99**（`render_jobs.duration_ms_p99` + `vlm_usage.latency_ms_p99`）。但 `<<P99_PENDING>>` 是端到端**增强路径** SLA 值，当前 DB 有 0 条 `used_after_enhancement=true` 的 render——别用历史/layout-only 数据回填，等 C4.5 soft launch 真实样本。
 > 3. **胜率不来自本脚本**。`<<WIN_RATE_PENDING>>` 走 `candidate_lineage.vlm_judge_result_json`（A 流交付物，经 `promotion_slo_monitor`），不要从本脚本 `by_purpose` 里硬凑。
 
 ---
@@ -125,7 +125,9 @@ CASE_WORKBENCH_DB_PATH=/Users/a1234/Desktop/案例生成器/case-workbench/case-
 
 ## 6. 真实 sample output
 
-实跑主 worktree DB（`case-workbench/case-workbench.db`，window=30，2026-05-28 captured，**含历史 classifier / drill 数据，非 SLA 承诺值**）：
+实跑主 worktree DB（`case-workbench/case-workbench.db`，window=30，2026-05-28 captured，**含历史 classifier / drill 数据，非 SLA 承诺值**）。
+
+> 注：此 capture 早于 `*_p99` 字段加入；现 schema 已含 `vlm_usage.latency_ms_p99` + `render_jobs.duration_ms_p99`（2026-05-29 实跑校验：vlm latency p99=19330.76ms / render duration p99=235973.4ms）。
 
 ```json
 {
