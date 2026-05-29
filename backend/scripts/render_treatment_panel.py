@@ -17,6 +17,7 @@ import sys
 import cv2
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+from backend.services import image_providers as ip  # noqa: E402
 from backend.services import treatment_zone_panel as tzp  # noqa: E402
 
 
@@ -37,6 +38,12 @@ def main() -> int:
     ap.add_argument("--model", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--title")
+    ap.add_argument("--lineart", choices=["cv2", "ai"], default="cv2",
+                    help="cv2=本地0付费边缘线稿; ai=img2img 干净线稿(付费)")
+    ap.add_argument("--provider", default="",
+                    help="AI 线稿 provider 优先级 CSV (如 tuzi,code77); 空=用 PANEL_IMAGE_PROVIDERS/默认 tuzi")
+    ap.add_argument("--env-file", default=ip.DEFAULT_ENV_FILE,
+                    help="加载 provider 凭证的 .env 路径")
     args = ap.parse_args()
 
     image_path = args.image
@@ -58,7 +65,19 @@ def main() -> int:
         print(f"cannot read image: {image_path}", file=sys.stderr)
         return 2
 
-    panel, regions = tzp.panel_for_targets(img, focus, args.model, title=title)
+    providers = None
+    if args.lineart == "ai":
+        env = ip.load_env_file(args.env_file)
+        explicit = [x.strip() for x in args.provider.split(",") if x.strip()] or None
+        providers = ip.resolve_chain(env, explicit)
+        if not providers:
+            print("no ready image provider (check --env-file / PANEL_IMG_* / TUZI_IMAGE_PRIMARY_*)",
+                  file=sys.stderr)
+            return 2
+        print(f"lineart=ai providers={[p.name for p in providers]}")
+
+    panel, regions = tzp.panel_for_targets(img, focus, args.model, title=title,
+                                           lineart_mode=args.lineart, providers=providers)
     print(f"focus='{focus}' → regions={regions}")
     if panel is None:
         print("no face detected → no panel", file=sys.stderr)

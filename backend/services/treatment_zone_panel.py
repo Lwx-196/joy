@@ -149,6 +149,36 @@ def lineart(image_bgr: np.ndarray) -> np.ndarray:
         return cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR)
 
 
+_LINEART_PROMPT = (
+    "Redraw this portrait as a clean black-and-white line drawing for a medical "
+    "aesthetics treatment chart. Pure white background. Thin, even black contour "
+    "lines only. Preserve the EXACT same face shape, proportions, feature positions, "
+    "head angle and hairstyle as the photo. No shading, no hatching, no grey fill, "
+    "no color, no text. Minimal clean medical-illustration line art."
+)
+
+
+def lineart_ai(image_bgr: np.ndarray, providers, *, max_edge: int = 1536,
+               prompt: str | None = None) -> tuple[np.ndarray, str]:
+    """AI 线稿（img2img）：缩到长边 max_edge → provider 链生图 → 返回 (线稿 BGR, provider 名)。
+
+    providers: image_providers.ImageProvider 列表（resolve_chain 产出）。
+    """
+    from backend.services import image_providers as ip
+
+    h, w = image_bgr.shape[:2]
+    s = max_edge / max(h, w)
+    src = (cv2.resize(image_bgr, (int(w * s), int(h * s)), interpolation=cv2.INTER_AREA)
+           if s < 1.0 else image_bgr)
+    ok, buf = cv2.imencode(".jpg", src, [cv2.IMWRITE_JPEG_QUALITY, 88])
+    img_bytes, name = ip.generate_with_fallback(providers, buf.tobytes(),
+                                                prompt or _LINEART_PROMPT)
+    arr = cv2.imdecode(np.frombuffer(img_bytes, np.uint8), cv2.IMREAD_COLOR)
+    if arr is None:
+        raise RuntimeError(f"provider {name} returned undecodable image bytes")
+    return arr, name
+
+
 def facemesh_landmarks(image_bgr: np.ndarray, model_path: str) -> np.ndarray | None:
     """FaceLandmarker(478) → (478,2) 像素坐标；无脸返回 None。lazy import mediapipe。"""
     import mediapipe as mp
@@ -190,15 +220,17 @@ def _face_crop_box(pts: np.ndarray, w: int, h: int, pad: float = 0.45) -> tuple[
 
 def render_panel(image_bgr: np.ndarray, pts: np.ndarray, region_keys: list[str],
                  *, alpha: float = 0.38, title: str | None = None,
-                 crop_to_face: bool = True) -> np.ndarray:
+                 crop_to_face: bool = True, substrate_bgr: np.ndarray | None = None) -> np.ndarray:
     """线稿底图 + 各区半透明色块 + CJK 标签 → panel（返回 BGR）。
 
+    substrate_bgr: 已备好的线稿底图（AI 线稿路径用）。None 时本地 cv2 lineart(image_bgr)。
+                   注意：用 AI 线稿时 pts 必须在该线稿上检测（保证标注与线稿几何对齐）。
     crop_to_face: 独立 panel 默认裁到脸+留白，让脸填满画面（源照常框很松/带杂物）。
     接 board 时传 False（board 自己做对齐裁切）。
     """
     from PIL import Image, ImageDraw
 
-    base = lineart(image_bgr)
+    base = substrate_bgr if substrate_bgr is not None else lineart(image_bgr)
     h, w = base.shape[:2]
     scale = _face_scale(pts)
     pil = Image.fromarray(cv2.cvtColor(base, cv2.COLOR_BGR2RGB)).convert("RGBA")
@@ -280,19 +312,33 @@ def _draw_label(draw, anchor, text, rgb, font, placed) -> None:
 
 
 def panel_for_targets(image_bgr: np.ndarray, focus_text: str, model_path: str,
-                      *, title: str | None = None) -> tuple[np.ndarray | None, list[str]]:
-    """端到端：术式描述 → 抽取全部区 → 检测 landmark → 渲染 panel。
+                      *, title: str | None = None, lineart_mode: str = "cv2",
+                      providers=None, crop_to_face: bool = True) -> tuple[np.ndarray | None, list[str]]:
+    """端到端：术式描述 → 抽取全部区 → 线稿底图 → 检测 landmark → 渲染 panel。
 
+    lineart_mode: "cv2"（本地 0 付费）| "ai"（img2img，需 providers 链）。
+    AI 路径在**线稿本身**检测 landmark（标注与线稿几何对齐，Phase 0 验证可检）；
+    cv2 路径在原照检测（线稿与原照同尺寸同坐标）。
     返回 (panel_bgr|None, region_keys)。无脸检出 → (None, regions)。
     """
     regions = atlas.extract_regions(focus_text)
+    if lineart_mode == "ai":
+        if not providers:
+            raise ValueError("lineart_mode='ai' requires a non-empty providers chain")
+        substrate, _name = lineart_ai(image_bgr, providers)
+        pts = facemesh_landmarks(substrate, model_path)
+        if pts is None:
+            return None, regions
+        panel = render_panel(substrate, pts, regions, title=title,
+                             crop_to_face=crop_to_face, substrate_bgr=substrate)
+        return panel, regions
     pts = facemesh_landmarks(image_bgr, model_path)
     if pts is None:
         return None, regions
-    return render_panel(image_bgr, pts, regions, title=title), regions
+    return render_panel(image_bgr, pts, regions, title=title, crop_to_face=crop_to_face), regions
 
 
 __all__ = [
-    "RegionShape", "region_geometry", "lineart", "facemesh_landmarks",
+    "RegionShape", "region_geometry", "lineart", "lineart_ai", "facemesh_landmarks",
     "render_panel", "panel_for_targets",
 ]
