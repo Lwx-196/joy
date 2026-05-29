@@ -3064,6 +3064,23 @@ _FOCAL_TIMEOUT_BASE = 600
 _FOCAL_TIMEOUT_PER_MEGAPIXEL = 800
 _FOCAL_TIMEOUT_CAP = 1800
 _FOCAL_PIXEL_FLOOR = 256_000
+# Crop-at-native-res (supersedes the W11 whole-image resize). The focus region
+# is a small feature, so we crop the mask bbox + this much context padding and
+# inpaint at native resolution, then feather-composite back onto the pristine
+# original — keeping the unmasked background at full sharpness.
+_FOCAL_CROP_PAD_FRAC = 0.25
+_FOCAL_FEATHER_FRAC = 0.04
+_FOCAL_FEATHER_MIN = 3
+# The crop is inpainted at NATIVE resolution unless its pixel area exceeds this
+# budget — then (and only then) it is area-preserving-downscaled for the SDXL
+# pass. Calibrated to the smoke-proven fast regime (C1: 1280×853 ≈ 1.09 MP ran
+# in ~236s on local MPS) with headroom, so every single-feature focal target on
+# a 1920×1280 portrait runs native (incl. 面颊 ≈ 1.29 MP). Only a broad multi-
+# target *union* or a full-frame fallback (≳ 2 MP, the regime W11 documented as
+# timing out) is downscaled; those are the crisp-focal-crop P2/P3 residual
+# (per-target multi-crop). Replaces the old fixed long-edge cap that softened
+# every large crop regardless of shape (review w6inp3wzz confirmed High).
+_FOCAL_CROP_MAX_PIXELS = 1_500_000
 
 
 def _focal_compute_timeout(width: int, height: int) -> int:
@@ -3079,32 +3096,80 @@ def _focal_compute_timeout(width: int, height: int) -> int:
     return min(_FOCAL_TIMEOUT_CAP, _FOCAL_TIMEOUT_BASE + int(extra_seconds))
 
 
-def _focal_resize_if_needed(
-    image_path: Path,
-    output_dir: Path,
-    max_long_edge: int = _FOCAL_MAX_LONG_EDGE,
-) -> tuple[Path, int, int, int, int]:
-    """Wave 11 W11-3: resize input so long edge ≤ ``max_long_edge``.
+def _focal_crop_bbox(
+    mask_path: Path,
+    *,
+    pad_frac: float = _FOCAL_CROP_PAD_FRAC,
+) -> tuple[int, int, int, int]:
+    """Bounding box of the focus mask's white region, padded + clamped.
 
-    Returns ``(work_path, work_w, work_h, original_w, original_h)``.
-    ``work_path == image_path`` (no I/O) if no resize is needed.
+    Returns ``(left, top, right, bottom)`` integer pixel coords into the
+    full-resolution image. The focus ellipse is small (a feature), so the
+    crop is small → it can be inpainted at native resolution without the
+    whole-image downscale that softened large images (W11 / C2.2 regression).
+
+    Empty / all-black mask → full-image box (degenerate full-frame fallback).
     """
-    from PIL import Image, ImageOps
+    from PIL import Image
 
-    with Image.open(image_path) as im:
-        im = ImageOps.exif_transpose(im)
-        orig_w, orig_h = im.size
-        if max(orig_w, orig_h) <= max_long_edge:
-            return image_path, orig_w, orig_h, orig_w, orig_h
-        scale = max_long_edge / max(orig_w, orig_h)
-        new_w = max(1, int(round(orig_w * scale)))
-        new_h = max(1, int(round(orig_h * scale)))
-        resized = im.resize((new_w, new_h), Image.LANCZOS)
-        if resized.mode != "RGB":
-            resized = resized.convert("RGB")
-        resized_path = output_dir / f"resized_{image_path.stem}.jpg"
-        resized.save(resized_path, format="JPEG", quality=92)
-        return resized_path, new_w, new_h, orig_w, orig_h
+    with Image.open(mask_path) as m:
+        mask = m.convert("L")
+        w, h = mask.size
+        region = mask.getbbox()  # None if all-black
+    if region is None:
+        return (0, 0, w, h)
+    left, top, right, bottom = region
+    pad_x = int(round((right - left) * pad_frac))
+    pad_y = int(round((bottom - top) * pad_frac))
+    return (
+        max(0, left - pad_x),
+        max(0, top - pad_y),
+        min(w, right + pad_x),
+        min(h, bottom + pad_y),
+    )
+
+
+def _composite_focal(
+    base_path: Path,
+    inpainted_crop_path: Path,
+    crop_mask_path: Path,
+    bbox: tuple[int, int, int, int],
+    output_path: Path,
+    *,
+    feather_frac: float = _FOCAL_FEATHER_FRAC,
+) -> Path:
+    """Paste the inpainted focal crop onto the pristine full-res original.
+
+    The original is kept untouched everywhere except the focus region: the
+    crop is alpha-blended in via the (feathered) focus-mask ellipse, so the
+    seam is invisible and unmasked pixels stay byte-near-identical to the
+    input. Keeping the original's colour outside the ellipse also targets
+    Mode-B boundary artifacts (e.g. the case-134 blue hair edge).
+
+    The output always matches the base (original) dimensions. Written via a
+    sibling temp + atomic replace so an in-place target is never half-written.
+    """
+    from PIL import Image, ImageFilter
+
+    left, top, right, bottom = bbox
+    crop_w, crop_h = right - left, bottom - top
+    with Image.open(base_path) as b:
+        base = b.convert("RGB").copy()
+    with Image.open(inpainted_crop_path) as g:
+        inpainted = g.convert("RGB")
+        if inpainted.size != (crop_w, crop_h):
+            inpainted = inpainted.resize((crop_w, crop_h), Image.LANCZOS)
+    with Image.open(crop_mask_path) as cm:
+        alpha = cm.convert("L")
+        if alpha.size != (crop_w, crop_h):
+            alpha = alpha.resize((crop_w, crop_h), Image.LANCZOS)
+    radius = max(_FOCAL_FEATHER_MIN, int(round(min(crop_w, crop_h) * feather_frac)))
+    alpha = alpha.filter(ImageFilter.GaussianBlur(radius=radius))
+    base.paste(inpainted, (left, top), mask=alpha)
+    tmp_out = output_path.with_name(f".composite-{os.getpid()}-{output_path.name}")
+    base.save(tmp_out, format="PNG")
+    os.replace(tmp_out, output_path)
+    return output_path
 
 
 def run_comfyui_focal_enhance(
@@ -3117,63 +3182,63 @@ def run_comfyui_focal_enhance(
 ) -> Path:
     """M3 FOCAL — region-aware SDXL inpaint with per-target prompts.
 
-    Wave 11 update: the v1 workflow has been simplified to consume the
-    Python-side ellipse focus mask directly (no MediaPipe whole-face SEGS +
-    SAM bbox-expansion chain that was eating the entire face in case 134),
-    and inputs are auto-resized to ≤_FOCAL_MAX_LONG_EDGE long-edge before
-    submission with a pixel-area-derived timeout (W11-1 / W11-2 / W11-3).
+    Crop-at-native-res (supersedes the W11 whole-image resize): the focus
+    region is a small feature, so we crop it at the mask bbox, inpaint the
+    crop at its native resolution (only downscaling a crop that is itself
+    > _FOCAL_MAX_LONG_EDGE, which is rare), then feather-composite the result
+    back onto the pristine full-resolution original. The unmasked background
+    keeps full sharpness; only the focal region is regenerated — fixing the
+    whole-image resize round-trip that softened the face on large inputs
+    (C2.2 0/3 regression; journal 2026-05-29 §14).
 
     Steps:
-      1. Auto-resize input to ≤_FOCAL_MAX_LONG_EDGE long-edge.
-      2. Generate a coarse focus mask at the resized resolution via
-         ``focal_mask_generator.generate_focus_mask``.
-      3. Build per-target positive + negative prompts via
-         ``focal_prompt_library.build_focal_prompts``.
-      4. Compute dynamic timeout from resized dimensions
-         (``_focal_compute_timeout``).
-      5. Run the ``portrait_focal_enhance_v1`` workflow (focal strength:
-         denoise=0.40, 20 steps, cfg=4.0).
-      6. Promote generated PNG to a stable path next to the input. If the
-         input was resized, upscale the output back to the original
-         resolution with Lanczos before saving.
+      0. Normalise EXIF orientation → pristine full-res RGB base.
+      1. Full-res focus mask via ``focal_mask_generator.generate_focus_mask``.
+      2. Crop bbox = padded white-region bbox (``_focal_crop_bbox``).
+      3. Crop the base + mask to the bbox.
+      4. Inpaint the crop at native res; downscale only if its pixel area
+         exceeds _FOCAL_CROP_MAX_PIXELS (broad union / full-frame fallback).
+      5. Run the ``portrait_focal_enhance_v1`` workflow on the crop
+         (denoise=0.40, 20 steps, cfg=4.0); timeout from CROP dims.
+      6. Feather-composite the inpainted crop onto the pristine base
+         (``_composite_focal``) and promote to a stable path.
 
     K-1 contract: returns ``image_path`` on any silent failure.
     """
     from .services.focal_mask_generator import generate_focus_mask
     from .services.focal_prompt_library import build_focal_prompts
+    from PIL import Image, ImageOps
 
     focus_targets = focus_targets or []
     caller_provided_output_dir = output_dir is not None
-    if not caller_provided_output_dir:
-        import tempfile
-        output_dir = Path(tempfile.mkdtemp(prefix=".comfyui-focal-", dir=str(image_path.parent)))
-    else:
-        output_dir.mkdir(parents=True, exist_ok=True)
 
-    mask_path: Path | None = None
     try:
-        # 1. Auto-resize input if needed (W11-3)
+        # Work-dir setup lives inside the try so a mkdtemp/mkdir failure honours
+        # the K-1 contract (return image_path) instead of raising to the caller.
+        if not caller_provided_output_dir:
+            import tempfile
+            output_dir = Path(tempfile.mkdtemp(prefix=".comfyui-focal-", dir=str(image_path.parent)))
+        else:
+            output_dir.mkdir(parents=True, exist_ok=True)
+
+        # 0. Pristine, EXIF-normalised full-res base (mask / crop / composite source).
         try:
-            workflow_input, work_w, work_h, orig_w, orig_h = _focal_resize_if_needed(
-                image_path, output_dir,
-            )
+            with Image.open(image_path) as _im:
+                base = ImageOps.exif_transpose(_im).convert("RGB")
+            orig_w, orig_h = base.size
+            base_path = output_dir / "focal_base.png"
+            base.save(base_path, format="PNG")
         except Exception as exc:  # noqa: BLE001
             LOGGER.warning(
-                "ComfyUI focal enhance: resize failed for %s (%s); silent-fail",
+                "ComfyUI focal enhance: base load failed for %s (%s); silent-fail",
                 image_path.name, exc,
             )
             return image_path
-        needs_upscale = (work_w, work_h) != (orig_w, orig_h)
-        if needs_upscale:
-            LOGGER.info(
-                "ComfyUI focal enhance: resized input %dx%d -> %dx%d (long-edge cap %d)",
-                orig_w, orig_h, work_w, work_h, _FOCAL_MAX_LONG_EDGE,
-            )
 
-        # 2. Generate focus mask (at resized resolution so dimensions match)
+        # 1. Full-res focus mask (same dims as the base)
         try:
-            mask_path = generate_focus_mask(
-                workflow_input, focus_targets, output_path=output_dir / "focus_mask.png",
+            mask_full_path = generate_focus_mask(
+                base_path, focus_targets, output_path=output_dir / "focus_mask_full.png",
             )
         except Exception as exc:  # noqa: BLE001
             LOGGER.warning(
@@ -3182,24 +3247,63 @@ def run_comfyui_focal_enhance(
             )
             return image_path
 
-        # 3. Build prompts
-        positive_prompt, negative_prompt = build_focal_prompts(focus_targets)
+        # 2. Crop bbox from the mask white region (+ padding, clamped)
+        bbox = _focal_crop_bbox(mask_full_path)
+        crop_l, crop_t, crop_r, crop_b = bbox
+        crop_w, crop_h = crop_r - crop_l, crop_b - crop_t
 
-        # 4. Compute dynamic timeout (W11-2)
+        # 3. Crop base + mask to the bbox
+        with Image.open(mask_full_path) as _m:
+            mask_full = _m.convert("L").copy()
+        crop_img = base.crop(bbox)
+        crop_mask = mask_full.crop(bbox)
+        crop_mask_path = output_dir / "focal_crop_mask.png"
+        crop_mask.save(crop_mask_path, format="PNG")
+
+        # 4. Inpaint the crop at NATIVE resolution; downscale (area-preserving)
+        #    only if the crop's pixel area exceeds the native budget. A fixed
+        #    long-edge cap would needlessly downscale a wide-but-short band
+        #    (e.g. an undereye/cheek crop is ~1920px wide but only ~0.6–1.3 MP),
+        #    re-softening the focal region the way W11 did. Area is the right
+        #    governor: a 1920×400 band (0.77 MP) stays native; only a broad
+        #    multi-target union / full-frame fallback (≳ 2 MP) is downscaled.
+        work_w, work_h = crop_w, crop_h
+        work_crop = crop_img
+        work_mask = crop_mask
+        crop_pixels = crop_w * crop_h
+        if crop_pixels > _FOCAL_CROP_MAX_PIXELS:
+            scale = (_FOCAL_CROP_MAX_PIXELS / crop_pixels) ** 0.5
+            work_w = max(1, int(round(crop_w * scale)))
+            work_h = max(1, int(round(crop_h * scale)))
+            work_crop = crop_img.resize((work_w, work_h), Image.LANCZOS)
+            work_mask = crop_mask.resize((work_w, work_h), Image.LANCZOS)
+            LOGGER.info(
+                "ComfyUI focal enhance: broad focal crop %dx%d (%d px) > native "
+                "budget %d px -> downscaled to %dx%d for inpaint (focal region "
+                "softens; background stays pristine — crisp-focal-crop P2/P3)",
+                crop_w, crop_h, crop_pixels, _FOCAL_CROP_MAX_PIXELS, work_w, work_h,
+            )
+        crop_input_path = output_dir / "focal_crop_input.jpg"
+        work_crop.convert("RGB").save(crop_input_path, format="JPEG", quality=95)
+        work_mask_path = output_dir / "focal_crop_workmask.png"
+        work_mask.save(work_mask_path, format="PNG")
+
+        # 5. Prompts + dynamic timeout from CROP dims (small region → low timeout)
+        positive_prompt, negative_prompt = build_focal_prompts(focus_targets)
         timeout_s = _focal_compute_timeout(work_w, work_h)
         LOGGER.info(
-            "ComfyUI focal enhance: dynamic timeout=%ds for %dx%d (%d pixels)",
-            timeout_s, work_w, work_h, work_w * work_h,
+            "ComfyUI focal enhance: crop bbox=%s (%dx%d, work %dx%d) timeout=%ds",
+            bbox, crop_w, crop_h, work_w, work_h, timeout_s,
         )
 
-        # 5. Run workflow
+        # 6. Run workflow on the crop
         try:
             run_result = _run_comfyui_workflow(
-                workflow_input,
+                crop_input_path,
                 output_dir=output_dir,
                 workflow_name="portrait_focal_enhance_v1",
                 workflow_parameters=dict(_COMFYUI_WORKFLOW_PARAMETERS["focal"]),
-                focus_mask_path=mask_path,
+                focus_mask_path=work_mask_path,
                 positive_prompt=positive_prompt,
                 negative_prompt=negative_prompt,
                 timeout_seconds=timeout_s,
@@ -3226,48 +3330,27 @@ def run_comfyui_focal_enhance(
             )
             return image_path
 
-        # 6. Promote to stable path (K-1 contract). Upscale back to the
-        #    original resolution whenever the input was resized.
-        #    W11.4: the upscale-back must NOT be gated by the output-destination
-        #    check. When the caller supplies output_dir, stable_path ==
-        #    generated_path, so the old ``and stable_path != generated_path``
-        #    guard made BOTH branches dead and silently returned a
-        #    working-resolution image — violating the step-6 docstring contract
-        #    and producing eval artifacts that diverge from the production path
-        #    (render_queue.py passes no output_dir and DID upscale back).
+        # 7. Composite the inpainted crop onto the pristine full-res base. The
+        #    output always matches the original dims (composited onto base), so
+        #    the W11.4/W11.5 dim-restore is now intrinsic — no separate upscale
+        #    step. When the caller supplied output_dir, stable_path ==
+        #    generated_path and the composite overwrites the raw crop in place
+        #    (atomic replace inside _composite_focal). The production caller
+        #    (render_queue.py) omits output_dir → stable temp next to input.
         if not caller_provided_output_dir:
             stable_path = image_path.parent / f".comfyui-focal-out-{int(time.time())}-{os.getpid()}-{image_path.name}.png"
         else:
             stable_path = generated_path
-
-        # W11.5: restore the output to EXACT source dims whenever the *generated*
-        # image differs from the source — not only when W11 resized the input
-        # (``needs_upscale``). SDXL/VAE snaps working dims to a multiple of 8
-        # (e.g. 853 -> 848), so a non-resized, non-divisible-by-8 source would
-        # otherwise emit a few-px-short output (case 134: 853x1280 -> 848x1280,
-        # surfaced in C1.2 smoke). Conditioning on the actual generated dims
-        # generalizes the W11.4 upscale-back contract to every path.
         try:
-            from PIL import Image
-            with Image.open(generated_path) as gen_im:
-                if gen_im.size != (orig_w, orig_h):
-                    restored = gen_im.convert("RGB").resize((orig_w, orig_h), Image.LANCZOS)
-                    # Sibling temp + atomic replace so the in-place case
-                    # (stable_path == generated_path, caller-supplied output_dir)
-                    # never leaves a half-written file.
-                    tmp_out = stable_path.with_name(f".restore-{os.getpid()}-{stable_path.name}")
-                    restored.save(tmp_out, format="PNG")
-                    os.replace(tmp_out, stable_path)
-                elif stable_path != generated_path:
-                    shutil.copyfile(generated_path, stable_path)
+            return _composite_focal(
+                base_path, generated_path, crop_mask_path, bbox, stable_path,
+            )
         except Exception as exc:  # noqa: BLE001
             LOGGER.warning(
-                "ComfyUI focal enhance: output dim-restore failed for %s (%s); using raw output",
+                "ComfyUI focal enhance: composite failed for %s (%s); silent-fail",
                 image_path.name, exc,
             )
-            if stable_path != generated_path:
-                shutil.copyfile(generated_path, stable_path)
-        return stable_path
+            return image_path
     except Exception as exc:  # noqa: BLE001
         LOGGER.warning(
             "ComfyUI focal enhance: unexpected error for %s: %s",
