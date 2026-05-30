@@ -23,7 +23,8 @@ def test_mode_default_facemesh(monkeypatch):
 def test_mode_explicit_and_normalized(monkeypatch):
     for raw, exp in [("facemesh", pb.MODE_FACEMESH), ("sixdrep", pb.MODE_SIXDREP),
                      ("shadow", pb.MODE_SHADOW), ("SHADOW", pb.MODE_SHADOW),
-                     ("  Sixdrep  ", pb.MODE_SIXDREP)]:
+                     ("  Sixdrep  ", pb.MODE_SIXDREP), ("hybrid", pb.MODE_HYBRID),
+                     ("HYBRID", pb.MODE_HYBRID)]:
         monkeypatch.setenv(pb.ENV_BACKEND, raw)
         assert pb.pose_backend_mode() == exp
 
@@ -111,6 +112,53 @@ def test_session_unknown_flag_uses_facemesh(monkeypatch, patched):
     monkeypatch.setenv(pb.ENV_BACKEND, "bogus")
     r = pb.PoseSession("m.task").estimate(object())
     assert r.source == "facemesh" and sd.calls == 0
+
+
+# --------------------------- hybrid 模式（Phase 5：6D 高置信 → 6D，否则回退 facemesh）---------------------------
+
+def test_session_hybrid_uses_sixdrep_when_face(monkeypatch, patched):
+    fm, sd = patched                                  # _FakeSD: has_face=True yaw=55 profile
+    monkeypatch.setenv(pb.ENV_BACKEND, "hybrid")
+    r = pb.PoseSession("m.task").estimate(object())
+    assert r.source == "sixdrep" and r.yaw == 55.0    # 6D 高置信侧脸 → 用 6D 更准读数
+    assert sd.calls == 1 and fm.calls == 0            # facemesh 不跑
+
+
+def test_session_hybrid_falls_back_to_facemesh_when_gate_rejects(monkeypatch):
+    fm = _FakeFM()                                    # facemesh: has_face=True yaw=40 oblique
+
+    class _RejectSD:                                  # 门控拒绝：score<thr → has_face=False
+        def __init__(self):
+            self.calls = 0
+
+        def estimate(self, _img):
+            self.calls += 1
+            return _fake("sixdrep", None, has_face=False, score=0.33)
+
+    sd = _RejectSD()
+    monkeypatch.setattr(pb, "FaceMeshPoseBackend", lambda *a, **k: fm)
+    monkeypatch.setattr(pb, "SixDRepPoseBackend", lambda *a, **k: sd)
+    monkeypatch.setenv(pb.ENV_BACKEND, "hybrid")
+    r = pb.PoseSession("m.task").estimate(object())
+    assert r.source == "facemesh" and r.yaw == 40.0   # 门控误杀的真脸 → 回退 FaceMesh 现状
+    assert sd.calls == 1 and fm.calls == 1            # 两臂都跑过（6D 先，回退 FaceMesh）
+
+
+def test_session_hybrid_falls_back_on_sixdrep_exception(monkeypatch, caplog):
+    fm = _FakeFM()
+
+    class _Boom:
+        def estimate(self, _img):
+            raise RuntimeError("onnxruntime not installed")
+
+    monkeypatch.setattr(pb, "FaceMeshPoseBackend", lambda *a, **k: fm)
+    monkeypatch.setattr(pb, "SixDRepPoseBackend", lambda *a, **k: _Boom())
+    monkeypatch.setenv(pb.ENV_BACKEND, "hybrid")
+    with caplog.at_level(logging.WARNING, logger="pose_shadow_compare"):
+        r = pb.PoseSession("m.task").estimate(object())
+    assert r.source == "facemesh" and r.yaw == 40.0   # 6D 依赖缺失 → 回退 facemesh，不崩
+    assert fm.calls == 1
+    assert any("fallback facemesh" in m for m in caplog.messages)
 
 
 # --------------------------- PoseResult 形状 ---------------------------
