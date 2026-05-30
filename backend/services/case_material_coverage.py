@@ -12,7 +12,6 @@ owner 2026-05-30：**不硬分角度——区分不出就降级**。角度判不
 """
 from __future__ import annotations
 
-import math
 import os
 from dataclasses import dataclass, field
 
@@ -121,17 +120,17 @@ def analyze(focus_text: str, photos: list[PhotoView]) -> CaseCoverage:
 # --------------------------- IO 层（lazy mediapipe）---------------------------
 
 def classify_views(case_dir: str, model_path: str, *, prefix: str = "术前") -> list[PhotoView]:
-    """跑 FaceLandmarker 分类 case 目录下所有 prefix 照片的角度。"""
-    import cv2
-    import mediapipe as mp
-    import numpy as np
-    from mediapipe.tasks import python as mp_python
-    from mediapipe.tasks.python import vision
+    """分类 case 目录下所有 prefix 照片的角度。
 
-    base = mp_python.BaseOptions(model_asset_path=model_path)
-    opts = vision.FaceLandmarkerOptions(base_options=base, num_faces=1,
-                                        output_facial_transformation_matrixes=True)
-    det = vision.FaceLandmarker.create_from_options(opts)
+    yaw + 是否检到脸由可插拔 pose backend 估计（`CASE_WORKBENCH_POSE_BACKEND`：
+    facemesh 默认 / sixdrep / shadow）。默认 facemesh 时与历史 FaceLandmarker 路径字节一致。
+    角度软判（classify_angle）与路由（route_region）哲学不变。
+    """
+    import cv2
+
+    from backend.services.pose_backend import PoseSession
+
+    session = PoseSession(model_path)
     out: list[PhotoView] = []
     files = sorted(f for f in os.listdir(case_dir) if f.startswith(prefix)
                    and f.lower().endswith((".jpg", ".jpeg", ".png")))
@@ -140,15 +139,9 @@ def classify_views(case_dir: str, model_path: str, *, prefix: str = "术前") ->
         img = cv2.imread(path)
         if img is None:
             continue
-        r = det.detect(mp.Image(image_format=mp.ImageFormat.SRGB,
-                                data=cv2.cvtColor(img, cv2.COLOR_BGR2RGB)))
-        has_face = bool(r.face_landmarks)
-        yaw = None
-        if has_face and r.facial_transformation_matrixes:
-            R = np.array(r.facial_transformation_matrixes[0])[:3, :3]
-            yaw = abs(math.degrees(math.atan2(-R[2, 0], math.hypot(R[0, 0], R[1, 0]))))
-        view, certain = classify_angle(yaw, has_face)
-        out.append(PhotoView(path, has_face, yaw, view, certain))
+        res = session.estimate(img)
+        view, certain = classify_angle(res.yaw, res.has_face)
+        out.append(PhotoView(path, res.has_face, res.yaw, view, certain))
     return out
 
 

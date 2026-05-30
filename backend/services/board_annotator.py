@@ -30,7 +30,14 @@ ALLOW_DEV_MODEL_ENV = "CASE_WORKBENCH_ALLOW_DEV_MODEL"
 
 def multiface_landmarks(image_bgr: np.ndarray, model_path: str,
                         *, max_faces: int = 6) -> list[tuple[np.ndarray, float | None]]:
-    """成品 board 多脸 FaceLandmarker → [(pts(478,2), yaw_deg)]。lazy import mediapipe。"""
+    """成品 board 多脸 FaceLandmarker → [(pts(478,2), yaw_deg)]。lazy import mediapipe。
+
+    pose-upgrade Phase 2 决策：**本点（yaw 计算点 #2）显式不纳入 pose_backend 抽象，维持 FaceMesh**。
+    理由：tzp.render_panel 渲染需要 478 个 landmark，6DRepNet 只出姿态不出 landmark，无法替代；
+    且这里的 yaw 仅用于 annotate_board 的 near_side_only 装饰判定（斜位只标近侧），6D 边际价值低。
+    若日后"入库分类(classify_views 走 6D) vs board 标注(走 FaceMesh)"对同一物理角度产生口径漂移
+    需消除，再在独立 phase 把这里的 yaw 也接 backend（landmark 仍走 FaceMesh）。
+    """
     import cv2
     import mediapipe as mp
     from mediapipe.tasks import python as mp_python
