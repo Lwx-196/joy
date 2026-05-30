@@ -33,8 +33,12 @@ _DEFAULT_MODE = MODE_FACEMESH
 
 # Phase 1 benchmark：BlazeFace full-range 在医美真实分布上的甜点阈值
 # （profile .74–.88 vs 误检 .37，gap 干净；0.5 同时拿 profile 5/5 + non-face 4/4）。
+# ⚠️ Phase 3 扩大集（139 真照）发现 thr0.5 误杀 5 张真脸（4 正脸 score 0.31–0.36）——
+# 降到 0.3 又会放进旋转宏观（pre4 0.32）。门控阈值优化 + FaceMesh 兜底混合 = Phase 5（翻默认前）课题。
 _DETECT_SCORE_THR = 0.5
-# 6D 训练用偏紧的人脸裁剪；检测器 bbox 加少量 margin（Phase 3 随阈值重标定一起复测）。
+# Phase 3 crop-margin 实测：0.25 分离度最优（profile_min−oblique_max = +3.0°）；
+# 0.5→+1.6 / 0.8→+0.3 递减，1.2→−23.5 灾难（profile 读数塌缩，6D 需 face-centered crop）。
+# → 0.25 锁定，**勿调大**（裁松不抬侧脸读数、反塌缩）。
 _CROP_MARGIN = 0.25
 
 _shadow_logger = logging.getLogger("pose_shadow_compare")
