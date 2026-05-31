@@ -232,6 +232,7 @@ semantic_judge_mode = sys.argv[6]
 out_root = Path(sys.argv[7])
 manual_overrides_json = sys.argv[8] if len(sys.argv) > 8 else "{}"
 selection_plan_json = sys.argv[9] if len(sys.argv) > 9 else "{}"
+customer_name_override = sys.argv[10].strip() if len(sys.argv) > 10 else ""
 case_dir_path = Path(case_dir).resolve()
 
 try:
@@ -658,6 +659,18 @@ manifest = case_layout.build_manifest(
     template,
     semantic_judge_mode=semantic_judge_mode,
 )
+
+# D1 title fix: override the board's customer-name title with the authoritative
+# DB value (cases.customer_raw). The renderer's parse_case_meta derives
+# customer_name from case_dir.parent.name, which is wrong for staged
+# (.case-workbench-bound-render) and deeply-nested case dirs.
+# render_brand_clean.resolve_meta honors manifest["meta"]["customer_name"].
+if customer_name_override:
+    _meta_overrides = manifest.get("meta")
+    if not isinstance(_meta_overrides, dict):
+        _meta_overrides = {}
+    _meta_overrides["customer_name"] = customer_name_override
+    manifest["meta"] = _meta_overrides
 
 # Stage B: manual overrides are injected into analyze_image above, before the
 # skill builds phase/slot candidates. This post-pass keeps the manifest explicit
@@ -1677,6 +1690,7 @@ def run_render(
     timeout: int = DEFAULT_RENDER_TIMEOUT_SEC,
     manual_overrides: dict[str, dict[str, Any]] | None = None,
     selection_plan: dict[str, Any] | None = None,
+    customer_name: str | None = None,
 ) -> dict[str, Any]:
     """Spawn system Python and run build_manifest + render_brand_clean.
 
@@ -1723,6 +1737,7 @@ def run_render(
             str(out_root),
             overrides_json,
             selection_plan_json,
+            (customer_name or "").strip(),
         ],
         timeout,
     )
