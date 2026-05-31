@@ -233,6 +233,8 @@ out_root = Path(sys.argv[7])
 manual_overrides_json = sys.argv[8] if len(sys.argv) > 8 else "{}"
 selection_plan_json = sys.argv[9] if len(sys.argv) > 9 else "{}"
 customer_name_override = sys.argv[10].strip() if len(sys.argv) > 10 else ""
+date_override = sys.argv[11].strip() if len(sys.argv) > 11 else ""
+project_override = sys.argv[12].strip() if len(sys.argv) > 12 else ""
 case_dir_path = Path(case_dir).resolve()
 
 try:
@@ -660,16 +662,20 @@ manifest = case_layout.build_manifest(
     semantic_judge_mode=semantic_judge_mode,
 )
 
-# D1 title fix: override the board's customer-name title with the authoritative
-# DB value (cases.customer_raw). The renderer's parse_case_meta derives
-# customer_name from case_dir.parent.name, which is wrong for staged
-# (.case-workbench-bound-render) and deeply-nested case dirs.
-# render_brand_clean.resolve_meta honors manifest["meta"]["customer_name"].
-if customer_name_override:
+# D1 title fix: override board title fields with authoritative DB/path-derived
+# metadata. The renderer's parse_case_meta derives these from case_dir path,
+# which is wrong for staged (.case-workbench-bound-render) and deeply-nested
+# case dirs. render_brand_clean.resolve_meta honors manifest["meta"] overrides.
+if customer_name_override or date_override or project_override:
     _meta_overrides = manifest.get("meta")
     if not isinstance(_meta_overrides, dict):
         _meta_overrides = {}
-    _meta_overrides["customer_name"] = customer_name_override
+    if customer_name_override:
+        _meta_overrides["customer_name"] = customer_name_override
+    if date_override:
+        _meta_overrides["date"] = date_override
+    if project_override:
+        _meta_overrides["project"] = project_override
     manifest["meta"] = _meta_overrides
 
 # Stage B: manual overrides are injected into analyze_image above, before the
@@ -1691,6 +1697,8 @@ def run_render(
     manual_overrides: dict[str, dict[str, Any]] | None = None,
     selection_plan: dict[str, Any] | None = None,
     customer_name: str | None = None,
+    date: str | None = None,
+    project: str | None = None,
 ) -> dict[str, Any]:
     """Spawn system Python and run build_manifest + render_brand_clean.
 
@@ -1738,6 +1746,8 @@ def run_render(
             overrides_json,
             selection_plan_json,
             (customer_name or "").strip(),
+            (date or "").strip(),
+            (project or "").strip(),
         ],
         timeout,
     )

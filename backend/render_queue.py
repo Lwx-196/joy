@@ -39,7 +39,19 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable
 
-from . import _job_pool, ai_generation_adapter, audit, db, render_executor, render_quality, skill_bridge, source_images, source_selection, stress
+from . import (
+    _job_pool,
+    ai_generation_adapter,
+    audit,
+    db,
+    render_executor,
+    render_quality,
+    scanner,
+    skill_bridge,
+    source_images,
+    source_selection,
+    stress,
+)
 from .services import md_ai_mode_router
 from .services import vlm_source_classifier as _vlm_source_classifier
 from .services.promotion_manifest_loader import should_promote
@@ -2086,6 +2098,7 @@ class RenderQueue:
             case_id = row["case_id"]
             batch_id = row["batch_id"]
             customer_raw = row["case_customer_raw"]
+            case_date, case_project = scanner.extract_case_date_project(Path(case_dir), scanner.DEFAULT_ROOTS)
 
             # Stage B: pull manual phase/view overrides for this case.
             manual_overrides: dict[str, dict[str, Any]] = _fetch_case_image_overrides(conn, int(case_id))
@@ -2333,6 +2346,8 @@ class RenderQueue:
                 manual_overrides=manual_overrides,
                 selection_plan=render_selection_plan,
                 customer_name=customer_raw,
+                date=case_date,
+                project=case_project,
             )
         except FileNotFoundError as e:
             self._mark_failed(job_id, f"missing: {e}")

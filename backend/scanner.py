@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from . import customer_resolver, source_images
+from . import source_images
 
 # Directory roots to scan
 DEFAULT_ROOTS = [
@@ -43,6 +43,7 @@ LABELED_TOKENS = ("术前", "术后", "before", "after", "治疗前", "治疗后
 STAGE_DIR_TOKENS = (*LABELED_TOKENS, "术中", "pre", "post")
 FRAGMENT_RE = re.compile(r"^frame_\d+", re.IGNORECASE)
 DATE_TAIL_RE = re.compile(r"\d{4}[\.\-/]\d{1,2}[\.\-/]\d{1,2}.*$")
+CASE_DATE_PROJECT_RE = re.compile(r"^\s*(\d{2,4})[\.\-/](\d{1,2})[\.\-/](\d{1,2})(.*)$")
 
 
 @dataclass
@@ -240,6 +241,63 @@ def extract_customer_raw(case_dir: Path, roots: list[Path]) -> str | None:
     # Fallback: use immediate parent
     parent = case_dir.parent.name
     return parent or None
+
+
+def _normalize_case_year(raw_year: str) -> int | None:
+    try:
+        year = int(raw_year)
+    except ValueError:
+        return None
+    if year < 100:
+        year += 2000
+    if year < 1900 or year > 2100:
+        return None
+    return year
+
+
+def _parse_case_date_project_segment(segment: str) -> tuple[str | None, str | None]:
+    match = CASE_DATE_PROJECT_RE.match(segment)
+    if not match:
+        return None, None
+    year = _normalize_case_year(match.group(1))
+    if year is None:
+        return None, None
+    try:
+        month = int(match.group(2))
+        day = int(match.group(3))
+    except ValueError:
+        return None, None
+    if not (1 <= month <= 12 and 1 <= day <= 31):
+        return None, None
+    project = match.group(4).strip(" \t._-—－/，,、:：")
+    return f"{year:04d}.{month:02d}.{day:02d}", project or None
+
+
+def extract_case_date_project(case_dir: Path, roots: list[Path]) -> tuple[str | None, str | None]:
+    """Return date/project from the segment directly below the customer folder.
+
+    This mirrors `extract_customer_raw`: when a known root matches, the customer
+    is rel.parts[0] and the date/project segment is rel.parts[1]. If the case is
+    outside known roots, fall back to the current directory and then its parent,
+    which covers imported libraries whose leaf dir is already the treatment
+    segment.
+    """
+    segments: list[str] = []
+    for root in roots:
+        try:
+            rel = case_dir.relative_to(root)
+        except ValueError:
+            continue
+        if len(rel.parts) >= 2:
+            segments.append(rel.parts[1])
+        break
+    if not segments:
+        segments.extend([case_dir.name, case_dir.parent.name])
+    for segment in segments:
+        date, project = _parse_case_date_project_segment(segment)
+        if date:
+            return date, project
+    return None, None
 
 
 def _now_iso() -> str:

@@ -255,7 +255,7 @@ def render_from_manifest(manifest, final_path):
     assert "没有可渲染的角度槽位" in manifest["blocking_issues"][0]
 
 
-def test_run_render_appends_customer_name_override_argv(tmp_path, monkeypatch):
+def test_run_render_appends_title_meta_override_argv(tmp_path, monkeypatch):
     case_dir = tmp_path / "case"
     case_dir.mkdir()
     skill_script = tmp_path / "case_layout_board.py"
@@ -279,11 +279,16 @@ def test_run_render_appends_customer_name_override_argv(tmp_path, monkeypatch):
 
     monkeypatch.setattr(render_executor, "_run_render_subprocess", fake_run_render_subprocess)
 
-    render_executor.run_render(case_dir, customer_name="江李欣")
+    render_executor.run_render(
+        case_dir,
+        customer_name="江李欣",
+        date="2026.03.31",
+        project="弗缦1支泪沟",
+    )
     render_executor.run_render(case_dir)
 
-    assert captured_args[0][-1] == "江李欣"
-    assert captured_args[1][-1] == ""
+    assert captured_args[0][-3:] == ["江李欣", "2026.03.31", "弗缦1支泪沟"]
+    assert captured_args[1][-3:] == ["", "", ""]
 
 
 def test_run_render_applies_manual_overrides_before_pairing(tmp_path, monkeypatch):
