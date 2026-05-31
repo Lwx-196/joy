@@ -3,6 +3,8 @@
 > 2026-05-31。续 PR #43（已 merged → main `a4c9712`，pose_backend hybrid 已在 main）。
 > plan `~/.claude/plans/profile-aware-pose.md` Phase 4/5。本文 = 真实环境 dense 模型验证记录 + 激活 runbook。
 > **代码默认仍 `facemesh`（`pose_backend.py:34 _DEFAULT_MODE`）；激活 = env var，不改 code。**
+>
+> **最终裁决（2026-05-31 第二段全库 sweep 后定，详见 §6）：现语料激活 = DEFINITIVE NO-GO。** §2–§3 的分类层验证全过（侧脸纠偏 5/5、profile 召回 5→30），但全库 63 case 区域级 diff 得 **0 个 profile 产出升级** → 不翻默认 hybrid；§4 runbook 保留作未来 profile-dependent 语料出现时的复用入口。
 
 ## 0. 钉死的生产分类环境（推翻 plan/NOW 两处记载）
 
@@ -73,10 +75,10 @@ non-face    2       0        0        2
 - **路由层这 10 例零变化**：两边「落 profile 板 0 次 / front+45° 覆盖 100%」——本批术式不需 profile 视角，hybrid「看得见」侧脸但无区域用它。**路由收益 case-mix 依赖**（需侧面素材的部位才兑现，正是原问题「以为无侧面→降级/drop」的修复对象）。
 - 注：照片级是分类分布观测，非逐张 GT 核验；但与 14-GT 验收方向一致。
 
-## 4. 激活 runbook（env var，最小影响，一键回滚）—— **当前 HOLD，未翻 flag**
+## 4. 激活 runbook（env var，最小影响，一键回滚）—— **当前 HOLD，未翻 flag；现语料 NO-GO（见 §6）**
 
-> **状态（owner 决策 Option 2）**：vendor + 验证已完成，数据全支持激活（三 gate 全过、sparse→dense 边界稳定），
-> **但按 owner 指示「暂缓翻 flag」——env var 未设、env 文件未创建、`_DEFAULT_MODE` 仍 facemesh**。下方是「greenlight 时」的一条命令。
+> **状态（owner 决策 Option 2 + §6 全库裁决）**：vendor + 验证已完成，分类层数据全支持激活（三 gate 全过、sparse→dense 边界稳定），
+> **但 §6 全库 sweep 显示翻 flag 在现语料 0 下游产出升级 → 激活 NO-GO**，env var 未设、env 文件未创建、`_DEFAULT_MODE` 仍 facemesh。下方命令仅在**未来出现 profile-dependent 语料 + owner greenlight** 时才用。
 
 无 daemon → 「激活」= 跑 CLI 工具前 source env + 用 dedicated venv。greenlight 时创建 `~/.cache/case-workbench-pose/pose-hybrid.env`：
 
@@ -101,3 +103,12 @@ source ~/.cache/case-workbench-pose/pose-hybrid.env
 - 仅激活 **CLI 分类工具**（coverage-sweep / triptych / 治疗区 panel）的侧脸分桶。
 - **客户渲染产物侧脸纠偏 = Phase 6**（跨 repo `face_align_compare.py`，高风险，未做）；本次 vendor 的 6D backend 是 Phase 6 的复用地基。
 - 6D-specific oblique/profile 边界精调（48→~50）defer（需生产影子大数据，8 锚点太薄）。
+
+## 6. 全库验证收尾（2026-05-31 第二段，DEFINITIVE NO-GO）
+
+§3 只覆盖 10 例，留了「路由收益 case-mix 依赖」的口子。随后对**全库 63 case**（陈院 39 + incoming 47 去重）做区域级 `facemesh` vs `hybrid+dense` 双后端 diff（脚本 `/tmp/pose-smoke/hunt_b_profile_cases.py`），把这扇门关上：
+
+- **0 个 profile 产出升级**（63 case 中 24 含 require-profile 部位：鼻 / 下巴 / 下颌线 / 太阳穴）。分类层照片级 profile 5→30 全库复现，但**整库零下游业务产出变化**——没有任何一例从 degraded/missing → covered。
+- 根因 = §3 已点明的三者交集（部位 require profile **且** 缺正/斜替代视角 **且** profile 照原被 FaceMesh 误分）在现语料为空：`route_region` 按 `region_views` 顺序匹配，先命中 front/oblique 就用，profile 槽吃不到。pose 修复让分类器「看得见」侧脸，但下游无区域消费它。
+- **结论：现语料激活 = NO-GO**。不值得翻默认 hybrid（除非未来语料出现 profile-dependent 真案例）。§4 runbook 保留作该类语料出现时的复用入口；§1 vendor 的 6D backend 仍是 Phase 6（客户渲染侧脸纠偏，跨 repo）的复用地基。
+- 教训 **L-131**：分类层指标（profile 召回 5→30）**≠** 下游业务产出；验证必须打到落板层，而非止于分类混淆矩阵。
