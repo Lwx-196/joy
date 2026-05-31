@@ -1,28 +1,99 @@
 #!/usr/bin/env python3
 """Export all deliverable cases to a unified delivery directory.
 
+A fail-closed board QA gate (D6) screens every candidate's rendered board JPG
+through single-board VLM assessment BEFORE export: `blocker` / `unavailable`
+boards are held out of the shipped set and written to a human-review queue
+(`delivery_held_review.json`) instead of silently shipping. Enabled by default;
+`--no-qa` (or `CASE_WORKBENCH_DELIVERY_QA=0`) disables it for emergencies.
+
 Usage:
-    python -m backend.scripts.export_delivery_batch [--output-dir ./delivery] [--dry-run]
+    python -m backend.scripts.export_delivery_batch [--output-dir ./delivery] [--dry-run] [--no-qa]
 """
 from __future__ import annotations
 
 import argparse
 import csv
 import json
+import os
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
+from backend.services.board_delivery_qa import BoardDeliveryQA
 from backend.services.delivery_gate import (
     DeliverableItem,
     DeliveryGate,
+    HeldBoard,
     P0_THRESHOLD,
     P1_THRESHOLD,
 )
 from backend.services.simulation_delivery_gate import SimulationDeliveryGate
+from backend.services.vlm_provider import VLMProvider
 
 DB_PATH = Path(__file__).resolve().parent.parent.parent / "case-workbench.db"
 DEFAULT_OUTPUT = Path(__file__).resolve().parent.parent.parent / "delivery"
+
+
+def _load_env_file(path: Path) -> dict[str, str]:
+    out: dict[str, str] = {}
+    if not path.is_file():
+        return out
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        out[key.strip()] = value.strip()
+    return out
+
+
+def _build_board_qa(conn: sqlite3.Connection, repo_root: Path) -> BoardDeliveryQA:
+    """Construct the fail-closed VLM QA gate, loading t54 ADC config if present."""
+    env = dict(os.environ)
+    env.update(_load_env_file(repo_root / "tasks" / "t54_vertex_adc.local.env"))
+    return BoardDeliveryQA(VLMProvider(env=env), conn)
+
+
+def _held_row(held: HeldBoard) -> dict:
+    return {
+        "case_id": held.case_id,
+        "customer": held.customer,
+        "case_name": held.case_name,
+        "job_id": held.job_id,
+        "verdict": held.verdict,
+        "primary_defect": held.primary_defect,
+        "families": list(held.families),
+        "confidence": held.confidence,
+        "content_hash": held.content_hash,
+        "reason": held.reason,
+        "source_path": held.source_path,
+    }
+
+
+def _write_held_report(output_dir: Path, held: list[HeldBoard], dry_run: bool) -> Path | None:
+    """Persist the human-review queue (held boards) next to the manifest."""
+    if dry_run or not held:
+        return None
+    output_dir.mkdir(parents=True, exist_ok=True)
+    path = output_dir / "delivery_held_review.json"
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "held_count": len(held),
+                "note": (
+                    "Fail-closed board QA (D6) held these boards. Review each, then "
+                    "clear (ships) or re-render (new bytes → re-assessed)."
+                ),
+                "boards": [_held_row(hb) for hb in held],
+            },
+            f,
+            ensure_ascii=False,
+            indent=2,
+        )
+    print(f"  🛡  Held-review queue: {path}")
+    return path
 
 MANIFEST_FIELDS = [
     "case_id", "customer", "case_name", "category",
@@ -53,15 +124,41 @@ def _manifest_row(item: DeliverableItem, dest_path: Path) -> dict:
     }
 
 
-def export(output_dir: Path, dry_run: bool = False, db_path: Path = DB_PATH) -> list[dict]:
+def export(
+    output_dir: Path,
+    dry_run: bool = False,
+    db_path: Path = DB_PATH,
+    qa_enabled: bool = True,
+) -> list[dict]:
     conn = _connect(db_path)
+    held: list[HeldBoard] = []
     try:
-        gate = DeliveryGate(conn)
+        board_qa = _build_board_qa(conn, db_path.parent) if qa_enabled else None
+        gate = DeliveryGate(conn, board_qa=board_qa)
         sim_gate = SimulationDeliveryGate(conn)
-        items = gate.list_deliverables(simulation_gate=sim_gate)
+        screen = gate.screen_deliverables(simulation_gate=sim_gate)
+        items = screen.passed
+        held = screen.held
+
+        if board_qa is not None:
+            print(
+                f"\n  🛡  Board QA gate: {len(items)} ship / {len(held)} held for review"
+            )
+            for hb in held:
+                print(
+                    f"     ⛔ Case #{hb.case_id:>3d} [{hb.verdict}] "
+                    f"{hb.customer}/{hb.case_name[:36]} — {hb.primary_defect[:48]}"
+                )
 
         if not items:
-            print("❌ No deliverable cases found.")
+            if held:
+                print(
+                    f"\n❌ No shippable cases — all {len(held)} candidate(s) held by QA. "
+                    "Review delivery_held_review.json, then clear or re-render."
+                )
+                _write_held_report(output_dir, held, dry_run)
+            else:
+                print("❌ No deliverable cases found.")
             return []
 
         print(f"\n{'=' * 60}")
@@ -113,15 +210,25 @@ def export(output_dir: Path, dry_run: bool = False, db_path: Path = DB_PATH) -> 
                 indent=2,
             )
 
+    _write_held_report(output_dir, held, dry_run)
+
     print(f"\n{'=' * 60}")
     print(f"  ✅ Export complete: {len(manifest_rows)} cases")
+    if held:
+        print(f"  🛡  Held for review: {len(held)} board(s) (not shipped)")
     if not dry_run:
         print(f"  📋 CSV: {csv_path}")
         print(f"  📋 JSON: {json_path}")
     else:
-        print(f"  ℹ️  Dry run — no files copied")
+        print("  ℹ️  Dry run — no files copied")
     print(f"{'=' * 60}")
     return manifest_rows
+
+
+def _qa_enabled_default() -> bool:
+    return str(os.environ.get("CASE_WORKBENCH_DELIVERY_QA", "1")).strip().lower() not in {
+        "0", "false", "no", "off",
+    }
 
 
 def main() -> None:
@@ -129,8 +236,16 @@ def main() -> None:
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--db", type=Path, default=DB_PATH)
+    parser.add_argument(
+        "--no-qa",
+        action="store_true",
+        help="Disable the fail-closed board QA gate (emergency escape hatch).",
+    )
     args = parser.parse_args()
-    export(args.output_dir, args.dry_run, db_path=args.db)
+    qa_enabled = _qa_enabled_default() and not args.no_qa
+    if not qa_enabled:
+        print("⚠️  Board QA gate DISABLED — boards ship without VLM screening.")
+    export(args.output_dir, args.dry_run, db_path=args.db, qa_enabled=qa_enabled)
 
 
 if __name__ == "__main__":

@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
+    from backend.services.board_delivery_qa import BoardDeliveryQA
     from backend.services.simulation_delivery_gate import SimulationDeliveryGate
 
 P0_THRESHOLD = 90.0
@@ -74,11 +75,54 @@ class DeliverableItem:
         return f"{safe_name}__score{int(self.quality_score)}_{self.template_tier}.jpg"
 
 
-class DeliveryGate:
-    """Single-source-of-truth for delivery deliverability decisions."""
+@dataclass(frozen=True)
+class HeldBoard:
+    """A deliverable candidate withheld from auto-ship by the board QA gate.
 
-    def __init__(self, conn: sqlite3.Connection) -> None:
+    Carries the VLM verdict + primary_defect + families so the human review
+    queue is actionable (a reviewer knows where to look without re-finding the
+    defect). `reason` is a one-line summary.
+    """
+
+    case_id: int
+    customer: str
+    case_name: str
+    job_id: int
+    source_path: str
+    content_hash: str
+    verdict: str
+    primary_defect: str
+    families: tuple[str, ...]
+    confidence: float | None
+    reason: str
+
+
+@dataclass(frozen=True)
+class ScreenResult:
+    """Outcome of QA screening: what ships now vs. what is held for review."""
+
+    passed: list[DeliverableItem]
+    held: list[HeldBoard]
+
+
+class DeliveryGate:
+    """Single-source-of-truth for delivery deliverability decisions.
+
+    When constructed with a `board_qa` component, `list_deliverables` /
+    `screen_deliverables` run each candidate's rendered board through a
+    fail-closed VLM QA gate: `blocker` / `unavailable` boards are *excluded*
+    from the auto-ship set (not merely labeled) and surfaced as `HeldBoard`s
+    for a human-review queue. Without `board_qa` the behaviour is unchanged.
+    """
+
+    def __init__(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        board_qa: "BoardDeliveryQA | None" = None,
+    ) -> None:
         self._conn = conn
+        self._board_qa = board_qa
 
     # ------------------------------------------------------------------
     # Preflight
@@ -174,8 +218,56 @@ class DeliveryGate:
         (render wins). The caller passes a built gate to keep manifest +
         threshold config in their hands.
 
-        BC: zero-arg form is identical to pre-P2.2 behaviour (render only).
+        When this gate was constructed with a `board_qa` component, the result
+        is the QA-screened *passed* set only (held boards are excluded). Use
+        `screen_deliverables` to also retrieve the held queue.
+
+        BC: zero-arg form with no board_qa is identical to pre-P2.2 behaviour.
         """
+        return self.screen_deliverables(simulation_gate).passed
+
+    def screen_deliverables(
+        self,
+        simulation_gate: "SimulationDeliveryGate | None" = None,
+    ) -> ScreenResult:
+        """Collect candidates, then (if board_qa is set) fail-closed partition
+        them into ship-now `passed` vs. human-review `held`."""
+        candidates = self._collect_candidates(simulation_gate)
+        if self._board_qa is None:
+            return ScreenResult(passed=candidates, held=[])
+
+        passed: list[DeliverableItem] = []
+        held: list[HeldBoard] = []
+        for item in candidates:
+            verdict = self._board_qa.assess(
+                item.source_path, case_id=item.case_id, job_id=item.job_id
+            )
+            if verdict.deliverable:
+                passed.append(item)
+            else:
+                held.append(
+                    HeldBoard(
+                        case_id=item.case_id,
+                        customer=item.customer,
+                        case_name=item.case_name,
+                        job_id=item.job_id,
+                        source_path=item.source_path,
+                        content_hash=verdict.content_hash,
+                        verdict=verdict.verdict,
+                        primary_defect=verdict.primary_defect,
+                        families=verdict.families,
+                        confidence=verdict.confidence,
+                        reason=verdict.reason,
+                    )
+                )
+        return ScreenResult(passed=passed, held=held)
+
+    def _collect_candidates(
+        self,
+        simulation_gate: "SimulationDeliveryGate | None" = None,
+    ) -> list[DeliverableItem]:
+        """The pre-QA candidate set (render-backed + optional simulation union),
+        deduped per case and sorted by (customer, case_id)."""
         # ---- 1. Render-backed candidates (unchanged from pre-P2.2) ----
         rows = self._conn.execute(
             """
