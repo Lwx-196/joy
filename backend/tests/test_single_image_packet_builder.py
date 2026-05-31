@@ -7,11 +7,13 @@ untouched, and the保真 judge-prompt profile switch.
 """
 from __future__ import annotations
 
-import numpy as np
+import pytest
 from PIL import Image, ImageFilter
 
 from backend.scripts import single_image_packet_builder as sib
 from backend.scripts.focal_p4_packet_builder import discover_cases
+
+np = pytest.importorskip("numpy")
 
 KW = {"泪沟": "x", "面颊": "x", "下巴": "x", "苹果肌": "x"}
 

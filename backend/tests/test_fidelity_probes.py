@@ -7,10 +7,12 @@ focal sharpen must PASS.
 """
 from __future__ import annotations
 
-import numpy as np
+import pytest
 from PIL import Image, ImageFilter
 
 from backend.services import fidelity_probes as fp
+
+np = pytest.importorskip("numpy")
 
 
 def _structured_img(path, size=(256, 256), seed=0):

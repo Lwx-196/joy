@@ -5,10 +5,12 @@ K-1 silent-fail contract (bad input → returns input path unchanged).
 """
 from __future__ import annotations
 
-import numpy as np
+import pytest
 from PIL import Image, ImageFilter
 
 from backend.services import classical_enhance as ce
+
+np = pytest.importorskip("numpy")
 
 
 def _portrait(path, size=(600, 800), seed=1):
