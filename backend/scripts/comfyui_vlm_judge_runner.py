@@ -96,9 +96,52 @@ def _vertex_inline_data(path: Path) -> dict[str, str]:
     return {"mimeType": mime, "data": encoded}
 
 
+def _single_image_fidelity_prompt(item: dict[str, Any], criteria_lines: str) -> str:
+    """保真-strict single-image judge framing (L-140).
+
+    baseline = the original un-retouched after photo; candidate = an enhanced
+    version. The candidate wins ONLY on a real fidelity improvement; any
+    smoothing / de-saturation / colour-shift / AI-portrait drift = candidate
+    loses (hard_veto), even if 'prettier'. A tie means the enhancement was
+    pointless (no net gain) — an honest negative result, not a win.
+    """
+    return (
+        "You are an independent medical-aesthetic FIDELITY judge.\n"
+        "Compare exactly two single photographs of the same patient at full resolution.\n"
+        "Image A (baseline) is the ORIGINAL un-retouched after photo.\n"
+        "Image B (candidate) is an ENHANCED version of that same photo.\n"
+        "Use only visual evidence from the images.\n"
+        "Do not assume either image is better because of file names, variants, or generation system.\n\n"
+        "FIDELITY RULE (decisive): the candidate WINS only if it is genuinely sharper / clearer "
+        "in REAL detail AND preserves the real skin — pores, fine texture, natural blood-colour "
+        "and skin tone, and real blemishes / redness / marks — and is unmistakably the SAME person.\n"
+        "If the candidate is smoothed / airbrushed (lost pores or texture), de-saturated, darkened, "
+        "colour-shifted, plasticised, or drifts toward an AI-portrait look, the candidate LOSES — "
+        "even if it looks 'prettier' or 'cleaner'. Set hard_veto_reason in that case.\n"
+        "A medical before/after photo's value is REAL skin; a beautified photo is a fidelity "
+        "FAILURE, not an improvement.\n\n"
+        "Use winner_role=tie ONLY when the enhancement made no meaningful difference (no net gain "
+        "AND no fidelity loss) — the enhancement is pointless, which is an honest negative result, "
+        "NOT a win.\n"
+        "Use winner_role=manual_review when evidence is ambiguous, safety-relevant, or confidence < 0.75.\n"
+        "Score each criterion 1-5 for baseline and candidate where 5 is best.\n"
+        "Return only one JSON object. Do not include markdown or long hidden reasoning.\n"
+        "Required JSON keys: ab_unit_id, winner_role, confidence, criterion_scores, visual_evidence_summary, rationale, risk_flags, hard_veto_reason.\n"
+        "criterion_scores must be an object keyed by criterion, each value shaped as {\"baseline\": 1-5, \"candidate\": 1-5}.\n"
+        "winner_role may be baseline, candidate, tie, or manual_review.\n"
+        "visual_evidence_summary must be brief and auditable, based only on visible image evidence.\n\n"
+        f"ab_unit_id: {_unit_id(item)}\n"
+        f"focus_targets: {item.get('focus_targets')}\n"
+        "Criteria (ALL must hold for a candidate win):\n"
+        f"{criteria_lines}\n"
+    )
+
+
 def _judge_prompt(item: dict[str, Any]) -> str:
     criteria = item.get("criteria") if isinstance(item.get("criteria"), list) else []
     criteria_lines = "\n".join(f"- {criterion}" for criterion in criteria)
+    if str(item.get("judge_profile") or "").strip() == "single_image_fidelity":
+        return _single_image_fidelity_prompt(item, criteria_lines)
     return (
         "You are an independent medical-aesthetic image delivery quality judge.\n"
         "Compare exactly two images. The first image is baseline; the second image is candidate.\n"
