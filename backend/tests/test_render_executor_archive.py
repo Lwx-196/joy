@@ -12,6 +12,7 @@ exercise the route layer + audit through monkeypatch).
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -252,6 +253,37 @@ def render_from_manifest(manifest, final_path):
     manifest = json.loads(Path(result["manifest_path"]).read_text(encoding="utf-8"))
     assert manifest["status"] == "error"
     assert "没有可渲染的角度槽位" in manifest["blocking_issues"][0]
+
+
+def test_run_render_appends_customer_name_override_argv(tmp_path, monkeypatch):
+    case_dir = tmp_path / "case"
+    case_dir.mkdir()
+    skill_script = tmp_path / "case_layout_board.py"
+    render_script = tmp_path / "render_brand_clean.py"
+    skill_script.write_text("# fake skill\n", encoding="utf-8")
+    render_script.write_text("# fake renderer\n", encoding="utf-8")
+    monkeypatch.setattr(render_executor, "SKILL_SCRIPT", skill_script)
+    monkeypatch.setattr(render_executor, "RENDER_SCRIPT", render_script)
+    monkeypatch.setattr(render_executor, "SKILL_PYTHON", sys.executable)
+
+    captured_args: list[list[str]] = []
+
+    def fake_run_render_subprocess(args, timeout):
+        captured_args.append(args)
+        return subprocess.CompletedProcess(
+            args,
+            0,
+            stdout=json.dumps({"status": "ok", "output_path": None}),
+            stderr="",
+        )
+
+    monkeypatch.setattr(render_executor, "_run_render_subprocess", fake_run_render_subprocess)
+
+    render_executor.run_render(case_dir, customer_name="江李欣")
+    render_executor.run_render(case_dir)
+
+    assert captured_args[0][-1] == "江李欣"
+    assert captured_args[1][-1] == ""
 
 
 def test_run_render_applies_manual_overrides_before_pairing(tmp_path, monkeypatch):

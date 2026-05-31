@@ -1786,6 +1786,7 @@ class RenderQueue:
             row = conn.execute(
                 """
                 SELECT j.*, c.abs_path AS case_dir, c.meta_json AS case_meta_json
+                     , c.customer_raw AS case_customer_raw
                      , c.skill_image_metadata_json AS skill_image_metadata_json
                      , c.tags_json AS case_tags_json
                      , c.manual_blocking_issues_json AS case_manual_blocking_issues_json
@@ -1818,6 +1819,7 @@ class RenderQueue:
             semantic_judge = row["semantic_judge"]
             case_id = row["case_id"]
             batch_id = row["batch_id"]
+            customer_raw = row["case_customer_raw"]
 
             # Stage B: pull manual phase/view overrides for this case.
             manual_overrides: dict[str, dict[str, Any]] = _fetch_case_image_overrides(conn, int(case_id))
@@ -2064,6 +2066,7 @@ class RenderQueue:
                 semantic_judge=semantic_judge,
                 manual_overrides=manual_overrides,
                 selection_plan=render_selection_plan,
+                customer_name=customer_raw,
             )
         except FileNotFoundError as e:
             self._mark_failed(job_id, f"missing: {e}")
