@@ -195,6 +195,36 @@ def _observations_for_case(row: sqlite3.Row, group_root: Path) -> list[dict[str,
     return observations
 
 
+def _apply_phase_qa(observations: list[dict[str, Any]], phase_qa: dict[str, Any]) -> None:
+    by_image = phase_qa.get("by_image") if isinstance(phase_qa, dict) else {}
+    if not isinstance(by_image, dict):
+        return
+    for obs in observations:
+        qa = by_image.get(obs["image_path"])
+        if not isinstance(qa, dict):
+            continue
+        reasons = set(obs.get("reasons") or [])
+        reasons.update(str(reason) for reason in qa.get("reasons") or [] if reason)
+        obs["reasons"] = sorted(reasons)
+
+        cap = qa.get("confidence_cap")
+        if cap is not None:
+            try:
+                obs["confidence"] = round(min(float(obs["confidence"]), float(cap)), 3)
+            except (TypeError, ValueError):
+                obs["confidence"] = round(float(cap), 3)
+
+        quality = obs.get("quality")
+        if not isinstance(quality, dict):
+            quality = {}
+            obs["quality"] = quality
+        quality["phase_qa"] = {
+            "reasons": qa.get("reasons") or [],
+            "confidence_cap": qa.get("confidence_cap"),
+            "evidence": qa.get("evidence") or {},
+        }
+
+
 def _best_by_view(observations: list[dict[str, Any]], phase: str) -> dict[str, dict[str, Any]]:
     out: dict[str, dict[str, Any]] = {}
     for obs in observations:
@@ -311,8 +341,11 @@ def rebuild_case_groups(conn: sqlite3.Connection) -> dict[str, Any]:
         observations: list[dict[str, Any]] = []
         for row in case_rows:
             observations.extend(_observations_for_case(row, root))
+        phase_qa = scanner.assess_phase_quality(root, observations)
+        _apply_phase_qa(observations, phase_qa)
         pairs, suggested_template = _build_pair_candidates(observations)
         diagnosis = _diagnosis_for(observations, pairs, suggested_template)
+        diagnosis["phase_qa"] = phase_qa["summary"]
         if diagnosis["needs_review"]:
             low_conf_groups += 1
         status = "needs_review" if diagnosis["needs_review"] else "auto"

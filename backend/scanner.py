@@ -44,6 +44,11 @@ STAGE_DIR_TOKENS = (*LABELED_TOKENS, "术中", "pre", "post")
 FRAGMENT_RE = re.compile(r"^frame_\d+", re.IGNORECASE)
 DATE_TAIL_RE = re.compile(r"\d{4}[\.\-/]\d{1,2}[\.\-/]\d{1,2}.*$")
 CASE_DATE_PROJECT_RE = re.compile(r"^\s*(\d{2,4})[\.\-/](\d{1,2})[\.\-/](\d{1,2})(.*)$")
+EXIF_DATETIME_TAGS = (36867, 36868, 306)  # DateTimeOriginal, DateTimeDigitized, DateTime
+PHASE_QA_LOW_CONFIDENCE_THRESHOLD = 0.65
+PHASE_QA_SEQUENCE_CONFLICT_CAP = 0.5
+PHASE_QA_VISUAL_DIFF_LOW_CAP = 0.5
+PHASE_QA_VISUAL_DIFF_LOW_THRESHOLD = 0.003
 
 
 @dataclass
@@ -298,6 +303,224 @@ def extract_case_date_project(case_dir: Path, roots: list[Path]) -> tuple[str | 
         if date:
             return date, project
     return None, None
+
+
+def _parse_exif_datetime(value: Any) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, bytes):
+        try:
+            value = value.decode("utf-8", errors="ignore")
+        except UnicodeError:
+            return None
+    text = str(value).strip().replace("\x00", "")
+    if not text:
+        return None
+    for fmt in ("%Y:%m:%d %H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y.%m.%d %H:%M:%S"):
+        try:
+            return datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is not None:
+        return parsed.astimezone(timezone.utc).replace(tzinfo=None)
+    return parsed
+
+
+def extract_exif_taken_at(image_path: Path) -> datetime | None:
+    """Return image EXIF shooting time when available.
+
+    This is a local deterministic signal only. Missing/unreadable EXIF must not
+    fail scanning because many source archives contain stripped metadata.
+    """
+    try:
+        from PIL import Image
+
+        with Image.open(image_path) as image:
+            exif = image.getexif()
+            for tag in EXIF_DATETIME_TAGS:
+                parsed = _parse_exif_datetime(exif.get(tag))
+                if parsed is not None:
+                    return parsed
+    except (OSError, ImportError, AttributeError, TypeError, ValueError):
+        return None
+    return None
+
+
+def _visual_diff_ratio(before_path: Path, after_path: Path) -> float | None:
+    try:
+        from PIL import Image, ImageOps
+
+        resampling = getattr(Image, "Resampling", None)
+        resample = resampling.BILINEAR if resampling is not None else Image.BILINEAR
+        pixels: list[list[int]] = []
+        for path in (before_path, after_path):
+            with Image.open(path) as opened:
+                image = ImageOps.exif_transpose(opened).convert("L")
+                image = ImageOps.fit(image, (32, 32), method=resample)
+                pixels.append([int(v) for v in image.getdata()])
+    except (OSError, ImportError, AttributeError, TypeError, ValueError):
+        return None
+    if len(pixels) != 2 or len(pixels[0]) != len(pixels[1]) or not pixels[0]:
+        return None
+    total = sum(abs(a - b) for a, b in zip(pixels[0], pixels[1]))
+    return round(total / (len(pixels[0]) * 255.0), 6)
+
+
+def _phase_qa_entry(out: dict[str, dict[str, Any]], image_path: str) -> dict[str, Any]:
+    return out.setdefault(
+        image_path,
+        {
+            "reasons": [],
+            "confidence_cap": None,
+            "evidence": {},
+        },
+    )
+
+
+def _add_phase_qa_reason(
+    out: dict[str, dict[str, Any]],
+    image_path: str,
+    reason: str,
+    *,
+    confidence_cap: float | None = None,
+    evidence: dict[str, Any] | None = None,
+) -> None:
+    entry = _phase_qa_entry(out, image_path)
+    if reason not in entry["reasons"]:
+        entry["reasons"].append(reason)
+    if confidence_cap is not None:
+        current = entry.get("confidence_cap")
+        entry["confidence_cap"] = confidence_cap if current is None else min(float(current), confidence_cap)
+    if evidence:
+        entry["evidence"].update(evidence)
+
+
+def assess_phase_quality(
+    group_root: Path,
+    observations: list[dict[str, Any]],
+    *,
+    low_confidence_threshold: float = PHASE_QA_LOW_CONFIDENCE_THRESHOLD,
+    visual_diff_low_threshold: float = PHASE_QA_VISUAL_DIFF_LOW_THRESHOLD,
+) -> dict[str, Any]:
+    """Cross-check phase labels with EXIF order and before/after visual diff.
+
+    The function only emits review signals. It never rewrites phase labels and
+    never treats a clean signal as auto-approval.
+    """
+    by_image: dict[str, dict[str, Any]] = {}
+    findings: list[dict[str, Any]] = []
+    exif_by_image: dict[str, datetime] = {}
+
+    for obs in observations:
+        image_path = str(obs.get("image_path") or "")
+        phase = str(obs.get("phase") or "unknown")
+        try:
+            confidence = float(obs.get("confidence") or 0)
+        except (TypeError, ValueError):
+            confidence = 0
+
+        if phase == "unknown" or confidence < low_confidence_threshold:
+            _add_phase_qa_reason(
+                by_image,
+                image_path,
+                "phase_review_required",
+                evidence={"phase": phase, "confidence": round(confidence, 3)},
+            )
+
+        abs_path = group_root / image_path
+        taken_at = extract_exif_taken_at(abs_path)
+        if taken_at is not None:
+            exif_by_image[image_path] = taken_at
+
+    before = [obs for obs in observations if obs.get("phase") == "before"]
+    after = [obs for obs in observations if obs.get("phase") == "after"]
+
+    exif_pair_checked_count = 0
+    exif_sequence_conflict_count = 0
+    for before_obs in before:
+        before_path = str(before_obs.get("image_path") or "")
+        before_time = exif_by_image.get(before_path)
+        if before_time is None:
+            continue
+        for after_obs in after:
+            after_path = str(after_obs.get("image_path") or "")
+            after_time = exif_by_image.get(after_path)
+            if after_time is None:
+                continue
+            exif_pair_checked_count += 1
+            if before_time <= after_time:
+                continue
+            exif_sequence_conflict_count += 1
+            evidence = {
+                "before_image_path": before_path,
+                "after_image_path": after_path,
+                "before_taken_at": before_time.isoformat(),
+                "after_taken_at": after_time.isoformat(),
+            }
+            findings.append({"type": "phase_exif_sequence_conflict", **evidence})
+            for image_path in (before_path, after_path):
+                _add_phase_qa_reason(
+                    by_image,
+                    image_path,
+                    "phase_exif_sequence_conflict",
+                    confidence_cap=PHASE_QA_SEQUENCE_CONFLICT_CAP,
+                    evidence=evidence,
+                )
+
+    visual_pair_checked_count = 0
+    visual_diff_low_count = 0
+    for before_obs in before:
+        before_path = str(before_obs.get("image_path") or "")
+        before_view = str(before_obs.get("view") or "unknown")
+        if not before_path or before_view == "unknown":
+            continue
+        for after_obs in after:
+            after_path = str(after_obs.get("image_path") or "")
+            after_view = str(after_obs.get("view") or "unknown")
+            if not after_path or before_view != after_view:
+                continue
+            diff = _visual_diff_ratio(group_root / before_path, group_root / after_path)
+            if diff is None:
+                continue
+            visual_pair_checked_count += 1
+            if diff >= visual_diff_low_threshold:
+                continue
+            visual_diff_low_count += 1
+            evidence = {
+                "before_image_path": before_path,
+                "after_image_path": after_path,
+                "view": before_view,
+                "visual_diff_ratio": diff,
+                "threshold": visual_diff_low_threshold,
+            }
+            findings.append({"type": "phase_visual_diff_too_low", **evidence})
+            for image_path in (before_path, after_path):
+                _add_phase_qa_reason(
+                    by_image,
+                    image_path,
+                    "phase_visual_diff_too_low",
+                    confidence_cap=PHASE_QA_VISUAL_DIFF_LOW_CAP,
+                    evidence=evidence,
+                )
+
+    review_required_count = len(by_image)
+    return {
+        "by_image": by_image,
+        "summary": {
+            "image_count": len(observations),
+            "review_required_count": review_required_count,
+            "exif_checked_count": len(exif_by_image),
+            "exif_pair_checked_count": exif_pair_checked_count,
+            "exif_sequence_conflict_count": exif_sequence_conflict_count,
+            "visual_pair_checked_count": visual_pair_checked_count,
+            "visual_diff_low_count": visual_diff_low_count,
+            "findings": findings[:50],
+        },
+    }
 
 
 def _now_iso() -> str:
