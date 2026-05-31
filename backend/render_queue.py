@@ -39,12 +39,28 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable
 
-from . import _job_pool, ai_generation_adapter, audit, db, render_executor, render_quality, skill_bridge, source_images, source_selection, stress
+from . import (
+    _job_pool,
+    ai_generation_adapter,
+    audit,
+    db,
+    render_executor,
+    render_quality,
+    scanner,
+    skill_bridge,
+    source_images,
+    source_selection,
+    stress,
+)
 from .services import md_ai_mode_router
 from .services import vlm_source_classifier as _vlm_source_classifier
 from .services.promotion_manifest_loader import should_promote
 
 LOGGER = logging.getLogger(__name__)
+D1_RENDER_CELL_ASPECT_RATIO = 516 / 624
+D1_LAYOUT_AR_REVIEW_DELTA = 0.07
+D1_LAYOUT_AR_STRONG_DELTA = 0.30
+D1_LAYOUT_AR_EXTREME_DELTA = 0.55
 
 # G1.A.i — env flag controlling render-flow ComfyUI inline enhance swap.
 # Default false → preserves pre-G1 behavior (P1 Node.js PS path via
@@ -399,7 +415,84 @@ def _skill_metadata_by_file(raw: str | None) -> dict[str, dict[str, Any]]:
     return out
 
 
+def _latest_render_selection_metadata_by_file(conn: sqlite3.Connection, case_id: int) -> dict[str, dict[str, Any]]:
+    row = conn.execute(
+        """
+        SELECT meta_json, manifest_path
+        FROM render_jobs
+        WHERE case_id = ?
+          AND status IN ('done', 'done_with_issues')
+        ORDER BY COALESCE(finished_at, enqueued_at) DESC, id DESC
+        LIMIT 1
+        """,
+        (int(case_id),),
+    ).fetchone()
+    if row is None:
+        return {}
+    payload: dict[str, Any] = {}
+    raw_meta = row["meta_json"]
+    if raw_meta:
+        try:
+            parsed = json.loads(raw_meta)
+        except (TypeError, ValueError):
+            parsed = {}
+        if isinstance(parsed, dict):
+            payload.update(parsed)
+    manifest_path = Path(str(row["manifest_path"] or ""))
+    if manifest_path.is_file():
+        try:
+            parsed_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, TypeError, ValueError):
+            parsed_manifest = {}
+        if isinstance(parsed_manifest, dict):
+            payload.setdefault("render_selection_plan", parsed_manifest.get("render_selection_plan"))
+    plan = payload.get("render_selection_plan")
+    slots = plan.get("slots") if isinstance(plan, dict) else {}
+    if not isinstance(slots, dict):
+        return {}
+    out: dict[str, dict[str, Any]] = {}
+    for view, slot in slots.items():
+        if not isinstance(slot, dict):
+            continue
+        for role in ("before", "after"):
+            item = slot.get(role)
+            if not isinstance(item, dict):
+                continue
+            phase = item.get("phase") if item.get("phase") in {"before", "after"} else role
+            selected_view = item.get("view") if item.get("view") in {"front", "oblique", "side"} else view
+            metadata = {
+                "phase": phase,
+                "phase_source": item.get("phase_source") or "previous_render_selection",
+                "view_bucket": selected_view,
+                "angle": selected_view,
+                "angle_source": item.get("view_source") or "previous_render_selection",
+                "angle_confidence": item.get("angle_confidence"),
+                "pose": item.get("pose"),
+                "direction": item.get("direction"),
+                "sharpness_score": item.get("sharpness_score"),
+                "crop_touches_frame": item.get("crop_touches_frame"),
+                "face_crop_touches_frame": item.get("face_crop_touches_frame"),
+                "crop_margin": item.get("crop_margin"),
+                "face_crop_margin": item.get("face_crop_margin"),
+                "selection_metadata_source": "latest_render_selection_plan",
+            }
+            for key in (
+                item.get("filename"),
+                item.get("render_filename"),
+                Path(str(item.get("filename") or "")).name,
+                Path(str(item.get("render_filename") or "")).name,
+            ):
+                if key:
+                    out[str(key)] = metadata
+    return out
+
+
 _METADATA_FALLBACK_FIELDS = {
+    "phase",
+    "phase_source",
+    "view_bucket",
+    "angle",
+    "angle_source",
     "angle_confidence",
     "rejection_reason",
     "issues",
@@ -421,7 +514,7 @@ def _selection_metadata_with_fallback(
         return metadata if isinstance(metadata, dict) else None
     if not isinstance(metadata, dict):
         merged = dict(fallback)
-        merged["selection_metadata_source"] = "primary_render_history"
+        merged["selection_metadata_source"] = fallback.get("selection_metadata_source") or "primary_render_history"
         return merged
     merged = dict(metadata)
     used = False
@@ -430,7 +523,7 @@ def _selection_metadata_with_fallback(
             merged[key] = fallback.get(key)
             used = True
     if used:
-        merged["selection_metadata_source"] = "primary_render_history"
+        merged["selection_metadata_source"] = fallback.get("selection_metadata_source") or "primary_render_history"
     return merged
 
 
@@ -618,12 +711,171 @@ def _selection_plan_candidate(candidate: dict[str, Any] | None) -> dict[str, Any
         "face_crop_touches_frame": candidate.get("face_crop_touches_frame"),
         "crop_margin": candidate.get("crop_margin"),
         "face_crop_margin": candidate.get("face_crop_margin"),
+        "source_aspect_ratio": candidate.get("source_aspect_ratio"),
+        "layout_reselect_penalty": candidate.get("layout_reselect_penalty"),
         "identity_similarity": candidate.get("identity_similarity"),
         "same_person_similarity": candidate.get("same_person_similarity"),
         "arcface_similarity": candidate.get("arcface_similarity"),
         "face_count": candidate.get("face_count"),
         "identity_provider": candidate.get("identity_provider"),
     }
+
+
+def _source_image_aspect_ratio(case_dir: str, filename: str) -> float | None:
+    rel = Path(str(filename))
+    if rel.is_absolute() or ".." in rel.parts:
+        return None
+    path = (Path(case_dir) / rel).resolve()
+    if not path.is_file():
+        return None
+    try:
+        from PIL import Image, ImageOps
+    except ImportError:
+        return None
+    try:
+        with Image.open(path) as image:
+            transposed = ImageOps.exif_transpose(image)
+            width, height = transposed.size
+    except Exception:  # noqa: BLE001 - missing/corrupt source must not break render selection.
+        return None
+    if width <= 0 or height <= 0:
+        return None
+    return round(width / height, 4)
+
+
+def _layout_quality_evidence_by_file(selection_controls: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    evidence_by_file: dict[str, dict[str, Any]] = {}
+    ticket_decisions = selection_controls.get("ticket_decisions")
+    if not isinstance(ticket_decisions, list):
+        return evidence_by_file
+    for ticket in ticket_decisions:
+        if not isinstance(ticket, dict):
+            continue
+        if str(ticket.get("reason_code") or "") != "crop_touches_frame":
+            continue
+        evidence = ticket.get("evidence") if isinstance(ticket.get("evidence"), dict) else {}
+        for role in ("before", "after"):
+            item = evidence.get(role)
+            if not isinstance(item, dict):
+                continue
+            filename = str(item.get("filename") or item.get("render_filename") or "").strip()
+            if not filename:
+                continue
+            quality = evidence_by_file.setdefault(filename, {})
+            for key in ("crop_touches_frame", "face_crop_touches_frame", "crop_margin", "face_crop_margin"):
+                if key in item and quality.get(key) is None:
+                    quality[key] = item.get(key)
+    return evidence_by_file
+
+
+def _apply_layout_quality_evidence(candidate: dict[str, Any], evidence_by_file: dict[str, dict[str, Any]]) -> None:
+    keys = [
+        str(candidate.get("filename") or ""),
+        str(candidate.get("render_filename") or ""),
+        Path(str(candidate.get("filename") or "")).name,
+        Path(str(candidate.get("render_filename") or "")).name,
+    ]
+    evidence = next((evidence_by_file.get(key) for key in keys if key and evidence_by_file.get(key)), None)
+    if not isinstance(evidence, dict):
+        return
+    for key, value in evidence.items():
+        if candidate.get(key) is None:
+            candidate[key] = value
+    candidate["layout_quality_evidence_source"] = "source_group_ticket"
+
+
+def _apply_layout_reselect_bias(
+    candidate: dict[str, Any],
+    *,
+    target_aspect_ratio: float = D1_RENDER_CELL_ASPECT_RATIO,
+) -> None:
+    penalty = 0
+    reasons = [str(item) for item in (candidate.get("selection_reasons") or []) if item]
+    warnings = [item for item in (candidate.get("quality_warnings") or []) if isinstance(item, dict)]
+    crop_risky = bool(candidate.get("crop_touches_frame") or candidate.get("face_crop_touches_frame"))
+    if crop_risky:
+        penalty += 34
+        warnings.append(
+            {
+                "code": "layout_crop_touches_frame",
+                "severity": "review",
+                "message": "源图主体/面部贴边，正式板可能出现背景色带、抠图边缘或眼位漂移，已降权重选",
+            }
+        )
+        reasons.append("贴边裁剪源图已降权")
+    aspect_ratio = source_selection.float_value(candidate.get("source_aspect_ratio"))
+    if aspect_ratio is not None and target_aspect_ratio > 0:
+        delta = abs(aspect_ratio - target_aspect_ratio)
+        candidate["source_aspect_ratio_delta"] = round(delta, 4)
+        if delta >= D1_LAYOUT_AR_EXTREME_DELTA:
+            penalty += 18
+            warnings.append(
+                {
+                    "code": "layout_aspect_ratio_mismatch",
+                    "severity": "review",
+                    "message": "源图宽高比偏离正式板竖版 cell，可能触发背景 letterbox，已降权",
+                }
+            )
+            reasons.append("源图宽高比偏离竖版 cell 已降权")
+        elif delta >= D1_LAYOUT_AR_STRONG_DELTA:
+            penalty += 10
+            warnings.append(
+                {
+                    "code": "layout_aspect_ratio_mismatch",
+                    "severity": "info",
+                    "message": "源图宽高比与正式板 cell 有差异，已轻微降权",
+                }
+            )
+        elif delta >= D1_LAYOUT_AR_REVIEW_DELTA:
+            penalty += 6
+            warnings.append(
+                {
+                    "code": "layout_aspect_ratio_mismatch",
+                    "severity": "review",
+                    "message": "源图宽高比会在正式板 cell 产生可见留白，若仍被选中需人工重拍/重选",
+                }
+            )
+            reasons.append("源图宽高比会产生可见留白，已降权")
+    if penalty <= 0:
+        return
+    candidate["layout_reselect_penalty"] = penalty
+    candidate["selection_score"] = max(0, int(candidate.get("selection_score") or 0) - penalty)
+    candidate["selection_reasons"] = reasons[:6]
+    candidate["quality_warnings"] = warnings[:6]
+    if str(candidate.get("risk_level") or "ok") == "ok" and any(
+        str(item.get("severity") or "") == "review" for item in warnings
+    ):
+        candidate["risk_level"] = "review"
+
+
+def _layout_operator_flags(selected_candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    flags: list[dict[str, Any]] = []
+    for candidate in selected_candidates:
+        warnings = candidate.get("quality_warnings") if isinstance(candidate.get("quality_warnings"), list) else []
+        layout_warnings = [
+            warning
+            for warning in warnings
+            if isinstance(warning, dict) and str(warning.get("code") or "").startswith("layout_")
+        ]
+        if not (candidate.get("layout_reselect_penalty") or layout_warnings):
+            continue
+        flags.append(
+            {
+                "view": candidate.get("view"),
+                "phase": candidate.get("phase"),
+                "case_id": candidate.get("case_id"),
+                "filename": candidate.get("filename"),
+                "render_filename": candidate.get("render_filename"),
+                "source_aspect_ratio": candidate.get("source_aspect_ratio"),
+                "source_aspect_ratio_delta": candidate.get("source_aspect_ratio_delta"),
+                "crop_touches_frame": candidate.get("crop_touches_frame"),
+                "face_crop_touches_frame": candidate.get("face_crop_touches_frame"),
+                "layout_reselect_penalty": candidate.get("layout_reselect_penalty"),
+                "warnings": layout_warnings,
+                "recommended_action": "operator_retake_or_reselect_source_image",
+            }
+        )
+    return flags
 
 
 def _build_render_selection_context(
@@ -639,7 +891,8 @@ def _build_render_selection_context(
     render_names = render_names or {}
     primary_case_id = int(rows[0]["id"]) if rows else 0
     render_feedback = source_selection.render_feedback_from_history(conn, primary_case_id) if primary_case_id else None
-    primary_render_metadata = _skill_metadata_by_file(str(rows[0].get("skill_image_metadata_json") or "")) if rows else {}
+    primary_skill_metadata = _skill_metadata_by_file(str(rows[0].get("skill_image_metadata_json") or "")) if rows else {}
+    primary_render_metadata = _latest_render_selection_metadata_by_file(conn, primary_case_id) if primary_case_id else {}
     selection_controls = source_selection.selection_controls_from_meta(
         _parse_case_meta(str(rows[0].get("meta_json") or "")) if rows else {}
     )
@@ -661,23 +914,44 @@ def _build_render_selection_context(
         vlm_obs_by_file = _vlm_classifier_observations_by_filename(conn, case_id)
         review_states = _image_review_states(meta_json)
         manual_overrides = _fetch_case_image_overrides(conn, case_id)
+        row_selection_controls = source_selection.selection_controls_from_meta(meta)
+        layout_evidence_by_file = _layout_quality_evidence_by_file(row_selection_controls)
         for filename in existing_files:
             render_filename = render_names.get((case_id, filename), filename)
             state = _state_for_filename(review_states, filename) or {}
             if bool(state.get("render_excluded") or state.get("verdict") == "excluded"):
                 overrides_by_render_name[render_filename] = {"render_excluded": True, "review_verdict": "excluded"}
                 continue
-            metadata = metadata_by_file.get(filename) or metadata_by_file.get(Path(filename).name)
-            observation = vlm_obs_by_file.get(filename) or vlm_obs_by_file.get(Path(filename).name)
+            metadata = (
+                metadata_by_file.get(filename)
+                or metadata_by_file.get(render_filename)
+                or metadata_by_file.get(Path(render_filename).name)
+                or metadata_by_file.get(Path(filename).name)
+            )
+            observation = (
+                vlm_obs_by_file.get(filename)
+                or vlm_obs_by_file.get(render_filename)
+                or vlm_obs_by_file.get(Path(render_filename).name)
+                or vlm_obs_by_file.get(Path(filename).name)
+            )
             metadata = _apply_vlm_observation_to_metadata(metadata, observation)
             fallback_metadata = (
                 primary_render_metadata.get(render_filename)
                 or primary_render_metadata.get(Path(render_filename).name)
                 or primary_render_metadata.get(filename)
                 or primary_render_metadata.get(Path(filename).name)
+                or primary_skill_metadata.get(render_filename)
+                or primary_skill_metadata.get(Path(render_filename).name)
+                or primary_skill_metadata.get(filename)
+                or primary_skill_metadata.get(Path(filename).name)
             )
             metadata = _selection_metadata_with_fallback(metadata, fallback_metadata)
-            manual_override = manual_overrides.get(filename) or manual_overrides.get(Path(filename).name)
+            manual_override = (
+                manual_overrides.get(filename)
+                or manual_overrides.get(render_filename)
+                or manual_overrides.get(Path(render_filename).name)
+                or manual_overrides.get(Path(filename).name)
+            )
             phase, phase_source, view, view_source, manual = _selection_phase_view(
                 filename,
                 case_title,
@@ -714,6 +988,7 @@ def _build_render_selection_context(
                 "face_crop_touches_frame": (metadata or {}).get("face_crop_touches_frame") if isinstance(metadata, dict) else None,
                 "crop_margin": (metadata or {}).get("crop_margin") if isinstance(metadata, dict) else None,
                 "face_crop_margin": (metadata or {}).get("face_crop_margin") if isinstance(metadata, dict) else None,
+                "source_aspect_ratio": _source_image_aspect_ratio(case_dir, filename),
                 "identity_similarity": (metadata or {}).get("identity_similarity") if isinstance(metadata, dict) else None,
                 "same_person_similarity": (metadata or {}).get("same_person_similarity") if isinstance(metadata, dict) else None,
                 "arcface_similarity": (metadata or {}).get("arcface_similarity") if isinstance(metadata, dict) else None,
@@ -725,7 +1000,9 @@ def _build_render_selection_context(
             }
             if isinstance(manual_override, dict) and isinstance(manual_override.get("transform"), dict):
                 candidate["manual_transform"] = manual_override["transform"]
+            _apply_layout_quality_evidence(candidate, layout_evidence_by_file)
             candidate.update(source_selection.candidate_quality(candidate, role))
+            _apply_layout_reselect_bias(candidate)
             if candidate.get("selection_metadata_source") == "primary_render_history":
                 reasons = [str(item) for item in (candidate.get("selection_reasons") or []) if item]
                 if "复用最近渲染姿态画像" not in reasons:
@@ -816,6 +1093,7 @@ def _build_render_selection_context(
                 else None
             ),
             "selected_count": len(selected_candidates),
+            "layout_operator_flags": _layout_operator_flags(selected_candidates),
             "slots": plan_slots,
             "source_provenance": [
                 {
@@ -1820,6 +2098,7 @@ class RenderQueue:
             case_id = row["case_id"]
             batch_id = row["batch_id"]
             customer_raw = row["case_customer_raw"]
+            case_date, case_project = scanner.extract_case_date_project(Path(case_dir), scanner.DEFAULT_ROOTS)
 
             # Stage B: pull manual phase/view overrides for this case.
             manual_overrides: dict[str, dict[str, Any]] = _fetch_case_image_overrides(conn, int(case_id))
@@ -2067,6 +2346,8 @@ class RenderQueue:
                 manual_overrides=manual_overrides,
                 selection_plan=render_selection_plan,
                 customer_name=customer_raw,
+                date=case_date,
+                project=case_project,
             )
         except FileNotFoundError as e:
             self._mark_failed(job_id, f"missing: {e}")
