@@ -8,6 +8,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from backend.render_pixel_metrics import compute_pixel_metrics
+
 
 _TRANSIENT_ERROR_PATTERN = re.compile(
     r"(?:"
@@ -257,6 +259,7 @@ def evaluate_render_result(result: dict[str, Any]) -> dict[str, Any]:
     warnings = int(result.get("warning_count") or 0)
     output_path = result.get("output_path")
     output_exists = bool(output_path and Path(str(output_path)).is_file())
+    pixel_metrics = compute_pixel_metrics(str(output_path)) if output_exists else {"available": False, "flags": [], "cv_penalty": 0.0}
     ai_usage = result.get("ai_usage") or {}
     used_ai_enhancement = bool(ai_usage.get("used_after_enhancement"))
     used_ai_padfill = bool(ai_usage.get("used_ai_padfill"))
@@ -289,6 +292,7 @@ def evaluate_render_result(result: dict[str, Any]) -> dict[str, Any]:
     score -= min(len(composition_alerts) * 8, 24)
     if used_ai_enhancement:
         score -= 10
+    score -= max(0.0, float(pixel_metrics.get("cv_penalty") or 0.0))
     score = max(0.0, round(score, 1))
 
     if not output_exists:
@@ -332,6 +336,8 @@ def evaluate_render_result(result: dict[str, Any]) -> dict[str, Any]:
             "composition_alerts": composition_alerts,
             "composition": "review" if composition_alerts else "ok",
             "action_suggestions": action_suggestions,
+            "pixel_metrics": pixel_metrics,
+            "cv_flags": pixel_metrics.get("flags") if isinstance(pixel_metrics.get("flags"), list) else [],
         },
     }
 
