@@ -103,6 +103,29 @@ def _read_accepted_warnings_from_meta(meta_raw: Any) -> list[dict[str, Any]]:
     return [item for item in accepted if isinstance(item, dict)]
 
 
+def _crop_override_downstream_verified(conn: sqlite3.Connection, case_id: int, trace: dict[str, Any]) -> bool:
+    """Return True only when the latest rendered board for this case cleared D6."""
+    if not isinstance(trace, dict):
+        return False
+    try:
+        row = conn.execute(
+            """
+            SELECT b.verdict, b.review_status
+            FROM board_delivery_qa b
+            JOIN render_jobs j ON j.id = b.job_id
+            WHERE j.case_id = ?
+            ORDER BY b.assessed_at DESC
+            LIMIT 1
+            """,
+            (case_id,),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return False
+    if row is None:
+        return False
+    return str(row["verdict"] or "") == "clean" or str(row["review_status"] or "") == "cleared"
+
+
 def _case_rows(conn: sqlite3.Connection, case_id: int) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     row = conn.execute(
         """
@@ -474,11 +497,27 @@ def evaluate_pre_render_gate(
         # Filter tickets that have already been resolved by manual decisions
         controls = selection_plan.get("selection_controls") or {}
         decisions = controls.get("ticket_decisions") or []
-        resolved_keys = {
-            (str(d.get("reason_code")), d.get("slot") or (d.get("evidence") or {}).get("slot"))
-            for d in decisions
-            if d.get("decision") in {"identity_review", "source_quality_review", "manual_quality_review", "slot_fill"}
-        }
+        resolved_keys = set()
+        for decision in decisions:
+            if not isinstance(decision, dict):
+                continue
+            if decision.get("decision") not in {
+                "identity_review",
+                "source_quality_review",
+                "manual_quality_review",
+                "slot_fill",
+            }:
+                continue
+            reason_code = str(decision.get("reason_code"))
+            evidence = decision.get("evidence") if isinstance(decision.get("evidence"), dict) else {}
+            slot = decision.get("slot") or evidence.get("slot")
+            if reason_code == "crop_touches_frame" and not _crop_override_downstream_verified(
+                active,
+                case_id,
+                decision,
+            ):
+                continue
+            resolved_keys.add((reason_code, slot))
         planned_tickets = [
             t for t in planned_tickets
             if (str(t.get("reason_code")), t.get("slot")) not in resolved_keys
