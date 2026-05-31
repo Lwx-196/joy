@@ -225,14 +225,36 @@ def _stage_arm(spec: CaseSpec, arm: str, scratch_root: Path) -> Path:
     return scratch_case
 
 
+# Lean match keys carried into the selection_plan — render_executor's
+# ``_plan_match_keys`` matches on render_filename/filename against a freshly-built
+# manifest entry's name/relative_path, so these four are sufficient and avoid
+# pinning stale absolute paths from the shipped board.
+_SLOT_MATCH_KEYS = ("name", "filename", "render_filename", "relative_path")
+
+
+def _slot_plan_entry(entry: dict[str, Any]) -> dict[str, Any] | None:
+    """Reduce a manifest slot before/after dict to the keys render_executor
+    matches on. None if no usable match key (entry unusable for pinning)."""
+    lean = {k: entry.get(k) for k in _SLOT_MATCH_KEYS if entry.get(k)}
+    return lean or None
+
+
 def detect_existing_render(spec: CaseSpec) -> dict[str, Any] | None:
     """From the case's shipped board, recover (board, brand, template, the exact
-    after images the render selected).
+    after images the render selected, and the exact slot selection to REUSE).
 
     The candidate MUST render with the SAME brand/template (single- vs
     tri-compare differ in layout → otherwise a confound) and need only focal the
     after images actually composed into the board (manifest ``selected_slots``),
     not all 5–10 — the others are never shown.
+
+    ``selection_plan`` (F-3 fix): the shipped board's exact per-slot before/after
+    pairs, shaped for ``render_executor.run_render(selection_plan=...)``. Passing
+    it pins the candidate render to the SAME slot selection instead of
+    re-classifying + re-gating from scratch — which otherwise let FOCAL sharpening
+    self-destruct slots (袁霞 front pair dropped on "前后清晰度差过大") and made the
+    gate compare auto-selection vs human-curation (apples-to-oranges). With reuse,
+    the only delta between arms is the FOCAL-enhanced after pixels = pure FOCAL effect.
     """
     boards = sorted(spec.case_dir.glob(".case-layout-output/*/*/render/final-board.*"))
     board = next((b for b in boards if b.is_file()), None)
@@ -246,21 +268,41 @@ def detect_existing_render(spec: CaseSpec) -> dict[str, Any] | None:
     except IndexError:
         return None
     after_names: list[str] = []
+    slots_plan: dict[str, Any] = {}
     manifest = board.parent / "manifest.final.json"
     if manifest.is_file():
         try:
             m = json.loads(manifest.read_text(encoding="utf-8"))
             for group in m.get("groups", []) or []:
-                for slot in (group.get("selected_slots") or {}).values():
-                    after = (slot or {}).get("after") or {}
+                selected = group.get("selected_slots") or {}
+                for slot, sel in selected.items():
+                    if not isinstance(sel, dict):
+                        continue
+                    after = sel.get("after") or {}
                     name = after.get("name") or after.get("render_filename")
                     if name and name not in after_names:
                         after_names.append(name)
+                    # First group wins each slot (selection_plan applies globally
+                    # to every group in _apply_render_selection_plan; near-universal
+                    # single-group cases make first-wins the faithful choice).
+                    if slot in slots_plan:
+                        continue
+                    before_lean = _slot_plan_entry(sel.get("before") or {})
+                    after_lean = _slot_plan_entry(after)
+                    if before_lean and after_lean:
+                        slots_plan[slot] = {"before": before_lean, "after": after_lean}
         except (ValueError, OSError):
             after_names = []
+            slots_plan = {}
     if not after_names:
         after_names = spec.after_names or [spec.after_path.name]
-    return {"board": board, "brand": brand, "template": template, "after_names": after_names}
+    selection_plan = (
+        {"policy": "p4_baseline_slot_reuse", "slots": slots_plan} if slots_plan else None
+    )
+    return {
+        "board": board, "brand": brand, "template": template,
+        "after_names": after_names, "selection_plan": selection_plan,
+    }
 
 
 def build_arm(
@@ -271,9 +313,10 @@ def build_arm(
     brand: str,
     template: str,
     enhance_fn: Callable[[Path, str, CaseSpec], Path] | None,
-    render_fn: Callable[[Path, str, str], dict[str, Any]],
+    render_fn: Callable[..., dict[str, Any]],
     require_enhancement: bool = False,
     after_names_override: list[str] | None = None,
+    selection_plan: dict[str, Any] | None = None,
 ) -> Path:
     """Stage → enhance the after image (unless stubbed) → real layout render.
 
@@ -285,6 +328,11 @@ def build_arm(
     ``after_names_override``: enhance only these after images (the ones the
     shipped board actually composed, per manifest ``selected_slots``) instead of
     every after in the dir — avoids focal-ing 5–10 images when the board shows 1–3.
+
+    ``selection_plan``: F-3 fix — pin the render to the shipped board's exact slot
+    selection (``render_executor.run_render(selection_plan=...)``) so the candidate
+    reuses the SAME before/after pairs + template instead of re-classifying/re-gating
+    (which dropped slots on FOCAL sharpening). Isolates the pure FOCAL pixel delta.
 
     ``require_enhancement``: if True (the candidate FOCAL arm), raise when the
     enhancement no-ops on EVERY after image — FOCAL's K-1 contract returns the
@@ -314,7 +362,7 @@ def build_arm(
                 "(ComfyUI down / silent fail); candidate would equal raw input."
             )
 
-    result = render_fn(scratch_case, brand, template)
+    result = render_fn(scratch_case, brand, template, selection_plan=selection_plan)
     board = result.get("output_path")
     if not board:
         raise RuntimeError(
@@ -335,7 +383,7 @@ def build_packet(
     brand: str,
     template: str,
     enhance_fn: Callable[[Path, str, CaseSpec], Path] | None,
-    render_fn: Callable[[Path, str, str], dict[str, Any]],
+    render_fn: Callable[..., dict[str, Any]],
     stub: bool,
     baseline_strategy: str = "existing-board",
 ) -> dict[str, Any]:
@@ -361,6 +409,10 @@ def build_packet(
             # actually composed, so the candidate renders a COMPARABLE board
             # (same layout) and only focal-enhances the shown afters.
             detected = detect_existing_render(spec)
+            # F-3 fix: reuse the shipped board's exact slot selection so the
+            # candidate differs ONLY by the FOCAL-enhanced after pixels (no
+            # re-classification / re-gating that drops slots on sharpening).
+            candidate_selection_plan = detected["selection_plan"] if detected else None
             if baseline_strategy == "existing-board":
                 if detected is None:
                     raise RuntimeError("no existing final-board for baseline")
@@ -382,6 +434,7 @@ def build_packet(
                 brand=arm_brand, template=arm_template,
                 enhance_fn=enhance_fn, render_fn=render_fn,
                 after_names_override=selected_afters,
+                selection_plan=candidate_selection_plan,
                 # A real candidate must actually apply FOCAL; a no-op (ComfyUI
                 # down) must drop the case, not yield a raw-input candidate.
                 require_enhancement=enhance_fn is not None and not stub,
@@ -404,7 +457,12 @@ def build_packet(
                 },
                 "candidate": {
                     "source_path": str(candidate_board),
-                    "role_note": "FOCAL crop+composite layout-render (PR #41)",
+                    "role_note": (
+                        "FOCAL crop+composite layout-render (PR #41), "
+                        + ("baseline-slot-reuse" if candidate_selection_plan
+                           else "auto-selection (no slot plan recovered)")
+                    ),
+                    "slot_reuse": candidate_selection_plan is not None,
                 },
             }
         )
@@ -412,9 +470,11 @@ def build_packet(
         "existing shipped final-board" if baseline_strategy == "existing-board"
         else "fresh layout-render"
     )
+    slot_reuse_n = sum(1 for it in items if it["candidate"].get("slot_reuse"))
     note = (
         f"P4 formal gate (crisp-focal-crop). baseline={baseline_desc}, "
         "candidate=FOCAL crop+composite layout-render. "
+        f"candidate reuses baseline slots (F-3 fix) for {slot_reuse_n}/{len(items)} items. "
         + ("STUB-ENHANCE dry-run: candidate enhancement skipped." if stub
            else "Real candidate FOCAL render.")
     )
@@ -444,11 +504,14 @@ def _make_real_enhance_fn() -> Callable[[Path, str, CaseSpec], Path]:
     return enhance
 
 
-def _make_real_render_fn() -> Callable[[Path, str, str], dict[str, Any]]:
+def _make_real_render_fn() -> Callable[..., dict[str, Any]]:
     from backend import render_executor
 
-    def render(case_dir: Path, brand: str, template: str) -> dict[str, Any]:
-        return render_executor.run_render(case_dir, brand=brand, template=template)
+    def render(case_dir: Path, brand: str, template: str,
+               selection_plan: dict[str, Any] | None = None) -> dict[str, Any]:
+        return render_executor.run_render(
+            case_dir, brand=brand, template=template, selection_plan=selection_plan,
+        )
 
     return render
 

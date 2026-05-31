@@ -126,7 +126,7 @@ def test_build_arm_leaves_originals_untouched(tmp_path):
 
     rendered = {}
 
-    def fake_render(case_dir: Path, brand: str, template: str):
+    def fake_render(case_dir: Path, brand: str, template: str, selection_plan=None):
         # The render sees the (enhanced) scratch copy, not the original.
         rendered["case_dir"] = case_dir
         board = case_dir / "board.jpg"
@@ -156,7 +156,7 @@ def test_build_arm_stub_skips_enhance(tmp_path):
     _make_case(tmp_path / "src", "王某/注射下巴")
     spec = builder.discover_cases(tmp_path / "src", KW, _phase_fn)[0]
 
-    def fake_render(case_dir: Path, brand: str, template: str):
+    def fake_render(case_dir: Path, brand: str, template: str, selection_plan=None):
         board = case_dir / "board.jpg"
         board.write_bytes(b"board")
         return {"output_path": str(board)}
@@ -173,7 +173,7 @@ def test_build_arm_raises_on_missing_output(tmp_path):
     _make_case(tmp_path / "src", "王某/注射唇")
     spec = builder.discover_cases(tmp_path / "src", KW, _phase_fn)[0]
 
-    def bad_render(case_dir: Path, brand: str, template: str):
+    def bad_render(case_dir: Path, brand: str, template: str, selection_plan=None):
         return {"status": "ok"}  # no output_path
 
     with pytest.raises(RuntimeError, match="no output_path"):
@@ -191,7 +191,7 @@ def test_build_packet_shape(tmp_path):
     _make_case(tmp_path / "src", "B/注射下巴")
     specs = builder.discover_cases(tmp_path / "src", KW, _phase_fn)
 
-    def fake_render(case_dir: Path, brand: str, template: str):
+    def fake_render(case_dir: Path, brand: str, template: str, selection_plan=None):
         board = case_dir / "board.jpg"
         board.write_bytes(b"board")
         return {"output_path": str(board)}
@@ -230,7 +230,7 @@ def test_build_packet_existing_board_baseline_no_render_of_baseline(tmp_path):
 
     rendered_arms = []
 
-    def fake_render(case_dir: Path, brand: str, template: str):
+    def fake_render(case_dir: Path, brand: str, template: str, selection_plan=None):
         # scratch layout: <scratch>/<arm>/<slug>/<case_dir.name>
         rendered_arms.append(case_dir.parent.parent.name)  # "baseline"/"candidate"
         board = case_dir / "board.jpg"
@@ -262,7 +262,7 @@ def test_candidate_focal_noop_is_dropped(tmp_path):
     def noop_enhance(after_path: Path, arm: str, sp):
         return after_path  # K-1 silent-fail contract: returns input unchanged
 
-    def fake_render(case_dir: Path, brand: str, template: str):
+    def fake_render(case_dir: Path, brand: str, template: str, selection_plan=None):
         board = case_dir / "board.jpg"
         board.write_bytes(b"render")
         return {"output_path": str(board)}
@@ -313,7 +313,7 @@ def test_build_arm_after_names_override_limits_enhancement(tmp_path):
         out.write_bytes(b"E")
         return out
 
-    def fake_render(case_dir, brand, template):
+    def fake_render(case_dir, brand, template, selection_plan=None):
         b = case_dir / "board.jpg"
         b.write_bytes(b"x")
         return {"output_path": str(b)}
@@ -332,7 +332,7 @@ def test_build_packet_existing_board_missing_is_dropped(tmp_path):
     _make_case(tmp_path / "src", "B/注射下巴")  # no .case-layout-output
     specs = builder.discover_cases(tmp_path / "src", KW, _phase_fn)
 
-    def fake_render(case_dir: Path, brand: str, template: str):
+    def fake_render(case_dir: Path, brand: str, template: str, selection_plan=None):
         board = case_dir / "board.jpg"
         board.write_bytes(b"render")
         return {"output_path": str(board)}
@@ -346,3 +346,87 @@ def test_build_packet_existing_board_missing_is_dropped(tmp_path):
     assert packet["judge_item_count"] == 0
     assert packet["dropped_count"] == 1
     assert "no existing final-board" in packet["dropped"][0]["reason"]
+
+
+# --- F-3 fix: candidate reuses the shipped board's exact slot selection -------
+
+def test_detect_existing_render_recovers_selection_plan(tmp_path):
+    case = _make_case(tmp_path / "src", "林某/注射面颊，下巴")
+    render_dir = case / ".case-layout-output" / "fumei" / "tri-compare" / "render"
+    render_dir.mkdir(parents=True)
+    (render_dir / "final-board.jpg").write_bytes(b"board")
+    (render_dir / "manifest.final.json").write_text(json.dumps({
+        "groups": [{"selected_slots": {
+            "front": {
+                "before": {"name": "术前1.jpg", "render_filename": "术前1.jpg",
+                           "path": "/abs/术前1.jpg"},
+                "after": {"name": "术后1.jpg", "render_filename": "术后1.jpg"},
+            },
+            "oblique": {
+                "before": {"name": "术前2.jpg"},
+                "after": {"name": "术后2.jpg"},
+            },
+        }}]
+    }), encoding="utf-8")
+    spec = builder.discover_cases(tmp_path / "src", KW, _phase_fn)[0]
+    det = builder.detect_existing_render(spec)
+    plan = det["selection_plan"]
+    assert plan is not None
+    assert plan["policy"] == "p4_baseline_slot_reuse"
+    assert set(plan["slots"]) == {"front", "oblique"}
+    assert plan["slots"]["front"]["before"]["name"] == "术前1.jpg"
+    assert plan["slots"]["front"]["after"]["render_filename"] == "术后1.jpg"
+    # Stale absolute path is NOT pinned — only lean match keys carry.
+    assert "path" not in plan["slots"]["front"]["before"]
+
+
+def test_detect_existing_render_no_plan_when_slot_lacks_before(tmp_path):
+    # A slot with only `after` (no before) cannot be pinned → no plan (falls back
+    # to auto-selection); after_names still recovered for enhancement targeting.
+    case = _make_case(tmp_path / "src", "林某/注射下巴")
+    render_dir = case / ".case-layout-output" / "fumei" / "single-compare" / "render"
+    render_dir.mkdir(parents=True)
+    (render_dir / "final-board.jpg").write_bytes(b"board")
+    (render_dir / "manifest.final.json").write_text(json.dumps({
+        "groups": [{"selected_slots": {"front": {"after": {"name": "术后1.jpg"}}}}]
+    }), encoding="utf-8")
+    spec = builder.discover_cases(tmp_path / "src", KW, _phase_fn)[0]
+    det = builder.detect_existing_render(spec)
+    assert det["selection_plan"] is None
+    assert det["after_names"] == ["术后1.jpg"]
+
+
+def test_build_packet_candidate_reuses_baseline_slot_plan(tmp_path):
+    case = _make_case_with_board(tmp_path / "src", "A/注射下巴")
+    render_dir = case / ".case-layout-output" / "fumei" / "single-compare" / "render"
+    (render_dir / "manifest.final.json").write_text(json.dumps({
+        "groups": [{"selected_slots": {
+            "front": {
+                "before": {"name": "术前.jpg", "render_filename": "术前.jpg"},
+                "after": {"name": "术后.jpg", "render_filename": "术后.jpg"},
+            },
+        }}]
+    }), encoding="utf-8")
+    specs = builder.discover_cases(tmp_path / "src", KW, _phase_fn)
+    seen = {}
+
+    def fake_render(case_dir, brand, template, selection_plan=None):
+        seen["plan"] = selection_plan
+        board = case_dir / "board.jpg"
+        board.write_bytes(b"render")
+        return {"output_path": str(board)}
+
+    packet = builder.build_packet(
+        specs, tmp_path / "scratch",
+        brand="fumei", template="single-compare",
+        enhance_fn=None, render_fn=fake_render, stub=True,
+        baseline_strategy="existing-board",
+    )
+    assert packet["judge_item_count"] == 1
+    item = packet["judge_items"][0]
+    assert item["candidate"]["slot_reuse"] is True
+    assert "baseline-slot-reuse" in item["candidate"]["role_note"]
+    # The candidate render actually received the recovered slot plan (F-3 fix).
+    assert seen["plan"] is not None
+    assert seen["plan"]["slots"]["front"]["after"]["render_filename"] == "术后.jpg"
+    assert "reuses baseline slots (F-3 fix) for 1/1" in packet["note"]
