@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from backend.services import procedure_region_mappings as procedure_mappings
 from backend.services.vlm_provider import VLMProvider, VLMRequest, VLMRequestError, VLMResponse
 
 UNVERIFIED = "未验证/无法获取"
@@ -137,10 +138,125 @@ def _single_image_fidelity_prompt(item: dict[str, Any], criteria_lines: str) -> 
     )
 
 
+def _effect_evidence_block(item: dict[str, Any]) -> str:
+    """Render the evidence-anchored expected-effect rows for the treated regions.
+
+    Each (project, region) pair in ``effect_pairs`` is resolved through
+    ``procedure_region_mappings.effect_row`` — the SAME library the Phase 1
+    prompt builder uses — so the judge is anchored to documented do_right /
+    avoid语言 and never invents expected effects (反臆造). Unregistered pairs and
+    malformed entries are skipped (fail-closed), never crashing the prompt.
+    Botox rows are flagged as neutral-tolerant: on a static neutral face a
+    correct treatment may show little/no visible change (Phase 0 na_neutral).
+    """
+    pairs = item.get("effect_pairs") if isinstance(item.get("effect_pairs"), list) else []
+    lines: list[str] = []
+    for pair in pairs:
+        if not isinstance(pair, (list, tuple)) or len(pair) != 2:
+            continue
+        project, region = str(pair[0]), str(pair[1])
+        row = procedure_mappings.effect_row(project, region)
+        if row is None:
+            continue
+        neutral = project == procedure_mappings.PROJECT_BOTOX
+        tag = "（静止中性脸可不明显，无可见变化属合理→na_neutral）" if neutral else "（应有可见效果）"
+        avoid = "、".join(row.get("avoid") or [])
+        line = (
+            f"- 【{region}】{tag} 期望方向(做对): {row.get('do_right', '')}"
+            f"；红线(过度失真，命中即 fail): {avoid}"
+        )
+        guardrail = row.get("guardrail")
+        if guardrail:
+            line += f"；量化护栏: {guardrail}"
+        note = row.get("ground_truth_note")
+        if note:
+            line += f"；备注(纯循证预测无照片GT): {note}"
+        lines.append(line)
+    if not lines:
+        return "(未注入循证效果行 — effect_pairs 为空或无登记命中；不得据此臆造任何效果)"
+    return "\n".join(lines)
+
+
+def _effect_projection_prompt(item: dict[str, Any], criteria_lines: str) -> str:
+    """Effect-projection judge framing (anchored-simulation Phase 3.1).
+
+    The INVERSE of the保真 _single_image_fidelity_prompt. Image A (baseline) is
+    the ORIGINAL pre-effect photo; image B (candidate) is an AI post-procedure
+    EFFECT projection (filling / wrinkle-softening) of that same photo. B is
+    SUPPOSED to differ from A — a no-change projection is a failure, not a tie.
+    winner_role=candidate (the projection passes) ONLY when all four hold:
+    ① effect_direction — every treated region moves toward its evidence-anchored
+       do_right direction (botox on a neutral face may stay unchanged);
+    ② identity_preserved — unmistakably the same person;
+    ③ only_treated_regions — only the treated regions changed (mask-outside ==
+       original pixels; no smoothing / whitening / face-slimming elsewhere);
+    ④ natural_not_overdone — no over-distortion red-line from the evidence rows.
+    Expected-effect rows are injected from the循证库 so the judge stays anchored.
+    """
+    evidence = _effect_evidence_block(item)
+    do_not_touch = item.get("do_not_touch") if isinstance(item.get("do_not_touch"), list) else []
+    do_not_touch_line = (
+        "、".join(str(region) for region in do_not_touch)
+        or "(无显式列表 — 除上列治疗区外，一切区域均须与基线完全一致)"
+    )
+    treated = [pair for pair in (item.get("effect_pairs") or []) if isinstance(pair, (list, tuple))]
+    return (
+        "You are an independent medical-aesthetic EFFECT-PROJECTION judge.\n"
+        "Compare exactly two single photographs of the same patient at full resolution.\n"
+        "Image A (baseline) is the ORIGINAL pre-effect photo (before the projected effect).\n"
+        "Image B (candidate) is an AI post-procedure EFFECT projection of that same photo.\n"
+        "Unlike a fidelity check, image B is SUPPOSED to differ from image A — the projected\n"
+        "treatment effect MUST be visible in the treated regions. A projection that is identical\n"
+        "to baseline (no effect applied) is a FAILURE, not a tie.\n"
+        "Use only visual evidence from the images.\n"
+        "Do not assume either image is better because of file names, variants, or generation system.\n\n"
+        "Judge effect direction ONLY against the EVIDENCE-ANCHORED expected effects below; do NOT\n"
+        "invent expected effects beyond these rows (反臆造). Each treated region lists its do_right\n"
+        "direction and its over-distortion red-lines (avoid).\n"
+        "EVIDENCE-ANCHORED expected effects (per treated region):\n"
+        f"{evidence}\n\n"
+        f"Untreated regions that MUST stay identical to baseline: {do_not_touch_line}.\n\n"
+        "EFFECT RULE (decisive): winner_role=candidate ONLY if ALL four hold:\n"
+        "① effect_direction — in EVERY treated region image B moves toward that region's\n"
+        "  evidence-anchored do_right direction vs image A (visible, correct-direction effect).\n"
+        "  Exception: a region flagged 静止中性脸可不明显 (botox/na_neutral) may show little/no\n"
+        "  visible change — that is acceptable, NOT a failure.\n"
+        "② identity_preserved — unmistakably the SAME person: face shape, bone structure, eyes,\n"
+        "  nose, ears, hairline, skin tone, pores, moles and acne-marks all preserved.\n"
+        "③ only_treated_regions — ONLY the treated regions changed; every untreated region and\n"
+        "  everything outside the treatment mask (background, clothing, hair, skin texture) is\n"
+        "  UNCHANGED and un-smoothed (mask-outside pixels == original).\n"
+        "④ natural_not_overdone — the result is natural and does NOT hit any over-distortion\n"
+        "  red-line listed in the evidence rows above (e.g. 香肠唇, 巫婆下巴, frozen 额头, Spock 眉).\n"
+        "If identity drifts, or anything outside the treated regions changed (smoothing / whitening\n"
+        "/ face-slimming / a new untreated effect), set hard_veto_reason and winner_role=baseline.\n"
+        "If the projected effect is wrong-direction, missing in a non-neutral region, or hits an\n"
+        "over-distortion red-line, winner_role=baseline.\n"
+        "Use winner_role=tie ONLY when image B is visually identical to image A (no effect applied\n"
+        "at all in any region) — an honest negative result, NOT a win.\n"
+        "Use winner_role=manual_review when evidence is ambiguous, safety-relevant, or confidence < 0.75.\n"
+        "Score each criterion 1-5 for baseline and candidate where 5 is best.\n"
+        "Return only one JSON object. Do not include markdown or long hidden reasoning.\n"
+        "Required JSON keys: ab_unit_id, winner_role, confidence, criterion_scores, "
+        "visual_evidence_summary, rationale, risk_flags, hard_veto_reason.\n"
+        "criterion_scores must be an object keyed by criterion, each value shaped as "
+        "{\"baseline\": 1-5, \"candidate\": 1-5}.\n"
+        "winner_role may be baseline, candidate, tie, or manual_review.\n"
+        "visual_evidence_summary must be brief and auditable, based only on visible image evidence.\n\n"
+        f"ab_unit_id: {_unit_id(item)}\n"
+        f"treated_regions: {treated}\n"
+        "Criteria (ALL must hold for a candidate win):\n"
+        f"{criteria_lines}\n"
+    )
+
+
 def _judge_prompt(item: dict[str, Any]) -> str:
     criteria = item.get("criteria") if isinstance(item.get("criteria"), list) else []
     criteria_lines = "\n".join(f"- {criterion}" for criterion in criteria)
-    if str(item.get("judge_profile") or "").strip() == "single_image_fidelity":
+    profile = str(item.get("judge_profile") or "").strip()
+    if profile == "effect_projection":
+        return _effect_projection_prompt(item, criteria_lines)
+    if profile == "single_image_fidelity":
         return _single_image_fidelity_prompt(item, criteria_lines)
     return (
         "You are an independent medical-aesthetic image delivery quality judge.\n"
