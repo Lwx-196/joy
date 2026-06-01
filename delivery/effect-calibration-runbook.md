@@ -146,3 +146,17 @@ floor 已闭环，下一步是 owner 解锁 gpt-image-2 quota 后的 B 段真校
 - **Phase 3 Exit 达成**：判官 4-criteria **区分力确认**——精准分辨 mask 拼接缝 artifact vs AI 无效果，非 Step 1 幻觉橡皮章（floor 修复有效：许楚楚无变化被正确判 tie）。
 - **🔴 真发现**：当前 `_apply_effect_mask_anchor` 的 separate-ellipse mask 合成留下**可见圆形/边界缝**（2/3 case 因此 fail）→ anchored-sim 下一轮真问题 = **羽化 mask 边缘**（feather），而非判官或出图。许楚楚的 tie = 下巴/鼻背 HA 效果 AI 没投出来（subtle，或 prompt 强度不足）。
 - 凭证：tu-zi key 在 gitignored `tasks/tuzi_image.local.env`（跑完轮换）；判官 t54 ADC。
+
+## mask 边缘羽化（2026-06-01，修判官抓出的拼接缝）
+
+`_apply_effect_mask_anchor` 新增向内羽化（`_feather_mask_inward`：erode→GaussianBlur→乘回 binary 钳制外侧为 0，半径自适应短边 1.2% 钳 [4,40]px）。0-quota 对同批 AI 原图再锚定 + t54 重判（`report-feathered.md`）：
+
+| case | 缝前 winner | 羽化后 winner | 解读 |
+|---|---|---|---|
+| 康巧佳 | baseline（圆形 patch 缝）| baseline（untreated region artifact）| 缝抱怨消除，AI 输出本身仍有 artifact |
+| 蓝凤端 | baseline（额头 mask 边界）| **tie（无可见变化）** | 纯肉毒静止脸本就无可见效果（循证库标注 botox 即刻零变化）→ 缝消失露出真相 |
+| 许楚楚 | tie | tie（未投出效果）| HA 下巴/鼻背 AI 没可靠投出填充 |
+
+- **羽化有效**：判官不再抱怨拼接缝（identity 铁线 outside_exact 仍保住，单测 `test_feather_mask_inward_*`）。
+- **校准暴露更深 2 问题**（下一轮真工作，非缝）：① **纯肉毒 case 是坏校准样本**（静止脸无可见效果，保证 tie）→ 校准样本应排除 botox-only 或要求动态表情图；② **HA 填充效果 gpt-image-2 没可靠投出** → 需强化 prompt 强度 / 换 edit 端点 / 调 mask 覆盖。
+- gate_pass 仍 0/3 = 诚实信号（判官区分力强），瓶颈从「缝」下移到「AI 投影质量 + 样本筛选」。

@@ -34,6 +34,26 @@ def test_apply_effect_mask_anchor_locks_outside_to_original(tmp_path: Path):
     assert anchored.getpixel((100, 156)) == (255, 0, 0)
 
 
+def test_feather_mask_inward_softens_edge_keeps_outside_zero(tmp_path: Path):
+    # 羽化向内：核心保 255、内缘成 alpha 渐变（消拼接缝）、椭圆外恒 0（身份铁线）。
+    from PIL import Image, ImageDraw
+
+    mask = Image.new("L", (400, 400), 0)
+    ImageDraw.Draw(mask).rectangle([100, 100, 299, 299], fill=255)  # 居中白方块
+    mp = tmp_path / "mask.png"
+    mask.save(mp)
+
+    feathered = Image.open(adp._feather_mask_inward(mp)).convert("L")
+    # 方块外 → 字节级 0（outside_exact 保住）
+    assert feathered.getpixel((10, 10)) == 0
+    assert feathered.getpixel((350, 350)) == 0
+    # 核心 → 仍 ~255（治疗效果不被抹）
+    assert feathered.getpixel((200, 200)) >= 250
+    # 内缘 → 出现中间 alpha（证明羽化成渐变，非硬阶跃）
+    inner_edge = [feathered.getpixel((x, 200)) for x in range(100, 140)]
+    assert any(0 < v < 255 for v in inner_edge), "feather must create an alpha ramp"
+
+
 def test_apply_effect_mask_anchor_k1_fallback_on_bad_input(tmp_path: Path):
     ai = tmp_path / "ai.png"
     Image.new("RGB", (50, 50), (1, 2, 3)).save(ai)
