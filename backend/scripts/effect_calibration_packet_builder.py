@@ -178,13 +178,13 @@ def _generate_via_api(baseline_path: Path, prompt: str, *, dst_path: Path) -> Pa
 
     from PIL import Image, ImageOps
 
-    api_key = os.environ.get("TUZI_IMAGE_PRIMARY_API_KEY", "").strip()
-    if not api_key:
-        raise RuntimeError("TUZI_IMAGE_PRIMARY_API_KEY not set (--api-direct needs the image provider key)")
+    api_format = (os.environ.get("TUZI_IMAGE_PRIMARY_API_FORMAT") or "chat").strip().lower()
     base_url = (os.environ.get("TUZI_IMAGE_PRIMARY_BASE_URL") or "https://api.tu-zi.com/v1").rstrip("/")
     model = (os.environ.get("TUZI_IMAGE_PRIMARY_MODELS") or "gpt-image-2-vip").split(",")[0].strip()
-    api_format = (os.environ.get("TUZI_IMAGE_PRIMARY_API_FORMAT") or "chat").strip().lower()
     timeout = int(os.environ.get("TUZI_IMAGE_PRIMARY_TIMEOUT_MS", "300000")) / 1000.0
+    api_key = os.environ.get("TUZI_IMAGE_PRIMARY_API_KEY", "").strip()
+    if api_format != "vertex_gemini" and not api_key:
+        raise RuntimeError("TUZI_IMAGE_PRIMARY_API_KEY not set (--api-direct needs the image provider key)")
 
     with Image.open(baseline_path) as _im:
         img = ImageOps.exif_transpose(_im).convert("RGB")
@@ -202,6 +202,47 @@ def _generate_via_api(baseline_path: Path, prompt: str, *, dst_path: Path) -> Pa
                 dst_path.write_bytes(r.read())
             return dst_path
         raise RuntimeError(f"images endpoint returned no image (model={model}): {str(verdict)[:200]}")
+
+    if api_format == "vertex_gemini":
+        # Google Vertex AI gemini image model (nano-banana / gemini-3-pro-image) via
+        # generateContent + ADC — the same Vertex credentials the judge uses. Excellent
+        # at localized aesthetic editing. Returns inline image data in the response parts.
+        from backend.services.vlm_provider import _gcloud_adc_token
+
+        token = _gcloud_adc_token()
+        if not token:
+            raise RuntimeError("Vertex ADC token unavailable (gcloud auth application-default login?)")
+        project = os.environ.get("CASE_WORKBENCH_VERTEX_PROJECT", "").strip()
+        location = (os.environ.get("CASE_WORKBENCH_VERTEX_LOCATION") or "global").strip()
+        gem_model = (os.environ.get("CASE_WORKBENCH_VERTEX_IMAGE_MODEL") or "gemini-3-pro-image-preview").strip()
+        if not project:
+            raise RuntimeError("CASE_WORKBENCH_VERTEX_PROJECT not set (vertex_gemini)")
+        host = "aiplatform.googleapis.com" if location == "global" else f"{location}-aiplatform.googleapis.com"
+        ver = "v1beta1" if location == "global" else "v1"
+        endpoint = (f"https://{host}/{ver}/projects/{project}/locations/{location}"
+                    f"/publishers/google/models/{gem_model}:generateContent")
+        b64in = base64.b64encode(_jpeg_bytes(img)).decode()
+        body = _json.dumps({
+            "contents": [{"role": "user", "parts": [
+                {"text": prompt},
+                {"inlineData": {"mimeType": "image/jpeg", "data": b64in}},
+            ]}],
+            "generationConfig": {"responseModalities": ["TEXT", "IMAGE"]},
+        }).encode()
+        req = urllib.request.Request(
+            endpoint, data=body,
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 - Vertex ADC endpoint
+            payload = _json.loads(resp.read().decode())
+        for cand in payload.get("candidates", []):
+            for part in (cand.get("content") or {}).get("parts", []):
+                inl = part.get("inlineData") or part.get("inline_data")
+                if inl and inl.get("data"):
+                    dst_path.write_bytes(base64.b64decode(inl["data"]))
+                    return dst_path
+        raise RuntimeError(f"vertex gemini-image returned no image: {str(payload)[:240]}")
 
     if api_format == "images_edit":
         # /images/edits — the dedicated image-EDIT endpoint (base gpt-image-2). It
