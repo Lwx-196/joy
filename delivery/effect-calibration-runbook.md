@@ -182,3 +182,18 @@ python -m backend.scripts.effect_calibration_report --packet-json ... --env-file
 - **判官 vs 人眼**：effect_projection 判官对自然克制的好结果会判 tie（鼻/下巴），与 owner 审美不完全对齐 → 判官「可见效果」阈值需按 owner 审美再校准。
 
 **泪沟 N=1 PASS 实证**：郭若煊（弗缦 HA）gpt-edit raw → judge pass 0.85。N≥6 需再注册泪沟 HA 品牌（盈致/妮凯丽/柯芮琦/薇旖美 owner 确认）。
+
+## 三中转 image-2 质量对比（2026-06-01，3 案例 × 3 中转 = 9 张）
+
+owner 问三家中转的 gpt-image-2 质量差异。同 3 个泪沟 case（郭若煊/稀饭/黄靖榕）× tu-zi/flashapi/77code，gpt-image-2 images_edit raw-first，t54 判官：
+
+| case | tu-zi | flashapi | 77code |
+|---|---|---|---|
+| 郭若煊 | 0.85 | 0.90 | 0.90 |
+| 稀饭 | 0.90 | 0.85 | 0.85 |
+| 黄靖榕 | 0.80 | 0.85 | 0.85 |
+| 均值 | 0.85 | 0.867 | 0.867 |
+
+**结论：三家质量等价**（9/9 PASS，均值差 <0.02 在单次生成噪声内，无一致赢家——每家在不同 case 拿最高分=随机波动非质量差距；视觉每 case 三家几乎一样）。同一 gpt-image-2 后端。**中转选择看可靠性/成本/配额，不是质量。** owner 选 tu-zi（自然+红润）站得住，flashapi/77code 同档备份/降级。
+
+**附带**：泪沟 + raw-first 配方 **N=3 案例全 PASS**（不只 N=1），定量坐实。
