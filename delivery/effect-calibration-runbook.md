@@ -160,3 +160,25 @@ floor 已闭环，下一步是 owner 解锁 gpt-image-2 quota 后的 B 段真校
 - **羽化有效**：判官不再抱怨拼接缝（identity 铁线 outside_exact 仍保住，单测 `test_feather_mask_inward_*`）。
 - **校准暴露更深 2 问题**（下一轮真工作，非缝）：① **纯肉毒 case 是坏校准样本**（静止脸无可见效果，保证 tie）→ 校准样本应排除 botox-only 或要求动态表情图；② **HA 填充效果 gpt-image-2 没可靠投出** → 需强化 prompt 强度 / 换 edit 端点 / 调 mask 覆盖。
 - gate_pass 仍 0/3 = 诚实信号（判官区分力强），瓶颈从「缝」下移到「AI 投影质量 + 样本筛选」。
+
+## ✅ 选定配方（2026-06-01，owner 拍板）
+
+经 gpt-image-2 / gemini-3-pro / nano-banana 三模型 × 鼻背/下巴/泪沟多轮对比 + 判官 + owner 人眼裁决：
+
+**主力配方 = gpt-image-2 `/images/edits` + raw-first（`--no-mask-anchor`）**
+```bash
+set -a; source tasks/tuzi_image.local.env; set +a   # gpt-image-2 + images_edit
+python -m backend.scripts.effect_calibration_packet_builder \
+    --api-direct --no-mask-anchor --all-cases --select <case> --n 1 \
+    --output-packet /tmp/effect-cal/packet.json
+python -m backend.scripts.effect_calibration_report --packet-json ... --env-file t54 ...
+```
+
+**owner 审美基准（选型理由）**：gpt-edit raw **最自然、保毛孔质感、微微红润的健康气色** → 医美案例展示要的「真实可信术后感」，不是磨皮塑料感。gemini-3-pro 眼下最干净、nano 居中，但 gpt-edit 的真实质感胜出。
+
+**关键认知**：
+- **raw-first > mask-anchor**：忠实编辑器（gpt-image-2 images_edit）的 raw 是「全脸协调精修」，mask-anchor 只保留孤立治疗区、把协调感抹掉 → 反而像 baseline。owner 人眼推翻了「整帧必漂移、必须 mask 锚定」的旧硬底线假设（gpt-image-2 edit 是忠实的，毛孔/瑕疵/身份都在）。
+- **效果类型决定成败**：泪沟（填平+淡黑眼圈）是清晰可见效果 → 三模型全 PASS；鼻背/下巴在正脸上太微弱 → 难过判官。校准样本应优先清晰效果类型。
+- **判官 vs 人眼**：effect_projection 判官对自然克制的好结果会判 tie（鼻/下巴），与 owner 审美不完全对齐 → 判官「可见效果」阈值需按 owner 审美再校准。
+
+**泪沟 N=1 PASS 实证**：郭若煊（弗缦 HA）gpt-edit raw → judge pass 0.85。N≥6 需再注册泪沟 HA 品牌（盈致/妮凯丽/柯芮琦/薇旖美 owner 确认）。
