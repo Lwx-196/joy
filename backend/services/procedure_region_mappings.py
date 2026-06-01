@@ -36,7 +36,7 @@ STRENGTHS: tuple[str, ...] = (STRENGTH_SUBTLE, STRENGTH_NATURAL, STRENGTH_STRONG
 _STRENGTH_LANG: dict[str, str] = {
     STRENGTH_SUBTLE: "效果克制、细微可辨即可",
     STRENGTH_NATURAL: "效果清晰可见但自然，对标该术式真实可达的术后稳定效果（不保守、不夸张）",
-    STRENGTH_STRONG: "效果明显，达到该术式真实可达的较强一档，但严守下方红线不得过度失真",
+    STRENGTH_STRONG: "效果明显且方向明确、一眼可辨（达到该术式真实可达的较强一档）；宁可偏强也不要保守到看不出变化，但严守下方红线不得过度失真",
 }
 
 
@@ -111,7 +111,7 @@ EFFECT_ROWS: dict[tuple[str, str], dict[str, Any]] = {
         "evidence": "开放标签 N=52 + 综述",
     },
     (PROJECT_HA_FILLER, "鼻背"): {
-        "do_right": "鼻背视觉变直、鼻尖适度抬升、鼻基底支撑",
+        "do_right": "鼻背明显拉高变挺、沿鼻梁中线延伸出一条连续清晰的高光带、鼻尖适度抬升、鼻基底支撑（正面不增宽）",
         "avoid": ["Avatar nose（鼻背增宽、鼻颊界限消失）", "鼻尖过度抬升", "鼻梁过厚"],
         "guardrail": "保守微调；正面不增宽；用量本就最小（均值 0.8mL）；血管高危区，模拟应保守",
         "evidence": "开放标签 N=52 + 综述",

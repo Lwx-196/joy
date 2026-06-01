@@ -170,6 +170,7 @@ def _generate_via_api(baseline_path: Path, prompt: str, *, dst_path: Path) -> Pa
     Raises on any failure (fail-closed: the case is dropped + reported).
     """
     import base64
+    import io
     import json as _json
     import os
     import re
@@ -182,6 +183,7 @@ def _generate_via_api(baseline_path: Path, prompt: str, *, dst_path: Path) -> Pa
         raise RuntimeError("TUZI_IMAGE_PRIMARY_API_KEY not set (--api-direct needs the image provider key)")
     base_url = (os.environ.get("TUZI_IMAGE_PRIMARY_BASE_URL") or "https://api.tu-zi.com/v1").rstrip("/")
     model = (os.environ.get("TUZI_IMAGE_PRIMARY_MODELS") or "gpt-image-2-vip").split(",")[0].strip()
+    api_format = (os.environ.get("TUZI_IMAGE_PRIMARY_API_FORMAT") or "chat").strip().lower()
     timeout = int(os.environ.get("TUZI_IMAGE_PRIMARY_TIMEOUT_MS", "300000")) / 1000.0
 
     with Image.open(baseline_path) as _im:
@@ -190,10 +192,44 @@ def _generate_via_api(baseline_path: Path, prompt: str, *, dst_path: Path) -> Pa
     if max(w, h) > 1536:
         scale = 1536 / max(w, h)
         img = img.resize((max(1, int(w * scale)), max(1, int(h * scale))), Image.LANCZOS)
-    staged_input = dst_path.parent / "_api_input.jpg"
-    img.save(staged_input, "JPEG", quality=92)
-    b64 = base64.b64encode(staged_input.read_bytes()).decode()
 
+    def _save_image(verdict: dict[str, Any]) -> Path:
+        if verdict.get("b64_json"):
+            dst_path.write_bytes(base64.b64decode(verdict["b64_json"]))
+            return dst_path
+        if verdict.get("url"):
+            with urllib.request.urlopen(verdict["url"], timeout=120) as r:  # noqa: S310 - provider asset URL
+                dst_path.write_bytes(r.read())
+            return dst_path
+        raise RuntimeError(f"images endpoint returned no image (model={model}): {str(verdict)[:200]}")
+
+    if api_format == "images_edit":
+        # /images/edits — the dedicated image-EDIT endpoint (base gpt-image-2). It
+        # honours localized edit instructions far better than chat's regenerate.
+        buf = io.BytesIO()
+        img.save(buf, "PNG")
+        boundary = "----effcalEditBoundary7MA4YWxkTrZu0gW"
+        eol = b"\r\n"
+        parts = [
+            (f'--{boundary}\r\nContent-Disposition: form-data; name="image"; '
+             'filename="input.png"\r\nContent-Type: image/png\r\n\r\n').encode() + buf.getvalue() + eol,
+            (f'--{boundary}\r\nContent-Disposition: form-data; name="model"\r\n\r\n{model}').encode() + eol,
+            (f'--{boundary}\r\nContent-Disposition: form-data; name="prompt"\r\n\r\n{prompt}').encode() + eol,
+            (f'--{boundary}\r\nContent-Disposition: form-data; name="n"\r\n\r\n1').encode() + eol,
+            f"--{boundary}--\r\n".encode(),
+        ]
+        req = urllib.request.Request(
+            f"{base_url}/images/edits", data=b"".join(parts),
+            headers={"Authorization": f"Bearer {api_key}",
+                     "Content-Type": f"multipart/form-data; boundary={boundary}"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 - owner-configured endpoint
+            payload = _json.loads(resp.read().decode())
+        return _save_image((payload.get("data") or [{}])[0])
+
+    # chat/completions (default) — multimodal message; model returns an image URL/b64 in content.
+    b64 = base64.b64encode(_jpeg_bytes(img)).decode()
     body = _json.dumps({
         "model": model,
         "max_tokens": 4096,
@@ -226,6 +262,13 @@ def _generate_via_api(baseline_path: Path, prompt: str, *, dst_path: Path) -> Pa
     raise RuntimeError(f"image provider returned no image (model={model}): {content[:200]!r}")
 
 
+def _jpeg_bytes(img: Any) -> bytes:
+    import io
+    buf = io.BytesIO()
+    img.save(buf, "JPEG", quality=92)
+    return buf.getvalue()
+
+
 def _effect_project_api(
     baseline_path: Path,
     focus_targets: list[str],
@@ -239,16 +282,25 @@ def _effect_project_api(
     run_ps_model_router_after_simulation. Raises on no-op (anchored == baseline).
     """
     from backend import ai_generation_adapter as aga
+    from backend.services import procedure_region_mappings as prm
 
+    # STRONG strength: the default NATURAL projected too conservatively (effect not
+    # visible — owner feedback). effect_projection is the "amplify post-op effect"
+    # mode, so push to the strong-but-within-red-line tier.
     prompt = aga.build_after_enhancement_prompt(
         focus_targets, [], None, brand=DEFAULT_BRAND,
         mode=aga.EFFECT_PROJECTION_MODE, effect_pairs=effect_pairs, do_not_touch=do_not_touch,
+        strength=prm.STRENGTH_STRONG,
     )
     raw_ai = _generate_via_api(baseline_path, prompt, dst_path=stage_dir / "generated-raw.png")
+    # Mask must cover ALL treated regions (effect_pairs), not just spec.focus_targets —
+    # else a treated region the AI actually edited (e.g. 鼻背) gets locked back to the
+    # original and the effect is thrown away.
+    mask_regions = list(dict.fromkeys(region for _, region in effect_pairs)) or focus_targets
     anchored = aga._apply_effect_mask_anchor(
         original_path=baseline_path,
         ai_output_path=raw_ai,
-        focus_targets=focus_targets,
+        focus_targets=mask_regions,
         output_path=stage_dir / "after-effect-anchored.png",
     )
     if Path(anchored).read_bytes() == baseline_path.read_bytes():
