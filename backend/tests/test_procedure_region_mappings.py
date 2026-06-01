@@ -84,6 +84,17 @@ def test_frontal_gate_reframes_profile_regions():
     assert "凹陷填平" in tt
 
 
+def test_mechanism_context_injected_per_case():
+    # 机制语境按 case 实际含的机制注入：HA-only → 只 HA 语境
+    ha = prm.compose_effect_prompt([(prm.PROJECT_HA_FILLER, "泪沟")])
+    assert "机制语境：玻尿酸(HA)" in ha and "机制语境：肉毒" not in ha
+    # 混合（肉毒+HA）→ 两条都注入
+    mixed = prm.compose_effect_prompt([(prm.PROJECT_BOTOX, "川字"), (prm.PROJECT_HA_FILLER, "唇")])
+    assert "机制语境：肉毒" in mixed and "机制语境：玻尿酸(HA)" in mixed
+    # 肉毒静态无变化的诚实标注（防 judge 把静态正脸无变化判失败）
+    assert "静止中性正脸可不明显" in mixed
+
+
 def test_effect_row_unknown_pair_is_none():
     # not seeded → None (do NOT fabricate effect language)
     assert prm.effect_row(prm.PROJECT_HA_FILLER, "太阳穴") is None

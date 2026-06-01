@@ -25,7 +25,28 @@ from backend.services import facial_region_atlas as atlas
 # --- 项目类型（成分族）---
 PROJECT_HA_FILLER = "HA_filler"
 PROJECT_BOTOX = "botulinum_toxin"
-PROJECT_TYPES: frozenset[str] = frozenset({PROJECT_HA_FILLER, PROJECT_BOTOX})
+PROJECT_BIOSTIMULATOR = "biostimulator"  # PDLLA/PLLA 胶原刺激剂（艾维岚/童颜针），机制异于 HA
+PROJECT_TYPES: frozenset[str] = frozenset(
+    {PROJECT_HA_FILLER, PROJECT_BOTOX, PROJECT_BIOSTIMULATOR}
+)
+
+# === 机制语境（injection-effect-standards.md §0.1）===
+# 三类机制的术后视觉性质 + 时间锚点完全不同，决定"术后稳定态"怎么画。compose_effect_prompt
+# 按 case 实际含的机制注入对应语境，让模拟用对的时间锚点与视觉语言。
+_MECHANISM_CONTEXT: dict[str, str] = {
+    PROJECT_HA_FILLER: (
+        "玻尿酸(HA)：即刻有真实体积，效果=治疗区局部体积/轮廓塑形；模拟对标术后约 2 周消肿"
+        "稳定态（体积比即刻略收敛），保毛孔真实质感与自然红润健康气色，不磨皮不漂白。"
+    ),
+    PROJECT_BOTOX: (
+        "肉毒：神经调节、无体积、不改肤质；动态纹软化仅在做表情时显现，静止中性正脸可不明显"
+        "（不强求可见变化）；减弱非消除，保留自然表情动度，不磨皮、不僵脸。"
+    ),
+    PROJECT_BIOSTIMULATOR: (
+        "胶原刺激剂(PDLLA/PLLA，如艾维岚/童颜针)：无即刻体积，效果渐进；模拟对标术后 3-6 月"
+        "成熟态 = 整体紧致 / 全局饱满 / 肤质改善的自然年轻化，绝非即刻局部隆起。"
+    ),
+}
 
 # --- 强度档（修正②：默认 natural = 对标真实术后，非保守；上下两档备用）---
 STRENGTH_SUBTLE = "subtle"
@@ -347,6 +368,14 @@ def compose_effect_prompt(
     lines: list[str] = [
         "任务：医美术后效果模拟。严格只强化以下**实际做过**的术式部位，绝不无中生有添加未做的项目。",
     ]
+    # 机制语境：按 case 实际含的机制（HA/肉毒/胶原刺激剂）注入对应时间锚点+视觉性质，
+    # 让模拟用对的"术后稳定态"逻辑（混合机制 case 各注一条）。
+    seen_mechanisms: list[str] = []
+    for project, _region in pairs:
+        if project in _MECHANISM_CONTEXT and project not in seen_mechanisms:
+            seen_mechanisms.append(project)
+    for project in seen_mechanisms:
+        lines.append(f"机制语境：{_MECHANISM_CONTEXT[project]}")
     for project, region in pairs:
         frag = build_effect_prompt_fragment(project, region, strength, view)
         if frag:
