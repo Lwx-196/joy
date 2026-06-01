@@ -10,6 +10,7 @@ import json
 import types
 from pathlib import Path
 
+import pytest
 from PIL import Image
 
 from backend import ai_generation_adapter as adp
@@ -122,3 +123,51 @@ def test_ps_route_fidelity_mode_bc_no_anchor(tmp_path: Path, monkeypatch):
     refs = {r["kind"] for r in res["output_refs"]}
     assert "effect_anchored" not in refs            # 不跑 anchor
     assert res["audit"]["effect_anchored_path"] is None
+
+
+# --- Phase 1: anchor_mode 开关（raw-first 默认给 lane / mask_anchor 默认保 BC）---
+
+def test_ps_route_effect_mode_default_is_mask_anchor_bc(tmp_path: Path, monkeypatch):
+    # 不传 anchor_mode → 默认 mask_anchor（保 BC：既有 effect 行为不变）。
+    after, _ = _wire_fake_ps(monkeypatch, tmp_path, (128, 128, 128), (255, 0, 0))
+    res = adp.run_ps_model_router_after_simulation(
+        job_id=3, after_image_path=after, before_image_path=None,
+        focus_targets=["唇"], brand="fumei",
+        mode=adp.EFFECT_PROJECTION_MODE,
+        effect_pairs=[(prm.PROJECT_HA_FILLER, "唇")],
+    )
+    assert res["audit"]["policy"]["anchor_mode"] == adp.ANCHOR_MODE_MASK
+    assert res["audit"]["policy"]["mask_anchored"] is True
+    assert "effect_anchored" in {r["kind"] for r in res["output_refs"]}
+
+
+def test_ps_route_effect_mode_raw_first_skips_anchor(tmp_path: Path, monkeypatch):
+    # raw-first（owner 配方）：忠实编辑器全脸协调精修，不锚定 → 最终件 = raw AI 整帧。
+    after, _ = _wire_fake_ps(monkeypatch, tmp_path, (128, 128, 128), (255, 0, 0))
+    res = adp.run_ps_model_router_after_simulation(
+        job_id=4, after_image_path=after, before_image_path=None,
+        focus_targets=["唇"], brand="fumei",
+        mode=adp.EFFECT_PROJECTION_MODE, anchor_mode=adp.ANCHOR_MODE_RAW,
+        effect_pairs=[(prm.PROJECT_HA_FILLER, "唇")], do_not_touch=["苹果肌"],
+    )
+    assert res["audit"]["policy"]["simulation_mode"] == adp.EFFECT_PROJECTION_MODE
+    assert res["audit"]["policy"]["anchor_mode"] == adp.ANCHOR_MODE_RAW
+    assert res["audit"]["policy"]["mask_anchored"] is False     # raw-first 不锚定
+    refs = {r["kind"]: r["path"] for r in res["output_refs"]}
+    assert "effect_anchored" not in refs                        # 无锚定产物
+    assert res["audit"]["effect_anchored_path"] is None
+    # 角落仍是 AI 红（未锁回原图灰）→ 证明全帧 raw AI 即交付源
+    raw = Image.open(refs["generated_raw"]).convert("RGB")
+    assert raw.getpixel((5, 5)) == (255, 0, 0)
+
+
+def test_ps_route_invalid_anchor_mode_raises(tmp_path: Path, monkeypatch):
+    # 非法 anchor_mode → 启动期 fail-closed（不浪费 quota）。
+    after, _ = _wire_fake_ps(monkeypatch, tmp_path, (128, 128, 128), (255, 0, 0))
+    with pytest.raises(ValueError):
+        adp.run_ps_model_router_after_simulation(
+            job_id=5, after_image_path=after, before_image_path=None,
+            focus_targets=["唇"], brand="fumei",
+            mode=adp.EFFECT_PROJECTION_MODE, anchor_mode="bogus",
+            effect_pairs=[(prm.PROJECT_HA_FILLER, "唇")],
+        )

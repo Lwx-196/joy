@@ -134,13 +134,17 @@ def _effect_project(
     do_not_touch: list[str],
     *,
     job_id: int,
+    anchor: bool = True,
 ) -> Path:
-    """Real effect projection via the production path (owner gpt-image-2 quota +
-    PS env). Returns the mask-anchored result (identity locked outside treated
-    regions). Raises on provider/PS failure (fail-closed — never a silent no-op).
+    """Real effect projection via the production node PS router (owner gpt-image-2
+    quota + PS env). ``anchor=True`` → mask-anchored result (identity locked outside
+    treated regions); ``anchor=False`` (raw-first, owner-preferred for faithful
+    editors) → raw AI whole-face refinement. Returns the judge candidate
+    (unwatermarked). Raises on provider/PS failure (fail-closed — never a silent no-op).
     """
     from backend import ai_generation_adapter as aga
 
+    anchor_mode = aga.ANCHOR_MODE_MASK if anchor else aga.ANCHOR_MODE_RAW
     result = aga.run_ps_model_router_after_simulation(
         job_id=job_id,
         after_image_path=baseline_path,
@@ -150,14 +154,23 @@ def _effect_project(
         mode=aga.EFFECT_PROJECTION_MODE,
         effect_pairs=effect_pairs,
         do_not_touch=do_not_touch,
+        anchor_mode=anchor_mode,
     )
-    anchored = result.get("effect_anchored_path")
-    if not anchored:
+    # candidate lives in output_refs[kind], NOT a top-level effect_anchored_path key:
+    # mask_anchor → "effect_anchored" (locked-back composite);
+    # raw_first   → "generated_raw" (raw AI whole-face edit).
+    refs = {
+        r["kind"]: r["path"]
+        for r in result.get("output_refs", [])
+        if isinstance(r, dict) and r.get("kind") and r.get("path")
+    }
+    candidate = refs.get("effect_anchored") if anchor else refs.get("generated_raw")
+    if not candidate:
         raise RuntimeError(
-            "effect projection returned no effect_anchored_path "
-            f"(mode/effect_pairs not honoured?): keys={sorted(result)[:8]}"
+            "effect projection returned no candidate "
+            f"(anchor={anchor}, mode/effect_pairs not honoured?): refs={sorted(refs)}"
         )
-    return Path(anchored)
+    return Path(candidate)
 
 
 def _generate_via_api(baseline_path: Path, prompt: str, *, dst_path: Path) -> Path:
@@ -411,7 +424,8 @@ def build_item(
         )
     else:
         produced = _effect_project(
-            baseline_full, spec.focus_targets, effect_pairs, do_not_touch, job_id=job_id
+            baseline_full, spec.focus_targets, effect_pairs, do_not_touch,
+            job_id=job_id, anchor=anchor,
         )
         if produced.read_bytes() == baseline_full.read_bytes():
             raise RuntimeError(
