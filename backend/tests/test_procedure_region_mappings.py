@@ -59,6 +59,16 @@ def test_effect_rows_for_case45_projects():
     assert glab and glab.get("ground_truth_note")
 
 
+def test_ha_filler_region_rows_ported_from_library():
+    # effect-evidence-library §1 行港进 EFFECT_ROWS（grounded 转录，非臆造）：泪沟=Phase 0
+    # 锚点 + 库最常见部位；鼻背令「海魅注射鼻子」类 case 多解析一个 effect pair。
+    for region in ("泪沟", "苹果肌", "鼻基底", "鼻背"):
+        row = prm.effect_row(prm.PROJECT_HA_FILLER, region)
+        assert row is not None, region
+        assert row["do_right"] and isinstance(row["avoid"], list) and row["avoid"]
+        assert row["guardrail"] and row["evidence"]
+
+
 def test_effect_row_unknown_pair_is_none():
     # not seeded → None (do NOT fabricate effect language)
     assert prm.effect_row(prm.PROJECT_HA_FILLER, "太阳穴") is None

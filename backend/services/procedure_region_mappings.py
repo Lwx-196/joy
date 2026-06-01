@@ -89,6 +89,33 @@ EFFECT_ROWS: dict[tuple[str, str], dict[str, Any]] = {
         "guardrail": "E-line 上唇后≈4mm/下唇后≈2mm（族裔差异大）；颏突约平面后 3mm；正脸下巴轮廓自然",
         "evidence": "系统综述 N=2738 + RCT（强）",
     },
+    # 以下 4 行 = effect-evidence-library §1（填充类）已有但此前未港的权威行（逐字转录，
+    # 键对齐 atlas region key；鼻背/鼻基底 共享库「鼻基底/鼻」行）。泪沟=Phase 0 锚点 + 案例库
+    # 最常见部位；鼻背令 海魅注射鼻子 的 case 多解析一个 effect pair。
+    (PROJECT_HA_FILLER, "泪沟"): {
+        "do_right": "凹陷填平、眼下阴影变淡、睑-颊平滑过渡",
+        "avoid": ["Tyndall 蓝灰", "眼下持续浮肿/眼袋", "sunset eyes", "松鼠脸"],
+        "guardrail": "填平到齐平不填出凸度；薄皮肤勿透蓝；单侧仅约 0.45mL",
+        "evidence": "共识（Anido 2021）+ 回顾性 N=155",
+    },
+    (PROJECT_HA_FILLER, "苹果肌"): {
+        "do_right": "颧高点抬升（外上象限）、侧面 Ogee 曲线恢复、法令纹间接变浅",
+        "avoid": ["pillow face/飞碟脸", "花栗鼠颊", "整脸均匀鼓起", "微笑异常前突"],
+        "guardrail": "高点在外上（Hinderer 线交点）非鼻侧；定向投影非弥散膨胀",
+        "evidence": "共识综述（Hinderer 线既定标准）",
+    },
+    (PROJECT_HA_FILLER, "鼻基底"): {
+        "do_right": "鼻背视觉变直、鼻尖适度抬升、鼻基底支撑",
+        "avoid": ["Avatar nose（鼻背增宽、鼻颊界限消失）", "鼻尖过度抬升", "鼻梁过厚"],
+        "guardrail": "保守微调；正面不增宽；用量本就最小（均值 0.8mL）；血管高危区，模拟应保守",
+        "evidence": "开放标签 N=52 + 综述",
+    },
+    (PROJECT_HA_FILLER, "鼻背"): {
+        "do_right": "鼻背视觉变直、鼻尖适度抬升、鼻基底支撑",
+        "avoid": ["Avatar nose（鼻背增宽、鼻颊界限消失）", "鼻尖过度抬升", "鼻梁过厚"],
+        "guardrail": "保守微调；正面不增宽；用量本就最小（均值 0.8mL）；血管高危区，模拟应保守",
+        "evidence": "开放标签 N=52 + 综述",
+    },
     (PROJECT_BOTOX, "额纹"): {
         "do_right": "静止/抬眉横纹变浅减少、额头平顺、保留抬眉动度",
         "avoid": ["frozen 额头", "纹 100% 消失如磨皮", "眉毛下垂", "上睑沉重"],
