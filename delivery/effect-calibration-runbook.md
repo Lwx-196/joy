@@ -24,8 +24,18 @@ case → effect_pairs（parse_procedures + 反臆造 fail-closed）
 
 - 根因：循证库（`procedure_region_mappings`）的 `BRAND_TO_PROJECT` + `(project, region)` evidence_row 覆盖窄。
 - **尤其「泪沟」**（Phase 0 锚点 + 案例库出现最多的部位）**全 skip**——泪沟相关品牌（弗缦/盈致/胶原填充/玻尿酸/妮凯丽…）没注册，或泪沟的 evidence_row 缺失。
-- 结论：**要让 Phase 3.3 校准有统计意义（N≥6），必须先扩循证库覆盖**——加 brand→project 映射 + 泪沟/法令纹/苹果肌/太阳穴/卧蚕 等 region 的 evidence_row。这是 anchored-sim 循证库内容工作，不在本 harness 范围；harness 正确地 fail-closed（反臆造，不给无循证依据的 case 编 effect）。
-- 当前可立即真校验的样本 = 康巧佳（Phase 0 验过）+ 许楚楚 + 蓝凤端（共 3）。
+- 结论：**要让 Phase 3.3 校准有统计意义（N≥6），必须先扩循证库覆盖**——加 brand→project 映射 + 泪沟/法令纹/苹果肌/太阳穴/卧蚕 等 region 的 evidence_row。这是 anchored-sim 循证库内容工作；harness 正确地 fail-closed（反臆造，不给无循证依据的 case 编 effect）。
+- 当前可立即真校验的样本 = 康巧佳（Phase 0 验过）+ 许楚楚（commit aa23b25 港鼻背后 1→2 pair）+ 蓝凤端（共 3）。
+
+### Step 3 进展（commit aa23b25）+ 根因拆分（owner-gated）
+
+- **已做（grounded，0-quota）**：把 effect-evidence-library §1 已有但未港的 4 个 HA 行（泪沟/苹果肌/鼻基底/鼻背）逐字转录进 `EFFECT_ROWS`。**许楚楚 1→2 pair**（海魅鼻子→鼻背），泪沟 Phase-0 锚点就绪待品牌。
+- **🔴 N≥6 真瓶颈 = 品牌→项目注册（owner 权威数据，不可臆造）**：19/22 case 因品牌未注册落 `unknown_segments` → 反臆造 drop。需 owner 给 project+ingredient+time_anchor：
+  - **泪沟 HA 候选**（最高优，泪沟全靠它）：弗缦 / 盈致 / 妮凯丽 / 柯芮琦 / 薇旖美 / 丰颜（"玻尿酸" 字面=HA，owner 确认即可注册）。
+  - **乔雅登（极致/雅致/丰颜）**：HA，多 case（下巴/苹果肌/鼻）。
+  - **需新建项目类型**：胶原（collagen，非 HA，库无 PROJECT_COLLAGEN）/ 普丽妍 T 童颜针（biostimulator）/ 塑公主 / 塑妍萃 / 吉士 — 各需新项目类型 + 自带 evidence row（更大工程）。
+  - **次级门控（区域无 evidence_row）**：法令纹 / 卧蚕 / 下颌线 / 太阳穴 / 口角 / 印堂 — 即便品牌注册仍缺 region row。
+- **Step 2 真校准**与上述独立，仍卡 `TUZI_*` key（shell 当前无）。
 
 ## 两类 quota（必须区分）
 
