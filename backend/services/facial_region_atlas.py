@@ -119,6 +119,18 @@ FACIAL_REGION_ATLAS: dict[str, dict[str, Any]] = {
         "source": "全部=官方 EYEBROW 内端 + 鼻根NOSE(校准实测)",
         "confidence": "calibrated",
     },
+    "额纹": {
+        # 新增 2026-06-01（AI 术后模拟，anchored-simulation Phase 1）：额部横纹(frontalis lines)，
+        # 抬头纹除皱针。与 川字(眉间纵纹) 不同部位：额纹=额部横向、眉上方到发际下方的前额区。
+        # midline 单区（横向带）。额头内部 landmark 稀疏 → confidence=inferred，未叠点校准。
+        "idx": [10, 67, 69, 109, 108, 151, 337, 338, 299, 297, 9, 107, 336],
+        "center_idx": 151,
+        "shape": "ellipse",
+        "rationale": "额部中央横向皱纹带，眉上方到发际下方的前额区；上界face_oval上端(10/67/297/"
+                     "69/299)，下界眉上+鼻根(9/107/336)",
+        "source": "上界=官方FACE_OVAL上端 + 下界=官方EYEBROW内端/鼻根；额头内部点稀疏(社区推断,未叠点校准)",
+        "confidence": "inferred",
+    },
     "太阳穴": {
         # 新增 2026-05-29（Phase 1，真实 4 例）：颞部凹陷填充。眉尾外侧、发际线内的颞窝。
         "left_idx": [251, 284, 298, 276, 300, 383, 368, 389],
@@ -202,6 +214,8 @@ REGION_ALIASES: dict[str, str] = {
     "nose_bridge": "鼻背", "dorsum": "鼻背", "radix": "鼻背",
     "masseter": "咬肌", "瘦脸": "咬肌",
     "川字纹": "川字", "眉间": "川字", "glabella": "川字", "frown": "川字",
+    "抬头": "额纹", "抬头纹": "额纹", "额头": "额纹", "额纹纹": "额纹",
+    "forehead": "额纹", "frontalis": "额纹",
     "temple": "太阳穴", "颞": "太阳穴", "颞部": "太阳穴",
 }
 
@@ -213,6 +227,7 @@ REGION_ALIASES: dict[str, str] = {
 VIEW_FRONT, VIEW_OBLIQUE, VIEW_PROFILE = "front", "oblique", "profile"
 REGION_VIEWS: dict[str, list[str]] = {
     "川字": [VIEW_FRONT],
+    "额纹": [VIEW_FRONT],                    # 额部横纹正面看全（抬眉时动态显影）
     "泪沟": [VIEW_FRONT, VIEW_OBLIQUE],      # 眶下阴影正面(侧光)，斜看辅助 (A.S.S.E.S.S.)
     "卧蚕": [VIEW_FRONT],
     "眼袋": [VIEW_FRONT],
@@ -240,7 +255,7 @@ SIG_LINE = "line"            # 动态皱纹松解
 SIG_WIDTH = "width"          # 瘦脸宽度变窄（方→V）
 SIG_VOLUME = "volume"        # 形态/容量
 REGION_EFFECTS: dict[str, str] = {
-    "川字": SIG_LINE, "泪沟": SIG_SHADOW, "卧蚕": SIG_VOLUME, "眼袋": SIG_SHADOW,
+    "川字": SIG_LINE, "额纹": SIG_LINE, "泪沟": SIG_SHADOW, "卧蚕": SIG_VOLUME, "眼袋": SIG_SHADOW,
     "唇": SIG_VOLUME, "鼻基底": SIG_VOLUME, "鼻翼": SIG_VOLUME,
     "鼻尖": SIG_HIGHLIGHT, "鼻背": SIG_HIGHLIGHT, "下巴": SIG_HIGHLIGHT, "苹果肌": SIG_HIGHLIGHT,
     "法令纹": SIG_SHADOW, "颧骨": SIG_OGEE, "面颊": SIG_OGEE,
@@ -253,7 +268,7 @@ REGION_EFFECTS: dict[str, str] = {
 # 见 delivery/region-view-effect-knowledge.md。
 ZONE_LIGHT, ZONE_SHADOW, ZONE_TRANSITION = "light", "shadow", "transition"
 REGION_ZONES: dict[str, str] = {
-    "川字": ZONE_LIGHT, "泪沟": ZONE_LIGHT, "卧蚕": ZONE_LIGHT, "眼袋": ZONE_SHADOW,
+    "川字": ZONE_LIGHT, "额纹": ZONE_LIGHT, "泪沟": ZONE_LIGHT, "卧蚕": ZONE_LIGHT, "眼袋": ZONE_SHADOW,
     "唇": ZONE_LIGHT, "鼻基底": ZONE_LIGHT, "鼻翼": ZONE_LIGHT, "鼻尖": ZONE_LIGHT,
     "鼻背": ZONE_LIGHT,                                          # T 区高光脊
     "下巴": ZONE_LIGHT, "苹果肌": ZONE_LIGHT, "法令纹": ZONE_LIGHT,
@@ -270,6 +285,7 @@ REGION_TIERS: dict[str, str] = {
     "咬肌": TIER_CONTOUR, "颧骨": TIER_CONTOUR, "鼻尖": TIER_CONTOUR,  # 轮廓/投影结构
     "鼻背": TIER_CONTOUR,                                        # 鼻梁投影=轮廓骨架
     "泪沟": TIER_REFINEMENT, "法令纹": TIER_REFINEMENT, "川字": TIER_REFINEMENT,
+    "额纹": TIER_REFINEMENT,                                     # 抬头纹松解=精细化
     "唇": TIER_REFINEMENT, "卧蚕": TIER_REFINEMENT, "眼袋": TIER_REFINEMENT,
     "鼻基底": TIER_REFINEMENT, "鼻翼": TIER_REFINEMENT,          # 精细化
 }

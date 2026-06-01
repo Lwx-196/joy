@@ -403,13 +403,52 @@ def _finalize_prompt(prompt_body: str, model_name: str | None = None) -> str:
     )
 
 
+# build_after_enhancement_prompt 的两种哲学：
+#   fidelity          = 保真/轻量局部增强（旧默认，BC）——「不许变」
+#   effect_projection = 术后效果放大（anchored-simulation 产品线）——「按术式精准放大」
+# 走循证 prompt 库 procedure_region_mappings，强度非默认保守 + 过度失真上护栏 + 身份铁律。
+FIDELITY_MODE = "fidelity"
+EFFECT_PROJECTION_MODE = "effect_projection"
+
+
 def build_after_enhancement_prompt(
     focus_targets: list[str],
     focus_regions: list[dict[str, Any]],
     model_name: str | None = None,
     brand: str = "fumei",
+    *,
+    mode: str = FIDELITY_MODE,
+    effect_pairs: list[tuple[str, str]] | None = None,
+    do_not_touch: list[str] | None = None,
+    strength: str | None = None,
+    scenario_note: str | None = None,
 ) -> str:
-    """Build a detailed prompt for post-simulation image enhancement."""
+    """Build a detailed prompt for post-simulation image enhancement.
+
+    ``mode`` (默认 ``fidelity`` = 旧保真哲学，逐字 BC)：
+      - ``fidelity``          → 保真/轻量局部增强（不许变；damping + 保真锁）。
+      - ``effect_projection`` → 术后效果放大，走循证 prompt 库
+        (``procedure_region_mappings.compose_effect_prompt``)：按 ``effect_pairs``
+        =[(项目类型, 部位)…] 逐部位注循证方向 + 过度失真红线 + 强度(默认 natural 非保守)
+        + ``do_not_touch`` 不外扩 + 身份铁律。空间约束由 mask 锚定 composite 强制(本函数只出文字)。
+        ``effect_pairs`` 缺失 → 回退 fidelity(BC-safe，不崩不空)。
+    """
+    if mode == EFFECT_PROJECTION_MODE:
+        pairs = effect_pairs or []
+        if pairs:
+            from .services import procedure_region_mappings as prm
+
+            return prm.compose_effect_prompt(
+                pairs,
+                strength=strength or prm.STRENGTH_NATURAL,
+                do_not_touch=do_not_touch,
+                scenario_note=scenario_note,
+            )
+        LOGGER.warning(
+            "build_after_enhancement_prompt: effect_projection mode requested without "
+            "effect_pairs; falling back to fidelity prompt (BC-safe)"
+        )
+
     is_md = (brand == "meiji_ai" or brand == "md_ai")
     persona = MD_DIRECTOR_PROMPT if is_md else ""
 
@@ -3503,6 +3542,51 @@ def run_comfyui_local_after_simulation(
     }
 
 
+def _apply_effect_mask_anchor(
+    *,
+    original_path: Path,
+    ai_output_path: Path,
+    focus_targets: list[str],
+    output_path: Path,
+) -> Path:
+    """effect_projection 硬底线：AI 整帧输出 → 只锁回治疗区，mask 外字节级 == 原图.
+
+    用 separate-ellipse 焦点 mask（每治疗区单独成椭圆真并集，区间留黑）+ ``Image.composite``
+    把 gpt-image-2 整脸漂移（瘦脸/磨皮/换脸）锁回原图，身份完全保住，只有治疗区是 AI 效果。
+
+    失败安全（与本模块 K-1 silent-fail 一致）：任何步骤异常 → 返回原始 AI 输出（不阻断交付），记日志。
+    """
+    try:
+        from .services.focal_mask_generator import generate_focus_mask
+        from .services.mask_anchor_composite import mask_anchor_composite
+
+        mask_path = generate_focus_mask(
+            original_path,
+            focus_targets,
+            output_path=output_path.parent / ".effect-focus-mask.png",
+            separate_ellipses=True,
+        )
+        result = mask_anchor_composite(
+            original_path, ai_output_path, mask_path, output_path, strict=False,
+        )
+        if not result.outside_exact:
+            LOGGER.warning(
+                "effect mask-anchor: pixels changed outside mask for %s; using composite anyway",
+                original_path.name,
+            )
+        LOGGER.info(
+            "effect mask-anchor: %s coverage=%.1f%% changed=%.1f%% outside_exact=%s",
+            output_path.name, result.coverage_pct, result.changed_pct, result.outside_exact,
+        )
+        return result.output_path
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.warning(
+            "effect mask-anchor failed for %s (%s); returning raw AI output",
+            original_path.name, exc,
+        )
+        return ai_output_path
+
+
 def run_ps_model_router_after_simulation(
     *,
     job_id: int,
@@ -3514,6 +3598,10 @@ def run_ps_model_router_after_simulation(
     note: str | None = None,
     style_reference_image_paths: list[Path] | None = None,
     brand: str = "fumei",
+    mode: str = FIDELITY_MODE,
+    effect_pairs: list[tuple[str, str]] | None = None,
+    do_not_touch: list[str] | None = None,
+    strength: str | None = None,
 ) -> dict[str, Any]:
     if stress.is_stress_mode() and not stress.allow_external_ai():
         return _run_stress_stub_after_simulation(
@@ -3531,7 +3619,10 @@ def run_ps_model_router_after_simulation(
     output_dir = simulation_job_dir(job_id)
     output_dir.mkdir(parents=True, exist_ok=True)
     focus_regions = focus_regions or []
-    prompt = build_after_enhancement_prompt(focus_targets, focus_regions, model_name, brand=brand)
+    prompt = build_after_enhancement_prompt(
+        focus_targets, focus_regions, model_name, brand=brand,
+        mode=mode, effect_pairs=effect_pairs, do_not_touch=do_not_touch, strength=strength,
+    )
     cmd = [
         "node",
         str(PS_ENHANCE_SCRIPT),
@@ -3591,12 +3682,24 @@ def run_ps_model_router_after_simulation(
     if not _same_path(generated, raw_generated_path):
         shutil.copyfile(generated, raw_generated_path)
     generated = raw_generated_path
+    # effect_projection 硬底线：AI 整帧输出 → 只锁回治疗区，mask 外字节级 == 原图（身份保护）。
+    # fidelity 模式 final_source 即 raw AI（generated），下游 watermark/heatmap 逐字 BC。
+    final_source = generated
+    effect_anchored_path: Path | None = None
+    if mode == EFFECT_PROJECTION_MODE:
+        final_source = _apply_effect_mask_anchor(
+            original_path=after_image_path,
+            ai_output_path=generated,
+            focus_targets=focus_targets,
+            output_path=output_dir / "after-effect-anchored.png",
+        )
+        effect_anchored_path = final_source
     final_path = output_dir / f"after-ai-enhanced{ext}"
-    watermarked, watermark_error = _copy_with_watermark(generated, final_path)
+    watermarked, watermark_error = _copy_with_watermark(final_source, final_path)
     heatmap_path = output_dir / "difference-heatmap.png"
     difference_analysis = _create_difference_heatmap(
         after_image_path,
-        generated,
+        final_source,
         heatmap_path,
         focus_regions,
     )
@@ -3620,6 +3723,7 @@ def run_ps_model_router_after_simulation(
         "router_selected_generated_path": raw.get(generated_source),
         "selected_generated_path": str(generated),
         "selected_generated_source": generated_source,
+        "effect_anchored_path": str(effect_anchored_path) if effect_anchored_path else None,
         "stabilization": raw.get("stabilization"),
         "started_at": started,
         "finished_at": finished,
@@ -3635,6 +3739,8 @@ def run_ps_model_router_after_simulation(
             "non_target_policy": "preserve-no-global-retouch" if focus_regions else "whole-image-light-retouch",
             "mix_with_real_case": False,
             "can_publish_default": False,
+            "simulation_mode": mode,
+            "mask_anchored": mode == EFFECT_PROJECTION_MODE,
         },
     }
     (output_dir / "audit.json").write_text(json.dumps(audit, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -3643,6 +3749,11 @@ def run_ps_model_router_after_simulation(
         "output_refs": [
             {"kind": "ai_after_simulation", "path": str(final_path), "watermarked": watermarked},
             {"kind": "generated_raw", "path": str(generated), "watermarked": False},
+            *(
+                [{"kind": "effect_anchored", "path": str(effect_anchored_path), "watermarked": False}]
+                if effect_anchored_path
+                else []
+            ),
             {"kind": "original_after", "path": original_after, "watermarked": False},
             *(
                 [{"kind": "before_reference", "path": original_before, "watermarked": False}]
@@ -3672,8 +3783,14 @@ def run_after_simulation(
     style_reference_image_paths: list[Path] | None = None,
     brand: str = "fumei",
     case_id: int | None = None,
+    mode: str = FIDELITY_MODE,
+    effect_pairs: list[tuple[str, str]] | None = None,
+    do_not_touch: list[str] | None = None,
+    strength: str | None = None,
 ) -> dict[str, Any]:
     if provider == COMFYUI_PROVIDER:
+        # effect_projection 暂只在 PS(gpt-image-2) 路线落地（plan 2.3 已验证路线）；
+        # ComfyUI 路线的 effect 接通 = 2.3 deferred，故此处不传 effect 参数。
         return run_comfyui_local_after_simulation(
             job_id=job_id,
             after_image_path=after_image_path,
@@ -3697,5 +3814,9 @@ def run_after_simulation(
             note=note,
             style_reference_image_paths=style_reference_image_paths,
             brand=brand,
+            mode=mode,
+            effect_pairs=effect_pairs,
+            do_not_touch=do_not_touch,
+            strength=strength,
         )
     raise ValueError(f"unsupported simulation provider: {provider}")

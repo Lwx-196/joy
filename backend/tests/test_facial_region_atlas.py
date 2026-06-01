@@ -84,6 +84,24 @@ def test_nasal_dorsum_region_and_aliases():
     assert atlas.resolve_region_key("鼻尖") == "鼻尖"
 
 
+def test_forehead_region_and_aliases():
+    # 额纹(frontalis 横纹) — AI 术后模拟 case45 衡力"抬头"术式的部位，atlas 旧缺。
+    # 与 川字(眉间纵纹) 是不同部位：额纹=额部横纹，川字=眉间纵纹。
+    assert "额纹" in atlas.FACIAL_REGION_ATLAS
+    assert atlas.region_landmark_groups("额纹"), "额纹 has no groups"
+    assert atlas.region_shape("额纹") in {"ellipse", "ribbon", "polygon"}
+    # 抬头/额头/抬头纹 → 额纹（case45 文件名用「抬头」）
+    assert atlas.resolve_region_key("抬头") == "额纹"
+    assert atlas.resolve_region_key("额头") == "额纹"
+    assert "额纹" in atlas.extract_regions("衡力20抬头、川字")
+    # 抬头 与 川字 都命中且不互相吞并
+    got = atlas.extract_regions("衡力20抬头、川字")
+    assert "额纹" in got and "川字" in got
+    # 额纹 = 横纹松解 → SIG_LINE, 正面可见
+    assert atlas.region_effect("额纹") == atlas.SIG_LINE
+    assert atlas.region_views("额纹")[0] == atlas.VIEW_FRONT
+
+
 # high = 官方 connections 索引; inferred = 社区图待校准;
 # calibrated = Phase 1 真实正脸叠点校准过; uncalibrated-unused = 真实语料 0 例、暂不重做
 _VALID_CONFIDENCE = {"high", "inferred", "calibrated", "uncalibrated-unused"}
