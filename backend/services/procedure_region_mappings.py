@@ -1,0 +1,291 @@
+"""术式品牌 → 项目类型 → 部位 → 循证效果 映射表 + 效果 prompt 库.
+
+把 Phase 0 验证草稿（procedure_mapping.draft.json，case45 双场景 judge 全过）固化为生产模块，
+作 anchored-simulation 产品线 Phase 1 的数据地基（prompt 库 + Phase 3 judge 共用）。
+
+最高纪律（见 ~/.claude/plans/anchored-simulation.md §0.0；用户连拦两次「全脸综合变美」）：
+- 反臆造：L1 品牌→项目 **仅录人工权威条目**（用户 + 循证库），禁 LLM 推断成分/项目。
+  每条记 source + confidence。（反例：探查时一个 agent 把「海魅」瞎填成 Radiesse/PLLA。）
+- fail-closed：未知品牌 → 不猜 → ``resolve_brand`` 返回 None，``parse_procedures`` 置
+  ``needs_human_review``，调用方须人工核对，不得静默绑定。
+- 精准对应：做几项只强化几项。``parse_procedures`` 只产出明确命中的术式/部位；
+  未做的部位走 ``do_not_touch``，绝不无中生有。
+- 强度非默认保守（修正②）：默认档 = 对标真实术后效果的「可见自然」，上护栏 = 不命中过度失真清单。
+
+循证依据：effect-evidence-library.md §1 填充 / §2 除皱提升。部位键对齐
+``facial_region_atlas.FACIAL_REGION_ATLAS``（SSoT）。
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from backend.services import facial_region_atlas as atlas
+
+# --- 项目类型（成分族）---
+PROJECT_HA_FILLER = "HA_filler"
+PROJECT_BOTOX = "botulinum_toxin"
+PROJECT_TYPES: frozenset[str] = frozenset({PROJECT_HA_FILLER, PROJECT_BOTOX})
+
+# --- 强度档（修正②：默认 natural = 对标真实术后，非保守；上下两档备用）---
+STRENGTH_SUBTLE = "subtle"
+STRENGTH_NATURAL = "natural"
+STRENGTH_STRONG = "strong"
+STRENGTHS: tuple[str, ...] = (STRENGTH_SUBTLE, STRENGTH_NATURAL, STRENGTH_STRONG)
+
+_STRENGTH_LANG: dict[str, str] = {
+    STRENGTH_SUBTLE: "效果克制、细微可辨即可",
+    STRENGTH_NATURAL: "效果清晰可见但自然，对标该术式真实可达的术后稳定效果（不保守、不夸张）",
+    STRENGTH_STRONG: "效果明显，达到该术式真实可达的较强一档，但严守下方红线不得过度失真",
+}
+
+
+# === L1：品牌 → 项目类型 + 时间锚（人工权威，反臆造）===
+# time_anchor 键：即刻 / 消肿|起效 / 稳定代表态|峰值 / 维持 —— 用于场景化 prompt 的时间语境。
+BRAND_TO_PROJECT: dict[str, dict[str, Any]] = {
+    "海魅": {
+        "project": PROJECT_HA_FILLER,
+        "project_cn": "玻尿酸填充",
+        "ingredient": "玻尿酸(HA)",
+        "time_anchor": {
+            "即刻": "偏满偏肿（HA 亲水吸水 + 注入体积已在 + 针孔泛红）",
+            "消肿": "1-2 周",
+            "稳定代表态": "3-4 周，体积比即刻略收敛",
+            "维持": "HA 约 6-12 月",
+        },
+        "source": "user_authoritative + effect-evidence-library §0.1/§1",
+        "confidence": "high",
+    },
+    "衡力": {
+        "project": PROJECT_BOTOX,
+        "project_cn": "肉毒除皱",
+        "ingredient": "A 型肉毒毒素",
+        "time_anchor": {
+            "即刻": "零变化（仅针孔泛红）",
+            "起效": "1-3 天",
+            "峰值": "1-2 周",
+            "维持": "上面部纹 3-4 月 / 眉间 4-6 月",
+            "范式": "neuromodulation 减弱非麻痹，保表情",
+        },
+        "source": "user_authoritative + effect-evidence-library §0.1/§2",
+        "confidence": "high",
+    },
+}
+
+
+# === L3：(项目类型, 部位) → 循证效果行 ===
+# do_right=做对方向 / avoid=过度失真红线 / guardrail=量化护栏 / evidence=文献强度 /
+# ground_truth_note=诚实标注无照片 GT（仅循证预测）。键中的部位对齐 atlas region key。
+EFFECT_ROWS: dict[tuple[str, str], dict[str, Any]] = {
+    (PROJECT_HA_FILLER, "唇"): {
+        "do_right": "唇珠形成、唇红缘清晰、丘比特弓保留、垂直唇高适度增加、自然丰盈",
+        "avoid": ["香肠唇/鸭嘴", "球状僵硬", "唇缘消失", "口角下垂", "人中堆量", "侧面过度前突"],
+        "guardrail": "上下唇比 1:1~1:1.6 区间（族裔差异，无单一值）；保唇可动；保持唇闭合自然",
+        "evidence": "偏好研究 N=570 + 专家共识",
+    },
+    (PROJECT_HA_FILLER, "下巴"): {
+        "do_right": "前突度增加、下庭比例改善、侧面接近 E-line、下颌缘略顺",
+        "avoid": ["巫婆下巴(过尖前突)", "桌山方块感", "表面纤维化/鹅卵石"],
+        "guardrail": "E-line 上唇后≈4mm/下唇后≈2mm（族裔差异大）；颏突约平面后 3mm；正脸下巴轮廓自然",
+        "evidence": "系统综述 N=2738 + RCT（强）",
+    },
+    (PROJECT_BOTOX, "额纹"): {
+        "do_right": "静止/抬眉横纹变浅减少、额头平顺、保留抬眉动度",
+        "avoid": ["frozen 额头", "纹 100% 消失如磨皮", "眉毛下垂", "上睑沉重"],
+        "guardrail": "减弱非消除；保额头自然皮肤纹理；眉位不下压",
+        "evidence": "RCT + 共识（强）",
+        "ground_truth_note": "case45 术后即刻照=零变化，botox 效果无照片 GT，纯循证预测",
+    },
+    (PROJECT_BOTOX, "川字"): {
+        "do_right": "眉间竖纹变浅/消失、眉间舒展、眉形对称",
+        "avoid": ["Mephisto/Spock 八字挑眉", "上睑下垂", "眉形怪异"],
+        "guardrail": "眉间放松平顺；不抬外侧眉；保眉自然形",
+        "evidence": "多 RCT + Cochrane（极强）",
+        "ground_truth_note": "无照片 GT，纯循证预测",
+    },
+}
+
+
+# === 身份/真实性铁律（效果 prompt 的不变前缀；改的是治疗区，保的是同一人）===
+IDENTITY_LOCKS: tuple[str, ...] = (
+    "保持同一人：脸型/骨架/眼型/鼻/耳/发际/肤色/毛孔/痣/痘印等永久特征 100% 不变，"
+    "看起来像同一机位拍的原始照片。",
+    "只在下列治疗部位内做改变，其余区域（含背景/服装/头发/未做的部位）严禁改动，"
+    "仅允许治疗区边缘自然羽化过渡。",
+    "不磨皮、不美白、不换脸、不改年龄感；保留真实皮肤纹理与永久瑕疵（痘印是永久特征要留）。",
+    "保持原姿态、构图、镜头视角、光照不变。",
+)
+
+
+def resolve_brand(brand: str) -> dict[str, Any] | None:
+    """品牌 → 项目映射（反臆造 + fail-closed）。
+
+    仅命中人工权威条目才返回（exact 或品牌名作为子串）；未知品牌返回 None，
+    调用方须标人工核对，**绝不**推断成分/项目。
+    """
+    key = (brand or "").strip()
+    if not key:
+        return None
+    if key in BRAND_TO_PROJECT:
+        return dict(BRAND_TO_PROJECT[key])
+    for known, spec in BRAND_TO_PROJECT.items():
+        if known in key:
+            return dict(spec)
+    return None
+
+
+def effect_row(project: str, region_key: str) -> dict[str, Any] | None:
+    """(项目类型, 部位) → 循证效果行；未登记返回 None（不得编造效果语言）。"""
+    row = EFFECT_ROWS.get((project, region_key))
+    return dict(row) if row is not None else None
+
+
+def parse_procedures(raw: str) -> dict[str, Any]:
+    """把术式目录名（如「2025.10.29衡力20抬头、川字、海魅1.0ml注射唇、下巴」）解析为结构化术式。
+
+    算法：定位已知品牌出现位置 → 每个品牌「拥有」从它的位置到下一个品牌位置之间的文本段
+    → 段内用 atlas.extract_regions 抽部位。
+    纪律：
+    - 只有**已知品牌**才进 ``procedures``（带 brand→project 绑定）；
+    - 任何无品牌归属的部位文本（首个品牌之前的前缀 / 全程无已知品牌）进 ``unknown_segments``
+      并置 ``needs_human_review``（反臆造 fail-closed，绝不给无品牌的部位猜项目）。
+
+    返回 dict：``raw`` / ``procedures``[{brand,project,project_cn,regions,segment}] /
+    ``unknown_segments``[{segment,regions}] / ``all_regions``(去重,首见序) / ``needs_human_review``。
+    """
+    text = (raw or "").strip()
+    result: dict[str, Any] = {
+        "raw": text,
+        "procedures": [],
+        "unknown_segments": [],
+        "all_regions": [],
+        "needs_human_review": False,
+    }
+    if not text:
+        result["needs_human_review"] = True
+        return result
+
+    seen_regions: list[str] = []
+
+    def collect(segment: str) -> list[str]:
+        regs: list[str] = []
+        for r in atlas.extract_regions(segment):
+            if r not in regs:
+                regs.append(r)
+            if r not in seen_regions:
+                seen_regions.append(r)
+        return regs
+
+    # 定位所有已知品牌出现位置
+    hits: list[tuple[int, str]] = []
+    for brand in BRAND_TO_PROJECT:
+        pos = text.find(brand)
+        while pos != -1:
+            hits.append((pos, brand))
+            pos = text.find(brand, pos + 1)
+    hits.sort(key=lambda h: h[0])
+
+    if not hits:
+        regs = collect(text)
+        result["unknown_segments"].append({"segment": text, "regions": regs})
+        result["needs_human_review"] = True
+        result["all_regions"] = list(seen_regions)
+        return result
+
+    # 首个品牌之前的前缀：若含部位但无品牌 → 无归属，标人工
+    prefix = text[: hits[0][0]]
+    prefix_regs = collect(prefix)
+    if prefix_regs:
+        result["unknown_segments"].append({"segment": prefix, "regions": prefix_regs})
+        result["needs_human_review"] = True
+
+    # 每个品牌拥有 [pos, next_pos) 文本段
+    for i, (pos, brand) in enumerate(hits):
+        end = hits[i + 1][0] if i + 1 < len(hits) else len(text)
+        segment = text[pos:end]
+        spec = BRAND_TO_PROJECT[brand]
+        result["procedures"].append({
+            "brand": brand,
+            "project": spec["project"],
+            "project_cn": spec["project_cn"],
+            "regions": collect(segment),
+            "segment": segment,
+        })
+
+    result["all_regions"] = list(seen_regions)
+    return result
+
+
+def build_effect_prompt_fragment(
+    project: str, region_key: str, strength: str = STRENGTH_NATURAL
+) -> str | None:
+    """单部位循证效果 prompt 片段（prompt 库核心单元）。
+
+    组成：方向（做对）+ 强度语 + 红线（避免过度失真）+ 量化护栏 [+ 无 GT 诚实备注]。
+    未登记 (项目,部位) → None（fail-closed，不编造效果语言）。
+    """
+    row = effect_row(project, region_key)
+    if row is None:
+        return None
+    strength_lang = _STRENGTH_LANG.get(strength, _STRENGTH_LANG[STRENGTH_NATURAL])
+    avoid = "；".join(row["avoid"])
+    parts = [
+        f"【{region_key}】方向：{row['do_right']}。",
+        f"强度：{strength_lang}。",
+        f"红线（避免过度失真）：{avoid}。",
+        f"护栏：{row['guardrail']}。",
+    ]
+    note = row.get("ground_truth_note")
+    if note:
+        parts.append(f"备注（循证预测，无照片 GT）：{note}。")
+    return " ".join(parts)
+
+
+def _pairs_from(source: Any) -> list[tuple[str, str]]:
+    """从 parse_procedures 结果 或 [(project, region), ...] 列表 抽取 (项目, 部位) 对。"""
+    if isinstance(source, dict) and "procedures" in source:
+        pairs: list[tuple[str, str]] = []
+        for proc in source["procedures"]:
+            project = proc.get("project")
+            for region in proc.get("regions", []):
+                pairs.append((project, region))
+        return pairs
+    return [(p, r) for p, r in source]
+
+
+def compose_effect_prompt(
+    source: Any,
+    *,
+    strength: str = STRENGTH_NATURAL,
+    do_not_touch: list[str] | None = None,
+    scenario_note: str | None = None,
+) -> str:
+    """把多部位循证片段 + 身份铁律 + do_not_touch 组装成完整效果 prompt（prompt 库输出）。
+
+    ``source`` = parse_procedures 结果 或 [(project, region), ...]。
+    ``do_not_touch`` = 未做的部位（精准对应 + 不外扩，修正③：协调但只在做了的部位内）。
+    """
+    pairs = _pairs_from(source)
+    lines: list[str] = [
+        "任务：医美术后效果模拟。严格只强化以下**实际做过**的术式部位，绝不无中生有添加未做的项目。",
+    ]
+    for project, region in pairs:
+        frag = build_effect_prompt_fragment(project, region, strength)
+        if frag:
+            lines.append(frag)
+    if do_not_touch:
+        lines.append(f"绝对不要改动（未做的项目/部位）：{'、'.join(do_not_touch)}。")
+    if scenario_note:
+        lines.append(scenario_note)
+    lines.append("身份与真实性铁律：")
+    lines.extend(f"- {lock}" for lock in IDENTITY_LOCKS)
+    return "\n".join(lines)
+
+
+__all__ = [
+    "PROJECT_HA_FILLER", "PROJECT_BOTOX", "PROJECT_TYPES",
+    "STRENGTH_SUBTLE", "STRENGTH_NATURAL", "STRENGTH_STRONG", "STRENGTHS",
+    "BRAND_TO_PROJECT", "EFFECT_ROWS", "IDENTITY_LOCKS",
+    "resolve_brand", "effect_row", "parse_procedures",
+    "build_effect_prompt_fragment", "compose_effect_prompt",
+]
