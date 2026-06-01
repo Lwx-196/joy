@@ -126,3 +126,23 @@ floor 已闭环，下一步是 owner 解锁 gpt-image-2 quota 后的 B 段真校
 - **重验**：同一 stub packet（3 items）+ 真 judge t54 → `gate_pass 0/3 (0.0%)`，`verdict={'fail':3}`，`winner={'(none)':3}`，全部 `no_visible_change`，**判官从未被调用**。对比 Step 1 的幻觉假 pass/0.85 = 决定性闭环。
 - **测试**：gate +4 no_visible_change 用例 + report +1 floor 用例（report 聚合测试改用视觉不同 candidate 走判官路径）；全量 1268 passed / 3 skip / 0 regression / ruff clean。
 - **判官 prompt 强化（原 B）= 不做**：判官已证实无视现有 no-change 指令，确定性预检（A）才是可靠兜底；强化 prompt 收益低，略。
+
+## Step 2 真校准已跑（2026-06-01，N=3，Phase 3 Exit 达成）
+
+> owner 解锁 gpt-image-2 key。出图通路有坑（见下），用 `--api-direct` 绕过，**首次真 effect-projection 端到端跑通**。报告存档 `delivery/effect-calibration-report-n3.md`。
+
+### 出图通路坑 + 解法（`--api-direct`）
+- **node undici 被本地 Clash 代理 socket-reset**（UND_ERR_SOCKET/ECONNRESET），凡携带图片的请求 TLS 层即崩；curl/Python urllib 能穿透（切 Vless/TCP 稳定节点后 Python 稳）。3 家 provider × 3 客户端 × 多尺寸交叉验证 = 环境级，非 key/provider/代码问题。
+- **新增 `--api-direct`**：AI 出图改用 Python urllib（替掉坏的 node HTTP 那一跳，唯一改动），**prompt 与 `_apply_effect_mask_anchor` 仍是生产代码**。读同款 `TUZI_IMAGE_PRIMARY_*` env。默认关，生产 node 路径不变。
+- 真校准命令：`--api-direct --all-cases --n 3`（出图）→ `effect_calibration_report --env-file t54`（判官）。
+
+### N=3 结果（gate_pass 0/3，但这是诚实信号）
+| case | winner | conf | 判官理由 |
+|---|---|---|---|
+| 康巧佳 | baseline | 0.85 | 下巴明显圆形 patch 拼接痕迹，违反无缝编辑 |
+| 蓝凤端 | baseline | 0.80 | 额头可见 mask 边界 |
+| 许楚楚 | tie | 0.85 | candidate 与 baseline 无可见变化（AI 没改出效果）|
+
+- **Phase 3 Exit 达成**：判官 4-criteria **区分力确认**——精准分辨 mask 拼接缝 artifact vs AI 无效果，非 Step 1 幻觉橡皮章（floor 修复有效：许楚楚无变化被正确判 tie）。
+- **🔴 真发现**：当前 `_apply_effect_mask_anchor` 的 separate-ellipse mask 合成留下**可见圆形/边界缝**（2/3 case 因此 fail）→ anchored-sim 下一轮真问题 = **羽化 mask 边缘**（feather），而非判官或出图。许楚楚的 tie = 下巴/鼻背 HA 效果 AI 没投出来（subtle，或 prompt 强度不足）。
+- 凭证：tu-zi key 在 gitignored `tasks/tuzi_image.local.env`（跑完轮换）；判官 t54 ADC。

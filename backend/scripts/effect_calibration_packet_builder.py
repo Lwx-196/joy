@@ -160,12 +160,109 @@ def _effect_project(
     return Path(anchored)
 
 
+def _generate_via_api(baseline_path: Path, prompt: str, *, dst_path: Path) -> Path:
+    """Python-side image generation — a TRANSPORT-ONLY divergence from the node PS
+    router. node undici's sockets die through the local proxy (UND_ERR_SOCKET /
+    ECONNRESET) while Python urllib streams the large image-edit request through
+    fine; so under --api-direct the AI edit call is made here via urllib. The
+    production prompt and the `_apply_effect_mask_anchor` identity lock downstream
+    are unchanged. Reads the same TUZI_IMAGE_PRIMARY_* env the node provider uses.
+    Raises on any failure (fail-closed: the case is dropped + reported).
+    """
+    import base64
+    import json as _json
+    import os
+    import re
+    import urllib.request
+
+    from PIL import Image, ImageOps
+
+    api_key = os.environ.get("TUZI_IMAGE_PRIMARY_API_KEY", "").strip()
+    if not api_key:
+        raise RuntimeError("TUZI_IMAGE_PRIMARY_API_KEY not set (--api-direct needs the image provider key)")
+    base_url = (os.environ.get("TUZI_IMAGE_PRIMARY_BASE_URL") or "https://api.tu-zi.com/v1").rstrip("/")
+    model = (os.environ.get("TUZI_IMAGE_PRIMARY_MODELS") or "gpt-image-2-vip").split(",")[0].strip()
+    timeout = int(os.environ.get("TUZI_IMAGE_PRIMARY_TIMEOUT_MS", "300000")) / 1000.0
+
+    with Image.open(baseline_path) as _im:
+        img = ImageOps.exif_transpose(_im).convert("RGB")
+    w, h = img.size
+    if max(w, h) > 1536:
+        scale = 1536 / max(w, h)
+        img = img.resize((max(1, int(w * scale)), max(1, int(h * scale))), Image.LANCZOS)
+    staged_input = dst_path.parent / "_api_input.jpg"
+    img.save(staged_input, "JPEG", quality=92)
+    b64 = base64.b64encode(staged_input.read_bytes()).decode()
+
+    body = _json.dumps({
+        "model": model,
+        "max_tokens": 4096,
+        "messages": [{"role": "user", "content": [
+            {"type": "text", "text": prompt},
+            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+        ]}],
+    }).encode()
+    req = urllib.request.Request(
+        f"{base_url}/chat/completions", data=body,
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 - owner-configured endpoint
+        payload = _json.loads(resp.read().decode())
+    message = (payload.get("choices") or [{}])[0].get("message") or {}
+    content = message.get("content") or ""
+    if not isinstance(content, str):
+        content = _json.dumps(content, ensure_ascii=False)
+
+    inline = re.search(r"data:image/(?:png|jpe?g|webp);base64,([A-Za-z0-9+/=]+)", content)
+    if inline:
+        dst_path.write_bytes(base64.b64decode(inline.group(1)))
+        return dst_path
+    urls = re.findall(r"https?://[^\s)\]>]+\.(?:png|jpe?g|webp)(?:\?[^\s)\]>]*)?", content)
+    if urls:
+        with urllib.request.urlopen(urls[0], timeout=120) as imgresp:  # noqa: S310 - provider-returned asset URL
+            dst_path.write_bytes(imgresp.read())
+        return dst_path
+    raise RuntimeError(f"image provider returned no image (model={model}): {content[:200]!r}")
+
+
+def _effect_project_api(
+    baseline_path: Path,
+    focus_targets: list[str],
+    effect_pairs: list[tuple[str, str]],
+    do_not_touch: list[str],
+    *,
+    stage_dir: Path,
+) -> Path:
+    """--api-direct effect projection: SAME production prompt + Python image gen
+    (transport-only) + SAME production mask-anchor as
+    run_ps_model_router_after_simulation. Raises on no-op (anchored == baseline).
+    """
+    from backend import ai_generation_adapter as aga
+
+    prompt = aga.build_after_enhancement_prompt(
+        focus_targets, [], None, brand=DEFAULT_BRAND,
+        mode=aga.EFFECT_PROJECTION_MODE, effect_pairs=effect_pairs, do_not_touch=do_not_touch,
+    )
+    raw_ai = _generate_via_api(baseline_path, prompt, dst_path=stage_dir / "generated-raw.png")
+    anchored = aga._apply_effect_mask_anchor(
+        original_path=baseline_path,
+        ai_output_path=raw_ai,
+        focus_targets=focus_targets,
+        output_path=stage_dir / "after-effect-anchored.png",
+    )
+    if Path(anchored).read_bytes() == baseline_path.read_bytes():
+        raise RuntimeError("api-direct effect projection no-op — anchored == baseline (silent fail).")
+    return Path(anchored)
+
+
 def build_item(
     spec: CaseSpec,
     *,
     scratch_root: Path,
     stub: bool,
     job_id: int,
+    api_direct: bool = False,
 ) -> dict[str, Any]:
     """Stage baseline (术前) + produce an effect-projection candidate → judge item.
 
@@ -203,6 +300,12 @@ def build_item(
         # 0-quota: candidate = raw copy (validates wiring/packet shape, no AI).
         candidate_full = stage_dir / f"candidate__{baseline_src.stem}.png"
         shutil.copyfile(baseline_full, candidate_full)
+    elif api_direct:
+        # Python-transport effect projection (node↔proxy socket reset workaround);
+        # raises its own no-op guard internally.
+        candidate_full = _effect_project_api(
+            baseline_full, spec.focus_targets, effect_pairs, do_not_touch, stage_dir=stage_dir
+        )
     else:
         produced = _effect_project(
             baseline_full, spec.focus_targets, effect_pairs, do_not_touch, job_id=job_id
@@ -246,6 +349,7 @@ def build_packet(
     *,
     scratch_root: Path,
     stub: bool,
+    api_direct: bool = False,
 ) -> dict[str, Any]:
     """Build one effect-projection judge item per spec; assemble the packet.
 
@@ -257,7 +361,7 @@ def build_packet(
     for idx, spec in enumerate(specs):
         try:
             item = build_item(
-                spec, scratch_root=scratch_root, stub=stub,
+                spec, scratch_root=scratch_root, stub=stub, api_direct=api_direct,
                 job_id=_SYNTHETIC_JOB_BASE - idx,
             )
         except (RuntimeError, OSError) as exc:
@@ -304,6 +408,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--stub", action="store_true",
         help="0-quota dry-run: candidate = raw copy. Validates effect_pairs + wiring without AI.",
+    )
+    parser.add_argument(
+        "--api-direct", action="store_true",
+        help="Generate the AI candidate via Python urllib instead of the node PS router "
+             "(workaround for the proxy resetting node undici sockets). Same prompt + same "
+             "_apply_effect_mask_anchor; reads TUZI_IMAGE_PRIMARY_* env. Burns image quota.",
     )
     parser.add_argument("--list-only", action="store_true")
     args = parser.parse_args(argv)
@@ -362,7 +472,9 @@ def main(argv: list[str] | None = None) -> int:
         ))
         return 0
 
-    packet = build_packet(projectable, scratch_root=args.scratch_root, stub=args.stub)
+    packet = build_packet(
+        projectable, scratch_root=args.scratch_root, stub=args.stub, api_direct=args.api_direct
+    )
     args.output_packet.parent.mkdir(parents=True, exist_ok=True)
     args.output_packet.write_text(json.dumps(packet, ensure_ascii=False, indent=2), encoding="utf-8")
     print(
