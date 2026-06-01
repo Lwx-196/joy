@@ -65,6 +65,15 @@ _FOCAL_REGIONS: dict[str, tuple[float, float, float, float]] = {
     "鼻基底": (0.5, 0.62, 0.30, 0.10),
     "鼻翼": (0.5, 0.60, 0.28, 0.15),
     "nose": (0.5, 0.55, 0.25, 0.30),
+    # Forehead horizontal lines / 额纹 / 抬头纹 (frontalis) — AI 术后模拟新增
+    "额纹": (0.5, 0.20, 0.55, 0.16),
+    "抬头": (0.5, 0.20, 0.55, 0.16),
+    "抬头纹": (0.5, 0.20, 0.55, 0.16),
+    "额头": (0.5, 0.20, 0.55, 0.16),
+    # Glabella / 川字 / 眉间 (vertical frown lines) — AI 术后模拟新增
+    "川字": (0.5, 0.33, 0.22, 0.10),
+    "川字纹": (0.5, 0.33, 0.22, 0.10),
+    "眉间": (0.5, 0.33, 0.22, 0.10),
     # Full face fallback
     "face": (0.5, 0.5, 0.95, 0.95),
     "面部": (0.5, 0.5, 0.95, 0.95),
@@ -96,11 +105,27 @@ def _union_regions(targets: Iterable[str]) -> tuple[float, float, float, float] 
     return (cx, cy, w, h)
 
 
+def _to_pixel_bbox(
+    region: tuple[float, float, float, float], w: int, h: int
+) -> tuple[int, int, int, int]:
+    """Convert a normalised ``(cx, cy, fw, fh)`` region to a clamped pixel bbox."""
+    cx, cy, fw, fh = region
+    px_cx, px_cy = int(cx * w), int(cy * h)
+    px_w, px_h = int(fw * w), int(fh * h)
+    return (
+        max(0, px_cx - px_w // 2),
+        max(0, px_cy - px_h // 2),
+        min(w, px_cx + px_w // 2),
+        min(h, px_cy + px_h // 2),
+    )
+
+
 def generate_focus_mask(
     image_path: Path,
     focus_targets: list[str],
     *,
     output_path: Path | None = None,
+    separate_ellipses: bool = False,
 ) -> Path:
     """Generate a coarse single-channel focus mask PNG.
 
@@ -110,6 +135,16 @@ def generate_focus_mask(
 
     If ``focus_targets`` is empty or contains no recognised keywords,
     falls back to a full-face mask (centered ellipse, 70% of image area).
+
+    ``separate_ellipses`` (default False = backward-compatible):
+      - False → recognised targets are merged into a single bounding-box
+        ellipse (``_union_regions``). Correct for the ComfyUI v2 route whose
+        downstream ``MediaPipeFaceMeshToSEGS`` + SAM refine the coarse box.
+      - True  → each recognised target is drawn as its own ellipse and the
+        true union is kept (gaps between spread regions stay black). Needed
+        for the gpt-image-2 mask-anchor route (no SAM refine downstream), so
+        spread治疗区 (额纹+川字+唇+下巴) don't collapse into a whole-face box —
+        enforces precise-correspondence (只锁实际治疗区，不外扩).
 
     If PIL is unavailable, raises ``ImportError`` (no silent fail here —
     caller is expected to wrap in its own try/except).
@@ -122,37 +157,37 @@ def generate_focus_mask(
     with Image.open(image_path) as src:
         w, h = src.size
 
-    # Treat the whole image as the "face bbox" for simplicity. The downstream
-    # MediaPipeFaceMeshToSEGS in the v2 workflow will detect the actual face
-    # and intersect with this mask to refine. For images where the face
-    # already fills the frame, this is a reasonable approximation.
-    region = _union_regions(focus_targets) if focus_targets else None
-    if region is None:
-        # Full-face fallback: centered ellipse covering ~70% of frame
-        region = (0.5, 0.5, 0.85, 0.85)
-        LOGGER.info(
-            "focal_mask: no recognised targets in %s; falling back to full-face ellipse",
-            focus_targets,
-        )
-    cx, cy, fw, fh = region
-    # Convert to pixel coordinates
-    px_cx, px_cy = int(cx * w), int(cy * h)
-    px_w, px_h = int(fw * w), int(fh * h)
-    bbox = (
-        max(0, px_cx - px_w // 2),
-        max(0, px_cy - px_h // 2),
-        min(w, px_cx + px_w // 2),
-        min(h, px_cy + px_h // 2),
-    )
-
     mask = Image.new("L", (w, h), 0)
     draw = ImageDraw.Draw(mask)
-    draw.ellipse(bbox, fill=255)
+
+    # Treat the whole image as the "face bbox" for simplicity. The downstream
+    # MediaPipeFaceMeshToSEGS in the v2 workflow (union path) will detect the
+    # actual face and intersect with this mask to refine.
+    recognised = [t for t in focus_targets if t in _FOCAL_REGIONS] if focus_targets else []
+    if separate_ellipses and recognised:
+        for target in recognised:
+            draw.ellipse(_to_pixel_bbox(_FOCAL_REGIONS[target], w, h), fill=255)
+        LOGGER.info(
+            "focal_mask: %dx%d separate-ellipse union for %s → %s",
+            w, h, recognised, output_path,
+        )
+    else:
+        region = _union_regions(focus_targets) if focus_targets else None
+        if region is None:
+            # Full-face fallback: centered ellipse covering ~70% of frame
+            region = (0.5, 0.5, 0.85, 0.85)
+            LOGGER.info(
+                "focal_mask: no recognised targets in %s; falling back to full-face ellipse",
+                focus_targets,
+            )
+        bbox = _to_pixel_bbox(region, w, h)
+        draw.ellipse(bbox, fill=255)
+        LOGGER.info(
+            "focal_mask: generated %dx%d mask for targets=%s region_bbox=%s → %s",
+            w, h, focus_targets, bbox, output_path,
+        )
+
     mask.save(output_path, format="PNG", optimize=True)
-    LOGGER.info(
-        "focal_mask: generated %dx%d mask for targets=%s region_bbox=%s → %s",
-        w, h, focus_targets, bbox, output_path,
-    )
     return output_path
 
 

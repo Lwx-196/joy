@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
 from PIL import Image
 
 from backend.services.focal_mask_generator import generate_focus_mask
@@ -78,6 +77,53 @@ class TestMaskGenerator:
         assert result.suffix == ".png"
         # Cleanup since auto-temp isn't cleaned by helper
         result.unlink(missing_ok=True)
+
+    def test_forehead_lines_focus(self, tmp_path: Path):
+        # 额纹(抬头纹) — AI 术后模拟 case45 衡力术式部位，旧 _FOCAL_REGIONS 缺。
+        src = _make_test_jpg(tmp_path, size=(1000, 1000))
+        result = generate_focus_mask(src, ["额纹"], output_path=tmp_path / "m.png")
+        with Image.open(result) as m:
+            assert m.getpixel((500, 200)) > 200   # upper forehead white
+            assert m.getpixel((500, 850)) < 50     # chin black
+
+    def test_glabella_focus(self, tmp_path: Path):
+        src = _make_test_jpg(tmp_path, size=(1000, 1000))
+        result = generate_focus_mask(src, ["川字"], output_path=tmp_path / "m.png")
+        with Image.open(result) as m:
+            assert m.getpixel((500, 330)) > 200   # between-brows white
+            assert m.getpixel((500, 500)) < 50     # mid-face black (narrow region)
+
+    def test_taitou_alias_recognised_not_full_face(self, tmp_path: Path):
+        # 「抬头」(case45 原始文件名词) 须命中 → 不掉进 full-face fallback
+        src = _make_test_jpg(tmp_path, size=(1000, 1000))
+        result = generate_focus_mask(src, ["抬头"], output_path=tmp_path / "m.png")
+        with Image.open(result) as m:
+            assert m.getpixel((500, 200)) > 200    # forehead white
+            assert m.getpixel((500, 850)) < 50      # full-face fallback would be white here
+
+    def test_separate_ellipses_precise_correspondence(self, tmp_path: Path):
+        # 精准对应：4 个分散治疗区在 separate 模式下是真并集（区间留黑），
+        # 而非默认 _union_regions 的单一外接框（中脸被整片覆盖）。
+        src = _make_test_jpg(tmp_path, size=(1000, 1000))
+        targets = ["额纹", "川字", "唇", "下巴"]
+        sep = generate_focus_mask(src, targets, output_path=tmp_path / "sep.png",
+                                  separate_ellipses=True)
+        with Image.open(sep) as m:
+            # 4 个治疗区中心全白
+            assert m.getpixel((500, 200)) > 200    # 额纹
+            assert m.getpixel((500, 330)) > 200    # 川字
+            assert m.getpixel((500, 780)) > 200    # 唇
+            assert m.getpixel((500, 870)) > 200    # 下巴
+            # 川字与唇之间的中脸（鼻/颊）必须留黑（未做的区不外扩）
+            assert m.getpixel((500, 520)) < 50
+
+    def test_default_union_covers_midface_gap(self, tmp_path: Path):
+        # 对照：默认（separate_ellipses=False）= 单一外接框 → 中脸被覆盖（白）。
+        src = _make_test_jpg(tmp_path, size=(1000, 1000))
+        targets = ["额纹", "川字", "唇", "下巴"]
+        result = generate_focus_mask(src, targets, output_path=tmp_path / "u.png")
+        with Image.open(result) as m:
+            assert m.getpixel((500, 520)) > 200    # 单一 bbox 覆盖中脸
 
 
 # ---------------------------------------------------------------------------
