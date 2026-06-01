@@ -52,7 +52,7 @@ cd /Users/a1234/Desktop/案例生成器/case-workbench-effect-calibration
     --packet-json /tmp/effect-cal/stub-packet.json \
     --env-file /Users/a1234/Desktop/案例生成器/case-workbench/tasks/t54_vertex_adc.local.env \
     --report-output /tmp/effect-cal/stub-report.md
-# ⚠️ 2026-06-01 实测：当前 judge 把字节相同的图判 pass（见末尾「Step 1 实测结论」）→ floor 未过，需先修 gate
+# ✅ 2026-06-01 Step 1.5 已修（commit 8af7626）：gate 加确定性 no-change 预检 → stub 重验 gate_pass 0/3（no_visible_change，judge 0 调用）。floor 已闭环。
 ```
 
 ## B. 真校准（owner 解锁 gpt-image-2 quota + PS env 后，一键）
@@ -68,7 +68,7 @@ cd /Users/a1234/Desktop/案例生成器/case-workbench-effect-calibration
 #   no-evidence case 自动 skip（反臆造），projection no-op 自动 drop（不静默）
 
 # Step 2 — effect_projection judge 校准（judge quota，t54 已就绪）
-#    ⚠️ 用 --env-file（不能 source）；且需先修 gate floor（见末尾实测结论），否则 judge 假 pass 污染结果
+#    ⚠️ 用 --env-file（不能 source）。gate floor 已于 Step 1.5（commit 8af7626）修复：no-change 确定性预检兜底，判官幻觉假 pass 不再污染结果。
 ../case-workbench/.venv/bin/python -m backend.scripts.effect_calibration_report \
     --packet-json /tmp/effect-cal/packet.json \
     --env-file /Users/a1234/Desktop/案例生成器/case-workbench/tasks/t54_vertex_adc.local.env \
@@ -88,9 +88,10 @@ cd /Users/a1234/Desktop/案例生成器/case-workbench-effect-calibration
 
 ## 验证状态
 
-- 0-quota 管线：**9 tests passed**（builder dry-run + 反臆造 drop + report candidate-pass/baseline-held/judge-down-fail-closed）
-- dry-run 真实案例库：discover 22 → 3 projectable（康巧佳含 4 evidence pairs），fail-closed skip 正确
-- ruff clean / 纯新增 3 文件（零改现有代码）
+- 0-quota 管线：**31 tests passed**（builder dry-run + 反臆造 drop + report floor/candidate-pass/baseline-held/judge-down-fail-closed + gate 4 个 no_visible_change 用例）
+- dry-run 真实案例库：discover 22 → 3 projectable（康巧佳含 4 evidence pairs），fail-closed skip 正确；`--all-cases --n 3` 现选满 3 projectable（Step 1.5 修 builder 顺序前 = 1）
+- 全量回归 **1268 passed / 3 skip / 0 regression**；ruff clean
+- Step 1.5（commit 8af7626）：gate `effect_delivery_qa` 加 no-change 预检（mean_abs_delta<1.0 AND changed_fraction<0.001，PROMPT_VERSION effect-v1→v2）+ builder projectable 顺序修复
 
 ## Step 1 实测结论（2026-06-01，0-quota floor 验证）
 
@@ -105,3 +106,13 @@ cd /Users/a1234/Desktop/案例生成器/case-workbench-effect-calibration
 - **附带 builder bug**：`--n N` 在 projectable 过滤**之前**取 N（`select_cases(pool, n)` 砍早了），导致 `--n 3` 只给 1 projectable。真校准要 N≥6，需把 projectable 过滤前置到 `select_cases` 之前。
 
 **新会话 Step 1.5 = 修 (A) gate floor 预检 + builder projectable 顺序 → 0-quota 重验 floor 应返回 fail（不再假 pass）→ 才进 B 段真校准。**
+
+## Step 1.5 已完成（2026-06-01，commit 8af7626，0-quota 闭环）
+
+floor 已闭环，下一步是 owner 解锁 gpt-image-2 quota 后的 B 段真校准（Step 2）。
+
+- **(A) gate 确定性 no-change 预检**：`EffectDeliveryQA.assess` 在调 judge 前测整图差异——`mean_abs_delta < 1.0` **且** `changed_fraction < 0.001`（max 通道 |Δ| > 10 的像素占比）→ 直接判 `fail / hard_veto_reason=no_visible_change`，**不调 judge（0 quota）**，仍 held + 可 `clear_effect` 人工 override。AND 双条件刻意保守：真 mask-anchored 投影必改一块连续区域，`changed_fraction` 远超 0.001，不会误杀 subtle effect。解码/numpy 异常 → fail-open 落回判官（既有 fail-closed 路径）。`PROMPT_VERSION` effect-v1→v2（防旧缓存假 pass 经 hash cache 泄漏）。
+- **(B) builder 顺序**：projectable 过滤前置到 `select_cases`/`[:n]` 之前 → `--n N` 从 projectable 池里选 N。实测 `--all-cases --n 3` 现选满 3（康巧佳/蓝凤端/许楚楚），修前只给 1。
+- **重验**：同一 stub packet（3 items）+ 真 judge t54 → `gate_pass 0/3 (0.0%)`，`verdict={'fail':3}`，`winner={'(none)':3}`，全部 `no_visible_change`，**判官从未被调用**。对比 Step 1 的幻觉假 pass/0.85 = 决定性闭环。
+- **测试**：gate +4 no_visible_change 用例 + report +1 floor 用例（report 聚合测试改用视觉不同 candidate 走判官路径）；全量 1268 passed / 3 skip / 0 regression / ruff clean。
+- **判官 prompt 强化（原 B）= 不做**：判官已证实无视现有 no-change 指令，确定性预检（A）才是可靠兜底；强化 prompt 收益低，略。
