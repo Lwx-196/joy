@@ -317,10 +317,14 @@ def _effect_project_api(
     do_not_touch: list[str],
     *,
     stage_dir: Path,
+    anchor: bool = True,
 ) -> Path:
-    """--api-direct effect projection: SAME production prompt + Python image gen
-    (transport-only) + SAME production mask-anchor as
-    run_ps_model_router_after_simulation. Raises on no-op (anchored == baseline).
+    """--api-direct effect projection: SAME production prompt + Python image gen.
+
+    ``anchor=True`` (default): run the production mask-anchor (identity floor).
+    ``anchor=False`` (raw-first, owner-preferred for faithful editors like
+    gpt-image-2 /images/edits): ship the raw AI output — the mask-anchor reverts
+    the coherent whole-face refinement that makes the raw look best. Raises on no-op.
     """
     from backend import ai_generation_adapter as aga
     from backend.services import procedure_region_mappings as prm
@@ -334,6 +338,10 @@ def _effect_project_api(
         strength=prm.STRENGTH_STRONG,
     )
     raw_ai = _generate_via_api(baseline_path, prompt, dst_path=stage_dir / "generated-raw.png")
+    if not anchor:
+        if Path(raw_ai).read_bytes() == baseline_path.read_bytes():
+            raise RuntimeError("api-direct effect projection no-op — raw == baseline (silent fail).")
+        return Path(raw_ai)
     # Mask must cover ALL treated regions (effect_pairs), not just spec.focus_targets —
     # else a treated region the AI actually edited (e.g. 鼻背) gets locked back to the
     # original and the effect is thrown away.
@@ -356,6 +364,7 @@ def build_item(
     stub: bool,
     job_id: int,
     api_direct: bool = False,
+    anchor: bool = True,
 ) -> dict[str, Any]:
     """Stage baseline (术前) + produce an effect-projection candidate → judge item.
 
@@ -397,7 +406,8 @@ def build_item(
         # Python-transport effect projection (node↔proxy socket reset workaround);
         # raises its own no-op guard internally.
         candidate_full = _effect_project_api(
-            baseline_full, spec.focus_targets, effect_pairs, do_not_touch, stage_dir=stage_dir
+            baseline_full, spec.focus_targets, effect_pairs, do_not_touch,
+            stage_dir=stage_dir, anchor=anchor,
         )
     else:
         produced = _effect_project(
@@ -431,6 +441,7 @@ def build_item(
             "full_res_path": str(candidate_full),
             "role_note": (
                 "STUB raw copy (0-quota wiring)" if stub
+                else "AI effect projection (raw, faithful whole-face edit)" if not anchor
                 else "AI effect projection (mask-anchored, identity-locked)"
             ),
         },
@@ -443,6 +454,7 @@ def build_packet(
     scratch_root: Path,
     stub: bool,
     api_direct: bool = False,
+    anchor: bool = True,
 ) -> dict[str, Any]:
     """Build one effect-projection judge item per spec; assemble the packet.
 
@@ -454,7 +466,7 @@ def build_packet(
     for idx, spec in enumerate(specs):
         try:
             item = build_item(
-                spec, scratch_root=scratch_root, stub=stub, api_direct=api_direct,
+                spec, scratch_root=scratch_root, stub=stub, api_direct=api_direct, anchor=anchor,
                 job_id=_SYNTHETIC_JOB_BASE - idx,
             )
         except (RuntimeError, OSError) as exc:
@@ -507,6 +519,12 @@ def main(argv: list[str] | None = None) -> int:
         help="Generate the AI candidate via Python urllib instead of the node PS router "
              "(workaround for the proxy resetting node undici sockets). Same prompt + same "
              "_apply_effect_mask_anchor; reads TUZI_IMAGE_PRIMARY_* env. Burns image quota.",
+    )
+    parser.add_argument(
+        "--no-mask-anchor", action="store_true",
+        help="raw-first: ship the raw AI edit as the candidate, skip _apply_effect_mask_anchor "
+             "(it reverts the coherent whole-face refinement that makes a faithful editor's "
+             "output look best — owner-preferred for gpt-image-2 /images/edits).",
     )
     parser.add_argument("--list-only", action="store_true")
     args = parser.parse_args(argv)
@@ -566,7 +584,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     packet = build_packet(
-        projectable, scratch_root=args.scratch_root, stub=args.stub, api_direct=args.api_direct
+        projectable, scratch_root=args.scratch_root, stub=args.stub, api_direct=args.api_direct,
+        anchor=not args.no_mask_anchor,
     )
     args.output_packet.parent.mkdir(parents=True, exist_ok=True)
     args.output_packet.write_text(json.dumps(packet, ensure_ascii=False, indent=2), encoding="utf-8")

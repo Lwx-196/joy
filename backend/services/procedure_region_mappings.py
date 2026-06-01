@@ -70,6 +70,19 @@ BRAND_TO_PROJECT: dict[str, dict[str, Any]] = {
         "source": "user_authoritative + effect-evidence-library §0.1/§2",
         "confidence": "high",
     },
+    "弗缦": {
+        "project": PROJECT_HA_FILLER,
+        "project_cn": "玻尿酸填充",
+        "ingredient": "玻尿酸(HA)",
+        "time_anchor": {
+            "即刻": "偏满偏肿（HA 亲水吸水 + 注入体积已在 + 针孔泛红）",
+            "消肿": "1-2 周",
+            "稳定代表态": "3-4 周，体积比即刻略收敛",
+            "维持": "HA 约 6-12 月",
+        },
+        "source": "user_authoritative (owner confirmed 2026-06-01: 弗缦=玻尿酸 HA filler)",
+        "confidence": "high",
+    },
 }
 
 
