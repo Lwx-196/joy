@@ -95,9 +95,26 @@ def test_mechanism_context_injected_per_case():
     assert "静止中性正脸可不明显" in mixed
 
 
+def test_new_region_rows_grounded():
+    # injection-effect-standards 厂商级新增行（atlas key 都存在 → 能从 case 名解析）
+    for proj, region in [
+        (prm.PROJECT_HA_FILLER, "卧蚕"), (prm.PROJECT_HA_FILLER, "太阳穴"),
+        (prm.PROJECT_HA_FILLER, "法令纹"), (prm.PROJECT_BOTOX, "咬肌"),
+    ]:
+        row = prm.effect_row(proj, region)
+        assert row and row["do_right"] and isinstance(row["avoid"], list) and row["avoid"]
+        assert row["guardrail"] and row["evidence"]
+    # 卧蚕 = 塑造饱满（与泪沟填平方向相反，prompt 不能混）
+    wocan = prm.effect_row(prm.PROJECT_HA_FILLER, "卧蚕")["do_right"]
+    assert "塑造" in wocan and "饱满" in wocan and "不是填平" in wocan
+    # 咬肌(瘦脸) = 肉毒，带即刻零变化/12 周时间锚点
+    masseter = prm.effect_row(prm.PROJECT_BOTOX, "咬肌")
+    assert masseter.get("ground_truth_note") and "12 周" in masseter["ground_truth_note"]
+
+
 def test_effect_row_unknown_pair_is_none():
     # not seeded → None (do NOT fabricate effect language)
-    assert prm.effect_row(prm.PROJECT_HA_FILLER, "太阳穴") is None
+    assert prm.effect_row(prm.PROJECT_HA_FILLER, "耳") is None
     assert prm.effect_row("__nope__", "唇") is None
 
 
@@ -156,8 +173,8 @@ def test_build_effect_prompt_fragment_contains_evidence():
 
 
 def test_build_effect_prompt_fragment_unknown_returns_none():
-    # fail-closed: no evidence row → no fabricated effect language
-    assert prm.build_effect_prompt_fragment(prm.PROJECT_HA_FILLER, "太阳穴") is None
+    # fail-closed: no evidence row → no fabricated effect language（耳=未登记部位）
+    assert prm.build_effect_prompt_fragment(prm.PROJECT_HA_FILLER, "耳") is None
 
 
 def test_build_effect_prompt_fragment_strength_modulates():
