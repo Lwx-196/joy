@@ -403,13 +403,52 @@ def _finalize_prompt(prompt_body: str, model_name: str | None = None) -> str:
     )
 
 
+# build_after_enhancement_prompt 的两种哲学：
+#   fidelity          = 保真/轻量局部增强（旧默认，BC）——「不许变」
+#   effect_projection = 术后效果放大（anchored-simulation 产品线）——「按术式精准放大」
+# 走循证 prompt 库 procedure_region_mappings，强度非默认保守 + 过度失真上护栏 + 身份铁律。
+FIDELITY_MODE = "fidelity"
+EFFECT_PROJECTION_MODE = "effect_projection"
+
+
 def build_after_enhancement_prompt(
     focus_targets: list[str],
     focus_regions: list[dict[str, Any]],
     model_name: str | None = None,
     brand: str = "fumei",
+    *,
+    mode: str = FIDELITY_MODE,
+    effect_pairs: list[tuple[str, str]] | None = None,
+    do_not_touch: list[str] | None = None,
+    strength: str | None = None,
+    scenario_note: str | None = None,
 ) -> str:
-    """Build a detailed prompt for post-simulation image enhancement."""
+    """Build a detailed prompt for post-simulation image enhancement.
+
+    ``mode`` (默认 ``fidelity`` = 旧保真哲学，逐字 BC)：
+      - ``fidelity``          → 保真/轻量局部增强（不许变；damping + 保真锁）。
+      - ``effect_projection`` → 术后效果放大，走循证 prompt 库
+        (``procedure_region_mappings.compose_effect_prompt``)：按 ``effect_pairs``
+        =[(项目类型, 部位)…] 逐部位注循证方向 + 过度失真红线 + 强度(默认 natural 非保守)
+        + ``do_not_touch`` 不外扩 + 身份铁律。空间约束由 mask 锚定 composite 强制(本函数只出文字)。
+        ``effect_pairs`` 缺失 → 回退 fidelity(BC-safe，不崩不空)。
+    """
+    if mode == EFFECT_PROJECTION_MODE:
+        pairs = effect_pairs or []
+        if pairs:
+            from .services import procedure_region_mappings as prm
+
+            return prm.compose_effect_prompt(
+                pairs,
+                strength=strength or prm.STRENGTH_NATURAL,
+                do_not_touch=do_not_touch,
+                scenario_note=scenario_note,
+            )
+        LOGGER.warning(
+            "build_after_enhancement_prompt: effect_projection mode requested without "
+            "effect_pairs; falling back to fidelity prompt (BC-safe)"
+        )
+
     is_md = (brand == "meiji_ai" or brand == "md_ai")
     persona = MD_DIRECTOR_PROMPT if is_md else ""
 
