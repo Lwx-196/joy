@@ -42,8 +42,23 @@ from typing import Any
 from backend.scripts import comfyui_vlm_judge_runner as judge_runner
 from backend.services.vlm_provider import VLMProvider, VLMRequestError
 
-PROMPT_VERSION = "effect-v1"
+PROMPT_VERSION = "effect-v2"  # bumped: added the no_visible_change pre-check (Step 1.5)
 JUDGE_PROFILE = "effect_projection"
+
+# Deterministic no-change pre-check (Step 1.5, L-151). The effect_projection
+# judge confirmation-biases toward the injected "expected effect" — it has
+# hallucinated a `pass` (winner=candidate, conf 0.85) on a byte-identical
+# (candidate==baseline) pair, ignoring the prompt's "no-change is a FAILURE".
+# So a candidate visually identical to its baseline is failed deterministically,
+# BEFORE (and instead of) the judge. Thresholds are deliberately conservative —
+# they catch a (re-encoded) copy, NOT a real subtle effect: any genuine
+# mask-anchored projection edits a contiguous treated region whose changed-pixel
+# fraction is orders of magnitude above NO_CHANGE_CHANGED_FRACTION, so the AND of
+# both floors cannot fire on a real effect. Both conditions must hold to fail.
+NO_CHANGE_MEAN_ABS_DELTA = 1.0       # whole-image mean |Δ| per channel (0-255); < 1 gray level = imperceptible
+NO_CHANGE_PIXEL_DELTA = 10           # a pixel "changed" iff its max channel |Δ| exceeds this (~just-noticeable)
+NO_CHANGE_CHANGED_FRACTION = 0.001   # < 0.1% of pixels visibly changed = no edited region at all
+REASON_NO_VISIBLE_CHANGE = "no_visible_change"
 
 # Gate-level pass conditions (effect_projection profile, 4 criteria). The judge
 # is anchored to the循证库 via the injected effect_pairs; these are the
@@ -150,6 +165,8 @@ class EffectQAVerdict:
         if self.review_status == REVIEW_REJECTED:
             detail = self.review_note or self.hard_veto_reason or self.rationale
             return f"human-rejected: {detail}"
+        if self.hard_veto_reason == REASON_NO_VISIBLE_CHANGE:
+            return f"no visible change (deterministic pre-check): {self.rationale}"
         if self.verdict == VERDICT_UNAVAILABLE:
             return f"effect judge unavailable (fail-closed): {self.error or 'no assessment'}"
         detail = self.hard_veto_reason or self.rationale or ""
@@ -294,6 +311,40 @@ class EffectDeliveryQA:
         if cached is not None:
             return cached
 
+        # Deterministic no-change guard: a candidate visually identical to its
+        # baseline is a no-change projection (a FAILURE) — fail it here, before
+        # the (confirmation-biased) judge can hallucinate a pass. Saves a judge
+        # call; the verdict is still held + human-overridable like any other fail.
+        no_change = self._no_change_precheck(baseline, candidate)
+        if no_change is not None:
+            result = EffectQAVerdict(
+                content_hash=content_hash,
+                verdict=VERDICT_FAIL,
+                winner_role="",
+                hard_veto_reason=REASON_NO_VISIBLE_CHANGE,
+                rationale=(
+                    "deterministic no-change pre-check: candidate is visually identical to "
+                    f"baseline (mean_abs_delta={no_change['mean_abs_delta']:.3f} "
+                    f"< {NO_CHANGE_MEAN_ABS_DELTA}, changed_fraction="
+                    f"{no_change['changed_fraction']:.5f} < {NO_CHANGE_CHANGED_FRACTION}) — "
+                    "no-change projection is a FAILURE, not a pass."
+                ),
+                risk_flags=(REASON_NO_VISIBLE_CHANGE,),
+                confidence=1.0,
+                cached=False,
+                review_status=REVIEW_PENDING,
+                ab_unit_id=str(ab_unit_id),
+                assessed_at=_now(),
+            )
+            self._cache_put(
+                result,
+                case_id=case_id,
+                job_id=job_id,
+                baseline_path=str(baseline),
+                candidate_path=str(candidate),
+            )
+            return result
+
         item = self._judge_item(
             effect_pairs=effect_pairs,
             do_not_touch=do_not_touch,
@@ -361,6 +412,45 @@ class EffectDeliveryQA:
             candidate_path=str(candidate),
         )
         return result
+
+    def _no_change_precheck(
+        self, baseline: str | Path, candidate: str | Path
+    ) -> dict[str, float] | None:
+        """Measure the whole-image baseline↔candidate difference.
+
+        Returns the metrics dict when the pair is essentially identical (both
+        conservative floors met → caller fails it as ``no_visible_change``), else
+        ``None`` (→ proceed to the judge). EXIF-normalizes both and resizes the
+        candidate onto the baseline grid (mirrors ``fidelity_probes``), so an
+        orientation/resize-only no-op still reads as no-change.
+
+        Fail-OPEN on any read / decode / numpy error: an unmeasurable guard must
+        never block a real candidate — it defers to the (fail-closed) judge.
+        """
+        try:
+            import numpy as np
+            from PIL import Image, ImageOps
+
+            with Image.open(baseline) as _b:
+                arr_a = np.asarray(
+                    ImageOps.exif_transpose(_b).convert("RGB"), dtype=np.int16
+                )
+            with Image.open(candidate) as _c:
+                cand = ImageOps.exif_transpose(_c).convert("RGB")
+            if cand.size != (arr_a.shape[1], arr_a.shape[0]):
+                cand = cand.resize((arr_a.shape[1], arr_a.shape[0]), Image.LANCZOS)
+            arr_b = np.asarray(cand, dtype=np.int16)
+            diff = np.abs(arr_a - arr_b)
+            mean_abs_delta = float(diff.mean())
+            changed_fraction = float((diff.max(axis=2) > NO_CHANGE_PIXEL_DELTA).mean())
+        except Exception:  # noqa: BLE001 - best-effort guard; defer to the judge on error
+            return None
+        if (
+            mean_abs_delta < NO_CHANGE_MEAN_ABS_DELTA
+            and changed_fraction < NO_CHANGE_CHANGED_FRACTION
+        ):
+            return {"mean_abs_delta": mean_abs_delta, "changed_fraction": changed_fraction}
+        return None
 
     def _judge_item(
         self,

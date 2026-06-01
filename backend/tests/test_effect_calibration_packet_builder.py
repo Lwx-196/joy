@@ -97,8 +97,24 @@ def _stub_packet(tmp_path: Path) -> dict:
     return builder.build_packet([spec], scratch_root=tmp_path / "scratch", stub=True)
 
 
-def test_report_pipeline_candidate_pass(tmp_path: Path) -> None:
+def _distinct_packet(tmp_path: Path) -> dict:
+    """Stub packet whose candidate is VISUALLY different from the baseline.
+
+    The stub candidate is a byte-identical raw copy, which the gate's
+    deterministic no_visible_change pre-check now (correctly) holds before the
+    judge. Overwriting the judge-facing candidate with a clearly different image
+    lets the (stubbed) judge actually drive the verdict — so these tests exercise
+    the report's verdict/winner AGGREGATION, not the floor (see
+    ``test_report_stub_floor_no_visible_change`` for the floor).
+    """
     packet = _stub_packet(tmp_path)
+    candidate = Path(packet["judge_items"][0]["candidate"]["source_path"])
+    Image.new("RGB", (96, 96), (40, 200, 60)).save(candidate, "JPEG", quality=92)
+    return packet
+
+
+def test_report_pipeline_candidate_pass(tmp_path: Path) -> None:
+    packet = _distinct_packet(tmp_path)
     qa = EffectDeliveryQA(StubEffectJudge(winner_role="candidate"), conn=None)
     rep = report.run_calibration(packet, qa)
     assert rep["judge_item_count"] == 1
@@ -107,8 +123,23 @@ def test_report_pipeline_candidate_pass(tmp_path: Path) -> None:
     assert rep["verdict_distribution"].get("pass") == 1
 
 
-def test_report_baseline_is_held(tmp_path: Path) -> None:
+def test_report_stub_floor_no_visible_change(tmp_path: Path) -> None:
+    # Step-1 floor: a byte-identical stub candidate MUST be held by the
+    # deterministic no-change pre-check — even when the judge would hallucinate a
+    # candidate win. The judge is never consulted (short-circuit).
     packet = _stub_packet(tmp_path)
+    judge = StubEffectJudge(winner_role="candidate")  # would hallucinate a pass
+    qa = EffectDeliveryQA(judge, conn=None)
+    rep = report.run_calibration(packet, qa)
+    assert rep["gate_pass"] == 0
+    assert rep["verdict_distribution"].get("fail") == 1
+    assert rep["winner_distribution"].get("(none)") == 1
+    assert judge.calls == 0  # pre-check short-circuited before the judge
+    assert rep["rows"][0]["hard_veto_reason"] == "no_visible_change"
+
+
+def test_report_baseline_is_held(tmp_path: Path) -> None:
+    packet = _distinct_packet(tmp_path)
     qa = EffectDeliveryQA(StubEffectJudge(winner_role="baseline"), conn=None)
     rep = report.run_calibration(packet, qa)
     # baseline win = honest loss → NOT a pass (gate held).
@@ -117,7 +148,7 @@ def test_report_baseline_is_held(tmp_path: Path) -> None:
 
 
 def test_report_judge_down_fail_closed(tmp_path: Path) -> None:
-    packet = _stub_packet(tmp_path)
+    packet = _distinct_packet(tmp_path)
     qa = EffectDeliveryQA(StubEffectJudge(down=True), conn=None)
     rep = report.run_calibration(packet, qa)
     assert rep["gate_pass"] == 0

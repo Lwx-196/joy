@@ -314,26 +314,33 @@ def main(argv: list[str] | None = None) -> int:
     if args.select:
         needles = [t.strip() for t in args.select.split(",") if t.strip()]
         pool = [s for s in pool if any(t in str(s.case_dir) for t in needles)]
-        selected = pool[: args.n]
-    else:
-        selected = select_cases(pool, args.n)
 
-    # Pre-filter to evidence-anchored projectable cases (反臆造): the selected N
-    # should all carry a real effect to project; report the rest (no silent cap).
-    projectable: list[CaseSpec] = []
+    # Resolve evidence-anchored projectability across the WHOLE pool FIRST (反臆造),
+    # THEN take n. Filtering after select_cases/[:n] let non-projectable cases crowd
+    # out real ones, so `--n 3` yielded only 1 projection (Step-1 bug). Reporting the
+    # full skipped set keeps the 反臆造 drop honest (no silent cap).
+    projectable_pool: list[CaseSpec] = []
     skipped: list[dict[str, Any]] = []
-    for s in selected:
+    for s in pool:
         pairs, parsed = _resolve_effect_pairs(s.case_dir, s.focus_targets)
         if pairs:
-            projectable.append(s)
+            projectable_pool.append(s)
         else:
             skipped.append({
                 "slug": s.slug, "all_regions": parsed.get("all_regions"),
                 "needs_human_review": parsed.get("needs_human_review"),
             })
+
+    if args.select:
+        projectable = projectable_pool[: args.n]
+    else:
+        projectable = select_cases(projectable_pool, args.n)
+
+    capped = len(projectable_pool) - len(projectable)
     print(
         f"selected {len(projectable)} projectable cases "
-        f"({len(skipped)} skipped: no evidence-anchored effect_pairs):",
+        f"(pool projectable={len(projectable_pool)}, capped_by_n={capped}, "
+        f"{len(skipped)} skipped: no evidence-anchored effect_pairs):",
         file=sys.stderr,
     )
     for s in projectable:
