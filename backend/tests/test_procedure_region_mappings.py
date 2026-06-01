@@ -69,6 +69,21 @@ def test_ha_filler_region_rows_ported_from_library():
         assert row["guardrail"] and row["evidence"]
 
 
+def test_frontal_gate_reframes_profile_regions():
+    # 正脸 gate：profile 部位（下巴/鼻背）只推正脸可见部分，不强推侧脸效果（鼻背变直/颏前突）
+    chin = prm.build_effect_prompt_fragment(prm.PROJECT_HA_FILLER, "下巴", view="frontal")
+    assert "正脸不强推前突" in chin and "下庭" in chin
+    assert "前突度增加" not in chin  # 完整 do_right 的侧脸语言被 reframe 掉
+    nose = prm.build_effect_prompt_fragment(prm.PROJECT_HA_FILLER, "鼻背", view="frontal")
+    assert "侧脸" in nose and "中线高光" in nose
+    # 非正脸视角（profile）→ 推完整 do_right（侧脸主战场）
+    chin_side = prm.build_effect_prompt_fragment(prm.PROJECT_HA_FILLER, "下巴", view="profile")
+    assert "前突度增加" in chin_side
+    # frontal 部位（泪沟）不受 gate 影响 → 完整 do_right
+    tt = prm.build_effect_prompt_fragment(prm.PROJECT_HA_FILLER, "泪沟", view="frontal")
+    assert "凹陷填平" in tt
+
+
 def test_effect_row_unknown_pair_is_none():
     # not seeded → None (do NOT fabricate effect language)
     assert prm.effect_row(prm.PROJECT_HA_FILLER, "太阳穴") is None

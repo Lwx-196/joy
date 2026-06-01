@@ -422,6 +422,7 @@ def build_after_enhancement_prompt(
     do_not_touch: list[str] | None = None,
     strength: str | None = None,
     scenario_note: str | None = None,
+    view: str = "frontal",
 ) -> str:
     """Build a detailed prompt for post-simulation image enhancement.
 
@@ -443,6 +444,7 @@ def build_after_enhancement_prompt(
                 strength=strength or prm.STRENGTH_NATURAL,
                 do_not_touch=do_not_touch,
                 scenario_note=scenario_note,
+                view=view,
             )
         LOGGER.warning(
             "build_after_enhancement_prompt: effect_projection mode requested without "

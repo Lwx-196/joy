@@ -39,6 +39,30 @@ _STRENGTH_LANG: dict[str, str] = {
     STRENGTH_STRONG: "效果明显且方向明确、一眼可辨（达到该术式真实可达的较强一档）；宁可偏强也不要保守到看不出变化，但严守下方红线不得过度失真",
 }
 
+# === 正脸/侧脸 可见性 gate（injection-effect-standards.md §0.2）===
+# 部位效果的主可见视角：frontal=正脸即可见 / profile=侧脸才是主战场（正脸几乎不可见）
+# / expression=仅做表情时显（静止中性脸不可见）。喂正脸 case 照片时，profile/expression
+# 部位若强推完整效果即失真（鼻背变直/颏前突在正脸推不出、肉毒动态纹静态无变化）——这是
+# 之前正脸鼻/下巴模拟失败的根因（FDA/共识坐实，详见 injection-effect-standards.md）。
+REGION_EFFECT_VIEW: dict[str, str] = {
+    "鼻背": "profile",
+    "鼻基底": "profile",
+    "下巴": "profile",
+    "川字": "expression",
+    "额纹": "expression",
+    "鱼尾纹": "expression",
+}
+
+# profile 部位在正脸图上只能推的「正脸可见」部分（替代完整 do_right，避免强推侧脸效果）。
+FRONTAL_REFRAME: dict[str, str] = {
+    "鼻背": "正脸只做鼻梁中线高光更对称、更连续，两侧鼻背美学线对称；鼻背变直/驼峰填平/鼻尖抬升属侧脸效果，正脸不强推、不增宽鼻梁",
+    "鼻基底": "正脸只做鼻基底区轻微支撑、鼻周过渡自然；鼻背变直/鼻尖抬升属侧脸效果，正脸不强推",
+    "下巴": "正脸只做下庭比例略拉长、下颌缘到颏部过渡略清晰；颏前突（E-line）属侧脸效果，正脸不强推前突",
+}
+
+# expression 部位（肉毒动态纹）在静止中性正脸的诚实备注。
+_EXPRESSION_FRONTAL_CAVEAT = "动态纹仅做表情时显现，静止中性正脸可不明显，不强求可见变化"
+
 
 # === L1：品牌 → 项目类型 + 时间锚（人工权威，反臆造）===
 # time_anchor 键：即刻 / 消肿|起效 / 稳定代表态|峰值 / 维持 —— 用于场景化 prompt 的时间语境。
@@ -257,20 +281,29 @@ def parse_procedures(raw: str) -> dict[str, Any]:
 
 
 def build_effect_prompt_fragment(
-    project: str, region_key: str, strength: str = STRENGTH_NATURAL
+    project: str, region_key: str, strength: str = STRENGTH_NATURAL, view: str = "frontal"
 ) -> str | None:
     """单部位循证效果 prompt 片段（prompt 库核心单元）。
 
     组成：方向（做对）+ 强度语 + 红线（避免过度失真）+ 量化护栏 [+ 无 GT 诚实备注]。
     未登记 (项目,部位) → None（fail-closed，不编造效果语言）。
+
+    ``view`` = 待模拟照片视角（默认 frontal 正脸）。正脸图上：profile 部位（鼻背/下巴等）
+    用 ``FRONTAL_REFRAME`` 只推正脸可见部分（不强推侧脸效果）；expression 部位（动态纹）
+    加静态不可见备注。见 REGION_EFFECT_VIEW / injection-effect-standards.md §0.2。
     """
     row = effect_row(project, region_key)
     if row is None:
         return None
     strength_lang = _STRENGTH_LANG.get(strength, _STRENGTH_LANG[STRENGTH_NATURAL])
+    effect_view = REGION_EFFECT_VIEW.get(region_key, "frontal")
     avoid = "；".join(row["avoid"])
+    if view == "frontal" and effect_view == "profile" and region_key in FRONTAL_REFRAME:
+        direction = FRONTAL_REFRAME[region_key]
+    else:
+        direction = row["do_right"]
     parts = [
-        f"【{region_key}】方向：{row['do_right']}。",
+        f"【{region_key}】方向：{direction}。",
         f"强度：{strength_lang}。",
         f"红线（避免过度失真）：{avoid}。",
         f"护栏：{row['guardrail']}。",
@@ -278,6 +311,8 @@ def build_effect_prompt_fragment(
     note = row.get("ground_truth_note")
     if note:
         parts.append(f"备注（循证预测，无照片 GT）：{note}。")
+    if view == "frontal" and effect_view == "expression":
+        parts.append(f"备注：{_EXPRESSION_FRONTAL_CAVEAT}。")
     return " ".join(parts)
 
 
@@ -299,18 +334,21 @@ def compose_effect_prompt(
     strength: str = STRENGTH_NATURAL,
     do_not_touch: list[str] | None = None,
     scenario_note: str | None = None,
+    view: str = "frontal",
 ) -> str:
     """把多部位循证片段 + 身份铁律 + do_not_touch 组装成完整效果 prompt（prompt 库输出）。
 
     ``source`` = parse_procedures 结果 或 [(project, region), ...]。
     ``do_not_touch`` = 未做的部位（精准对应 + 不外扩，修正③：协调但只在做了的部位内）。
+    ``view`` = 待模拟照片视角（默认 frontal）：正脸图对 profile/expression 部位做 gate（见
+    build_effect_prompt_fragment / REGION_EFFECT_VIEW），避免在正脸强推侧脸/表情态效果。
     """
     pairs = _pairs_from(source)
     lines: list[str] = [
         "任务：医美术后效果模拟。严格只强化以下**实际做过**的术式部位，绝不无中生有添加未做的项目。",
     ]
     for project, region in pairs:
-        frag = build_effect_prompt_fragment(project, region, strength)
+        frag = build_effect_prompt_fragment(project, region, strength, view)
         if frag:
             lines.append(frag)
     if do_not_touch:
