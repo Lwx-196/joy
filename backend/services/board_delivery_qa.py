@@ -108,6 +108,7 @@ class BoardQAVerdict:
     provider: str = ""
     model: str = ""
     latency_ms: int = 0
+    assessed_at: str | None = None
 
     @property
     def deliverable(self) -> bool:
@@ -189,6 +190,7 @@ class BoardDeliveryQA:
 
         cached = self._cache_get(content_hash)
         if cached is not None:
+            self._sync_render_quality_metrics(cached, case_id=case_id, job_id=job_id, source_path=str(board_path))
             return cached
 
         try:
@@ -220,6 +222,7 @@ class BoardDeliveryQA:
 
         families = _coerce_families(parsed.get("families"))
         confidence = _coerce_float(parsed.get("confidence"))
+        assessed_at = _now()
         result = BoardQAVerdict(
             content_hash=content_hash,
             verdict=verdict,
@@ -231,6 +234,7 @@ class BoardDeliveryQA:
             provider=getattr(response, "provider", "") or "",
             model=getattr(response, "model", "") or "",
             latency_ms=int(getattr(response, "latency_ms", 0) or 0),
+            assessed_at=assessed_at,
         )
         self._cache_put(result, case_id=case_id, job_id=job_id, source_path=str(board_path))
         return result
@@ -283,6 +287,17 @@ class BoardDeliveryQA:
                  review_note   = excluded.review_note""",
             (content_hash, self._prompt_version, now, status, reviewed_by, now, note),
         )
+        row = self._conn.execute(
+            "SELECT * FROM board_delivery_qa WHERE content_hash = ? AND prompt_version = ?",
+            (content_hash, self._prompt_version),
+        ).fetchone()
+        if row is not None:
+            self._sync_render_quality_metrics(
+                self._row_to_verdict(row),
+                case_id=_coerce_int(_row_value(row, "case_id")),
+                job_id=_coerce_int(_row_value(row, "job_id")),
+                source_path=str(_row_value(row, "source_path") or ""),
+            )
         self._conn.commit()
 
     # ------------------------------------------------------------------
@@ -310,6 +325,7 @@ class BoardDeliveryQA:
     ) -> None:
         if self._conn is None:
             return
+        assessed_at = verdict.assessed_at or _now()
         self._conn.execute(
             """INSERT INTO board_delivery_qa
                  (content_hash, prompt_version, case_id, job_id, source_path,
@@ -330,10 +346,11 @@ class BoardDeliveryQA:
                 verdict.provider,
                 verdict.model,
                 verdict.latency_ms,
-                _now(),
+                assessed_at,
                 REVIEW_PENDING,
             ),
         )
+        self._sync_render_quality_metrics(verdict, case_id=case_id, job_id=job_id, source_path=source_path)
         self._conn.commit()
 
     def _row_to_verdict(self, row: sqlite3.Row) -> BoardQAVerdict:
@@ -349,13 +366,87 @@ class BoardDeliveryQA:
             model=row["model"] or "",
             latency_ms=int(row["latency_ms"] or 0),
             review_note=_row_value(row, "review_note"),
+            assessed_at=_row_value(row, "assessed_at"),
         )
+
+    def _sync_render_quality_metrics(
+        self,
+        verdict: BoardQAVerdict,
+        *,
+        case_id: int | None,
+        job_id: int | None,
+        source_path: str,
+    ) -> None:
+        """Mirror D6 verdict into render_quality.metrics_json when possible.
+
+        This is SSoT telemetry only. It does not alter quality_status,
+        quality_score, can_publish, or the D6 delivery gate decision.
+        """
+        if self._conn is None or job_id is None:
+            return
+        try:
+            row = self._conn.execute(
+                "SELECT metrics_json FROM render_quality WHERE render_job_id = ?",
+                (job_id,),
+            ).fetchone()
+        except sqlite3.Error:
+            return
+        if row is None:
+            return
+        metrics = _json_load(_row_value(row, "metrics_json"), {})
+        if not isinstance(metrics, dict):
+            metrics = {}
+        metrics["d6_qa"] = {
+            "verdict": verdict.verdict,
+            "families": list(verdict.families),
+            "primary_defect": verdict.primary_defect,
+            "content_hash": verdict.content_hash,
+            "prompt_version": self._prompt_version,
+            "review_status": verdict.review_status,
+            "held": verdict.held,
+            "assessed_at": verdict.assessed_at,
+            "source": "board_delivery_qa",
+            "case_id": case_id,
+            "job_id": job_id,
+            "source_path": source_path,
+            "confidence": verdict.confidence,
+            "provider": verdict.provider,
+            "model": verdict.model,
+            "error": verdict.error,
+        }
+        metrics["delivery_verdict"] = verdict.verdict
+        metrics["delivery_held"] = verdict.held
+        try:
+            self._conn.execute(
+                "UPDATE render_quality SET metrics_json = ?, updated_at = ? WHERE render_job_id = ?",
+                (json.dumps(metrics, ensure_ascii=False), _now(), job_id),
+            )
+        except sqlite3.Error:
+            return
 
 
 def _row_value(row: sqlite3.Row, key: str) -> Any:
     try:
         return row[key]
     except (IndexError, KeyError):
+        return None
+
+
+def _json_load(raw: Any, fallback: Any) -> Any:
+    if not raw:
+        return fallback
+    try:
+        return json.loads(raw)
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _coerce_int(raw: Any) -> int | None:
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
         return None
 
 

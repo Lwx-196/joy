@@ -300,6 +300,35 @@ def test_gate_screen_excludes_blocker_surfaces_held(
         assert gate.list_deliverables() == []
 
 
+def test_d6_verdict_syncs_into_render_quality_metrics_without_publish_change(
+    temp_db: Path, seed_case, tmp_path: Path
+) -> None:
+    case_id = seed_case(abs_path="/cases/customer-a/sync")
+    with db.connect() as conn:
+        board = _board(tmp_path, "gate-sync.jpg", b"\xff\xd8gate-sync")
+        job_id = _seed_render(conn, case_id=case_id, output_path=str(board), quality_score=100.0)
+        qa = BoardDeliveryQA(
+            StubProvider("blocker", primary="术后抠图崩", families=["cutout_artifact"]),
+            conn,
+        )
+
+        verdict = qa.assess(board, case_id=case_id, job_id=job_id)
+        row = conn.execute(
+            "SELECT can_publish, metrics_json FROM render_quality WHERE render_job_id = ?",
+            (job_id,),
+        ).fetchone()
+        metrics = json.loads(row["metrics_json"])
+
+    assert verdict.held is True
+    assert row["can_publish"] == 1
+    assert metrics["delivery_verdict"] == "blocker"
+    assert metrics["delivery_held"] is True
+    assert metrics["d6_qa"]["source"] == "board_delivery_qa"
+    assert metrics["d6_qa"]["job_id"] == job_id
+    assert metrics["d6_qa"]["case_id"] == case_id
+    assert metrics["d6_qa"]["families"] == ["cutout_artifact"]
+
+
 def test_gate_screen_passes_clean_and_warning(
     temp_db: Path, seed_case, tmp_path: Path
 ) -> None:
