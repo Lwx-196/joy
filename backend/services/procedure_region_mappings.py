@@ -128,6 +128,75 @@ BRAND_TO_PROJECT: dict[str, dict[str, Any]] = {
         "source": "user_authoritative (owner confirmed 2026-06-01: 弗缦=玻尿酸 HA filler)",
         "confidence": "high",
     },
+    # 泪沟 HA 品牌扩充（owner handoff 2026-06-02 权威分类「泪沟 HA 品牌」）。HA 时间锚是
+    # 机制级（所有 HA 填充共享 aquaphilic 动力学），复用弗缦结构；品牌粒径/交联差异不入
+    # time_anchor（其只供 prompt 时间语境，不作品牌特异声明）。若某品牌动力学特殊请改本表。
+    "盈致": {
+        "project": PROJECT_HA_FILLER,
+        "project_cn": "玻尿酸填充",
+        "ingredient": "玻尿酸(HA)",
+        "time_anchor": {
+            "即刻": "偏满偏肿（HA 亲水吸水 + 注入体积已在 + 针孔泛红）",
+            "消肿": "1-2 周",
+            "稳定代表态": "3-4 周，体积比即刻略收敛",
+            "维持": "HA 约 6-12 月",
+        },
+        "source": "user_authoritative (owner handoff 2026-06-02: 泪沟 HA 品牌)",
+        "confidence": "high",
+    },
+    "妮凯丽": {
+        "project": PROJECT_HA_FILLER,
+        "project_cn": "玻尿酸填充",
+        "ingredient": "玻尿酸(HA)",
+        "time_anchor": {
+            "即刻": "偏满偏肿（HA 亲水吸水 + 注入体积已在 + 针孔泛红）",
+            "消肿": "1-2 周",
+            "稳定代表态": "3-4 周，体积比即刻略收敛",
+            "维持": "HA 约 6-12 月",
+        },
+        "source": "user_authoritative (owner handoff 2026-06-02: 泪沟 HA 品牌)",
+        "confidence": "high",
+    },
+    "柯芮琦": {
+        "project": PROJECT_HA_FILLER,
+        "project_cn": "玻尿酸填充",
+        "ingredient": "玻尿酸(HA)",
+        "time_anchor": {
+            "即刻": "偏满偏肿（HA 亲水吸水 + 注入体积已在 + 针孔泛红）",
+            "消肿": "1-2 周",
+            "稳定代表态": "3-4 周，体积比即刻略收敛",
+            "维持": "HA 约 6-12 月",
+        },
+        "source": "user_authoritative (owner handoff 2026-06-02: 泪沟 HA 品牌)",
+        "confidence": "high",
+    },
+    "薇旖美": {
+        "project": PROJECT_HA_FILLER,
+        "project_cn": "玻尿酸填充",
+        "ingredient": "玻尿酸(HA)",
+        "time_anchor": {
+            "即刻": "偏满偏肿（HA 亲水吸水 + 注入体积已在 + 针孔泛红）",
+            "消肿": "1-2 周",
+            "稳定代表态": "3-4 周，体积比即刻略收敛",
+            "维持": "HA 约 6-12 月",
+        },
+        "source": "user_authoritative (owner handoff 2026-06-02: 泪沟 HA 品牌)",
+        "confidence": "high",
+    },
+    # generic「玻尿酸」（owner 可选）：substring 匹配，命中文件夹名含「玻尿酸」的无品牌 case。
+    "玻尿酸": {
+        "project": PROJECT_HA_FILLER,
+        "project_cn": "玻尿酸填充",
+        "ingredient": "玻尿酸(HA)",
+        "time_anchor": {
+            "即刻": "偏满偏肿（HA 亲水吸水 + 注入体积已在 + 针孔泛红）",
+            "消肿": "1-2 周",
+            "稳定代表态": "3-4 周，体积比即刻略收敛",
+            "维持": "HA 约 6-12 月",
+        },
+        "source": "user_authoritative (owner handoff 2026-06-02: generic 玻尿酸 = HA filler)",
+        "confidence": "high",
+    },
 }
 
 
