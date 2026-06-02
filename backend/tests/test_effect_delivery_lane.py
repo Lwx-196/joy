@@ -116,7 +116,7 @@ def test_effect_lane_rejected_is_held(tmp_path, monkeypatch):
     gen: list = []
     _wire(monkeypatch, tmp_path, specs, gen_counter=gen)
     qa = _FakeQA(_FakeVerdict(verdict="pass", winner_role="candidate", review_status="rejected"))
-    passed, held = mod._run_effect_delivery(tmp_path / "d3", dry_run=True, qa=qa, cases_root=tmp_path)
+    passed, held = mod._run_effect_delivery(tmp_path / "d3", dry_run=False, qa=qa, cases_root=tmp_path)
     assert passed == [] and len(held) == 1
 
 
@@ -126,9 +126,9 @@ def test_effect_lane_generation_cache_skips_reburn(tmp_path, monkeypatch):
     _wire(monkeypatch, tmp_path, specs, gen_counter=gen)
     qa = _FakeQA()
     out = tmp_path / "delivery"
-    mod._run_effect_delivery(out, dry_run=True, qa=qa, cases_root=tmp_path)
+    mod._run_effect_delivery(out, dry_run=False, qa=qa, cases_root=tmp_path)
     assert len(gen) == 1  # 第一次真生成
-    mod._run_effect_delivery(out, dry_run=True, qa=qa, cases_root=tmp_path)
+    mod._run_effect_delivery(out, dry_run=False, qa=qa, cases_root=tmp_path)
     assert len(gen) == 1  # 第二次命中缓存，不重烧 gpt-image-2 quota
 
 
@@ -150,6 +150,19 @@ def test_effect_lane_no_visible_change_held_hard_veto(tmp_path, monkeypatch):
     from backend.services.effect_delivery_qa import REASON_NO_VISIBLE_CHANGE
 
     qa = _FakeQA(_FakeVerdict(verdict="fail", winner_role="", hard_veto_reason=REASON_NO_VISIBLE_CHANGE))
-    passed, held = mod._run_effect_delivery(tmp_path / "d2", dry_run=True, qa=qa, cases_root=tmp_path)
+    passed, held = mod._run_effect_delivery(tmp_path / "d2", dry_run=False, qa=qa, cases_root=tmp_path)
     assert passed == [] and len(held) == 1
     assert held[0]["advisory_judge"]["hard_veto_reason"] == REASON_NO_VISIBLE_CHANGE
+
+
+def test_effect_lane_dry_run_uncached_does_not_burn_quota(tmp_path, monkeypatch):
+    # dry-run + 未缓存 → 不生成（0 quota）、记 would_project、不评判。
+    specs = [_spec(tmp_path, "郭若煊", "郭若煊__2026.4.1弗缦1.0注射泪沟")]
+    gen: list = []
+    _wire(monkeypatch, tmp_path, specs, gen_counter=gen)
+    qa = _FakeQA()
+    passed, held = mod._run_effect_delivery(tmp_path / "dd", dry_run=True, qa=qa, cases_root=tmp_path)
+    assert gen == []  # 关键：dry-run 未缓存不烧 gpt-image-2 quota
+    assert qa.calls == 0  # 也不调判官
+    assert passed == [] and len(held) == 1
+    assert "would_project" in held[0]["reason"]

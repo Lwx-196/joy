@@ -104,12 +104,14 @@ def _effect_generate_candidate(
     *,
     job_id: int,
     cache_dir: Path,
-) -> tuple[Path, bool]:
-    """raw-first effect 投影 + 生成缓存。返回 (candidate_path, cache_hit)。
+    allow_generate: bool = True,
+) -> tuple[Path | None, bool]:
+    """raw-first effect 投影 + 生成缓存。返回 (candidate_path | None, cache_hit)。
 
     缓存键 = sha256(术前图字节 + 排序后的 effect_pairs + recipe 版本)。命中则复用、不烧
     gpt-image-2 quota（owner 成本决策）。未命中走生产 node router(raw_first) → 取
-    output_refs 的 generated_raw（raw-first 无 effect_anchored）。
+    output_refs 的 generated_raw（raw-first 无 effect_anchored）。``allow_generate=False``
+    （dry-run）且未命中缓存 → 返回 ``(None, False)``，**不生成、不烧 quota**（预览用）。
     """
     import hashlib
 
@@ -125,6 +127,8 @@ def _effect_generate_candidate(
     cached = cache_dir / f"{key}.png"
     if cached.is_file():
         return cached, True
+    if not allow_generate:
+        return None, False  # dry-run + 未缓存：跳过生成（0 quota），调用方记 would-project
 
     result = aga.run_ps_model_router_after_simulation(
         job_id=job_id,
@@ -243,7 +247,8 @@ def _run_effect_delivery(
         baseline_path = str(spec.before_path)
         try:
             candidate, cache_hit = _effect_generate_candidate(
-                spec.before_path, in_scope, job_id=_EFFECT_JOB_BASE - idx, cache_dir=cache_dir
+                spec.before_path, in_scope, job_id=_EFFECT_JOB_BASE - idx,
+                cache_dir=cache_dir, allow_generate=not dry_run,
             )
         except Exception as exc:  # noqa: BLE001 — fail-closed: 投影失败该 case 入 held 报错，不阻塞
             held_rows.append(
@@ -251,6 +256,17 @@ def _run_effect_delivery(
                     customer=customer, case_name=spec.case_dir.name, effect_pairs=in_scope,
                     candidate_path=None, baseline_path=baseline_path,
                     reason=f"projection_error: {type(exc).__name__}: {str(exc)[:160]}",
+                )
+            )
+            continue
+
+        if candidate is None:
+            # dry-run + 未缓存：预览，不生成不评判（0 quota）。
+            held_rows.append(
+                _effect_held_row(
+                    customer=customer, case_name=spec.case_dir.name, effect_pairs=in_scope,
+                    candidate_path=None, baseline_path=baseline_path,
+                    reason="would_project (dry-run, not generated — real run burns gpt-image-2 quota)",
                 )
             )
             continue
