@@ -37,12 +37,34 @@ PROJECT_CAHA = "calcium_hydroxylapatite"
 # PMMA 聚甲基丙烯酸甲酯（爱贝芙）：即刻体积（牛胶原载体）+ **永久**（PMMA 微球不降解，载体吸收
 # 后被结缔组织包裹永久留存）。不可逆，机制异于一切可降解填充。
 PROJECT_PMMA = "pmma_permanent"
+# PCL 聚己内酯（少女针，伊妍仕/Ellansé）：含 70% CMC 凝胶载体故**即刻有体积**（异于无即刻体积的
+# PLLA 童颜针）+ PCL 微球长效刺激自体胶原；塑形强、多用于下巴/鼻基底深层，维持 ~1-2 年（因型号）。
+PROJECT_PCL = "polycaprolactone"
 PROJECT_TYPES: frozenset[str] = frozenset(
     {
         PROJECT_HA_FILLER, PROJECT_BOTOX, PROJECT_BIOSTIMULATOR,
-        PROJECT_COLLAGEN_FILLER, PROJECT_CAHA, PROJECT_PMMA,
+        PROJECT_COLLAGEN_FILLER, PROJECT_CAHA, PROJECT_PMMA, PROJECT_PCL,
     }
 )
+
+# === 面部填充剂完整 taxonomy（2026-06-02 自上而下权威普查，避免被动漏类）===
+# 权威源：consultingroom / theplasticsfella / 知乎医美再生材料综述 / NMPA。按「即刻体积 /
+# 生物刺激 / 可降解性」分。✅=已建模 · 📝=已知暂不建模（0 库案例，原因在右）。
+#   可降解·即刻体积：
+#     ✅ HA 玻尿酸 ........ PROJECT_HA_FILLER（即刻体积，6-12月，可透明质酸酶溶解）
+#     ✅ 胶原蛋白 ......... PROJECT_COLLAGEN_FILLER（即刻体积+部分再生，6-12月）
+#     ✅ CaHA 微晶瓷 ...... PROJECT_CAHA（即刻体积+生物刺激 hybrid，12-18月）
+#     ✅ PCL 少女针 ....... PROJECT_PCL（CMC载体即刻体积+长效刺激，~1-2年）
+#   可降解·无即刻体积（纯生物刺激）：
+#     ✅ PLLA 童颜针 ...... PROJECT_BIOSTIMULATOR（无即刻体积，渐进全局年轻化，~2年）
+#   不可降解·永久：
+#     ✅ PMMA ............. PROJECT_PMMA（即刻体积+永久，~5年）
+#     📝 PAAG/奥美定/液态硅胶 . 违禁永久填充（中国已禁，0库案例）→ 不建模；如遇按违规标记人工
+#   自体/生物制剂（非合成填充剂）：
+#     📝 自体脂肪 ......... 自体移植手术（非产品品牌），0库案例 → 不建模（如需另立流程）
+#     📝 PRP/CGF/PDRN ..... 自体血/再生制剂（熊猫针可指此，但本院熊猫针=嗨体 HA），0库案例 → 不建模
+#   神经调节（非填充但同属注射）：
+#     ✅ 肉毒毒素 ......... PROJECT_BOTOX（神经调节，无体积）
 
 # === 机制语境（injection-effect-standards.md §0.1）===
 # 三类机制的术后视觉性质 + 时间锚点完全不同，决定"术后稳定态"怎么画。compose_effect_prompt
@@ -75,6 +97,11 @@ _MECHANISM_CONTEXT: dict[str, str] = {
         "PMMA(聚甲基丙烯酸甲酯，如爱贝芙)：即刻有体积（牛胶原载体填充）+ 永久（PMMA 微球不降解，"
         "载体吸收后永久留存）；模拟对标术后约 2 周稳定的局部体积/轮廓改善，保毛孔真实质感与自然"
         "气色，不磨皮不漂白。"
+    ),
+    PROJECT_PCL: (
+        "聚己内酯(PCL，少女针，如伊妍仕/Ellansé)：含 CMC 凝胶载体故即刻有体积（异于无即刻体积的"
+        "PLLA 童颜针）+ PCL 微球长效刺激自体胶原；模拟对标术后约 2 周稳定的体积/轮廓改善（塑形强，"
+        "多用于下巴/鼻基底深层支撑），保毛孔真实质感与自然气色，不磨皮不漂白。"
     ),
 }
 
@@ -159,6 +186,13 @@ _PMMA_ANCHOR: dict[str, str] = {
     "消肿": "1-3 月（载体胶原逐渐被替代）",
     "稳定代表态": "约 1-3 月稳定，PMMA 微球永久留存",
     "维持": "永久（不可降解，不可逆）",
+}
+# PCL（少女针）：CMC 凝胶载体即刻体积 + PCL 微球长效刺激，维持 ~1-2 年。
+_PCL_ANCHOR: dict[str, str] = {
+    "即刻": "即刻有体积（CMC 凝胶载体即刻填充 + 针孔泛红）",
+    "消肿": "数天-1 周",
+    "稳定代表态": "约 2 周稳定，之后 PCL 微球长效刺激自体胶原",
+    "维持": "约 1-2 年（因型号 S/M/L/E 而异）",
 }
 BRAND_TO_PROJECT: dict[str, dict[str, Any]] = {
     "海魅": {
@@ -397,6 +431,17 @@ BRAND_TO_PROJECT: dict[str, dict[str, Any]] = {
         "ingredient": "⚠️CaHA 羟基磷灰石(=云镜 另一写法，海魅·云境，昊海；面部超适应症)",
         "time_anchor": _CAHA_ANCHOR,
         "source": "NMPA 国械注准20183131912 + 核查 2026-06-02（off-label 面部）", "confidence": "high",
+    },
+    # --- PCL 少女针 聚己内酯（PROJECT_PCL；CMC载体即刻体积+长效刺激，异于纯 PLLA；⚠️ effect_rows 延后；proactive 0库案例）---
+    "伊妍仕": {  # = Ellansé PCL 少女针
+        "project": PROJECT_PCL, "project_cn": "少女针(PCL)",
+        "ingredient": "聚己内酯 PCL 微球 + CMC 凝胶载体(=Ellansé 伊妍仕)", "time_anchor": _PCL_ANCHOR,
+        "source": "权威综述核查 2026-06-02（PCL 少女针，proactive 0库案例）", "confidence": "high",
+    },
+    "少女针": {  # generic PCL
+        "project": PROJECT_PCL, "project_cn": "少女针(PCL)",
+        "ingredient": "聚己内酯 PCL(generic 少女针，含 CMC 载体即刻体积+长效刺激)", "time_anchor": _PCL_ANCHOR,
+        "source": "权威综述核查 2026-06-02（generic PCL，proactive 0库案例）", "confidence": "high",
     },
     # --- 肉毒 ---
     "保妥适": {  # = BOTOX Allergan
@@ -724,7 +769,7 @@ def compose_effect_prompt(
 
 __all__ = [
     "PROJECT_HA_FILLER", "PROJECT_BOTOX", "PROJECT_BIOSTIMULATOR",
-    "PROJECT_COLLAGEN_FILLER", "PROJECT_CAHA", "PROJECT_PMMA", "PROJECT_TYPES",
+    "PROJECT_COLLAGEN_FILLER", "PROJECT_CAHA", "PROJECT_PMMA", "PROJECT_PCL", "PROJECT_TYPES",
     "STRENGTH_SUBTLE", "STRENGTH_NATURAL", "STRENGTH_STRONG", "STRENGTHS",
     "BRAND_TO_PROJECT", "EFFECT_ROWS", "IDENTITY_LOCKS",
     "resolve_brand", "effect_row", "parse_procedures",

@@ -72,6 +72,7 @@ def test_census_batch_2026_06_02():
         prm.PROJECT_COLLAGEN_FILLER: ("珂芮绮", "肤莱美", "肤柔美", "肤丽美", "肤力原"),
         prm.PROJECT_CAHA: ("菲林", "云镜", "云境"),               # CaHA hybrid（即刻体积+刺激）
         prm.PROJECT_PMMA: ("爱贝芙",),                            # PMMA 永久
+        prm.PROJECT_PCL: ("伊妍仕", "少女针"),                     # PCL 少女针（即刻体积+长效，proactive）
         prm.PROJECT_BIOSTIMULATOR: ("童颜针", "普丽妍", "塑妍萃"),  # 纯 PLLA（无即刻体积）
         prm.PROJECT_BOTOX: ("保妥适", "吉适", "吉士"),
     }
@@ -92,17 +93,19 @@ def test_census_batch_2026_06_02():
 def test_regenerative_caha_pmma_effect_deferred():
     # PLLA 生物刺激剂 / CaHA 微晶瓷 / PMMA 永久 已注册识别（不被误猜成 HA），但暂无 effect_rows
     # → 发货 fail-closed（待下轮补）。三者机制各异（CaHA/PMMA 有即刻体积、PLLA 无），独立类型。
-    for proj in (prm.PROJECT_BIOSTIMULATOR, prm.PROJECT_CAHA, prm.PROJECT_PMMA):
+    for proj in (prm.PROJECT_BIOSTIMULATOR, prm.PROJECT_CAHA, prm.PROJECT_PMMA, prm.PROJECT_PCL):
         for region in ("泪沟", "苹果肌", "下颌线", "全脸"):
             assert prm.effect_row(proj, region) is None, (proj, region)
     # 各自机制语境就位，compose 能注入对应语境，绝不臆造成 HA
     bio = prm.compose_effect_prompt([(prm.PROJECT_BIOSTIMULATOR, "苹果肌")])
     caha = prm.compose_effect_prompt([(prm.PROJECT_CAHA, "鼻基底")])
     pmma = prm.compose_effect_prompt([(prm.PROJECT_PMMA, "下巴")])
+    pcl = prm.compose_effect_prompt([(prm.PROJECT_PCL, "下巴")])
     assert "机制语境：胶原刺激剂" in bio
     assert "机制语境：羟基磷灰石(CaHA" in caha
     assert "机制语境：PMMA" in pmma
-    for p in (bio, caha, pmma):
+    assert "机制语境：聚己内酯(PCL" in pcl
+    for p in (bio, caha, pmma, pcl):
         assert "机制语境：玻尿酸(HA)" not in p
 
 
