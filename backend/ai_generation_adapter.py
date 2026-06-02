@@ -422,6 +422,7 @@ def build_after_enhancement_prompt(
     do_not_touch: list[str] | None = None,
     strength: str | None = None,
     scenario_note: str | None = None,
+    view: str = "frontal",
 ) -> str:
     """Build a detailed prompt for post-simulation image enhancement.
 
@@ -443,6 +444,7 @@ def build_after_enhancement_prompt(
                 strength=strength or prm.STRENGTH_NATURAL,
                 do_not_touch=do_not_touch,
                 scenario_note=scenario_note,
+                view=view,
             )
         LOGGER.warning(
             "build_after_enhancement_prompt: effect_projection mode requested without "
@@ -3542,6 +3544,40 @@ def run_comfyui_local_after_simulation(
     }
 
 
+# Inward feather for the effect mask-anchor seam. The separate-ellipse binary
+# mask gave a hard 0→255 step → the effect judge flagged a "circular patch overlay
+# / 拼接痕迹" (Phase 3.3 N=3). Feathering INWARD (erode → blur → clamp by the
+# binary mask) softens the treated-region edge into a smooth alpha ramp while
+# keeping pixels OUTSIDE the ellipse exactly original (identity floor /
+# outside_exact preserved). Radius is adaptive (fraction of the image short edge,
+# capped) so it never erodes a small region to nothing.
+_EFFECT_MASK_FEATHER_FRAC = 0.012
+_EFFECT_MASK_FEATHER_MIN_PX = 4
+_EFFECT_MASK_FEATHER_MAX_PX = 40
+
+
+def _feather_mask_inward(mask_path: Path) -> Path:
+    """Erode → Gaussian-blur → clamp-by-binary: an inward alpha ramp whose tail
+    reaches ~0 by the original ellipse boundary, so the seam disappears while
+    mask==0 stays exactly 0. Radius scales with the image short edge (capped).
+    Returns a sibling feathered mask path."""
+    from PIL import Image, ImageChops, ImageFilter
+
+    with Image.open(mask_path) as _m:
+        binary = _m.convert("L")
+    short_edge = min(binary.size)
+    radius = max(
+        _EFFECT_MASK_FEATHER_MIN_PX,
+        min(_EFFECT_MASK_FEATHER_MAX_PX, round(short_edge * _EFFECT_MASK_FEATHER_FRAC)),
+    )
+    eroded = binary.filter(ImageFilter.MinFilter(2 * radius + 1))
+    blurred = eroded.filter(ImageFilter.GaussianBlur(radius))
+    feathered = ImageChops.multiply(blurred, binary)  # clamp: outside ellipse → exactly 0
+    feathered_path = Path(mask_path).with_name(".effect-focus-mask-feathered.png")
+    feathered.save(feathered_path, format="PNG")
+    return feathered_path
+
+
 def _apply_effect_mask_anchor(
     *,
     original_path: Path,
@@ -3553,6 +3589,7 @@ def _apply_effect_mask_anchor(
 
     用 separate-ellipse 焦点 mask（每治疗区单独成椭圆真并集，区间留黑）+ ``Image.composite``
     把 gpt-image-2 整脸漂移（瘦脸/磨皮/换脸）锁回原图，身份完全保住，只有治疗区是 AI 效果。
+    mask 边缘向内羽化（``_feather_mask_inward``）以消除硬椭圆拼接缝（判官 N=3 抓出）。
 
     失败安全（与本模块 K-1 silent-fail 一致）：任何步骤异常 → 返回原始 AI 输出（不阻断交付），记日志。
     """
@@ -3566,6 +3603,8 @@ def _apply_effect_mask_anchor(
             output_path=output_path.parent / ".effect-focus-mask.png",
             separate_ellipses=True,
         )
+        if _EFFECT_MASK_FEATHER_FRAC > 0:
+            mask_path = _feather_mask_inward(mask_path)
         result = mask_anchor_composite(
             original_path, ai_output_path, mask_path, output_path, strict=False,
         )

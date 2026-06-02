@@ -25,7 +25,28 @@ from backend.services import facial_region_atlas as atlas
 # --- 项目类型（成分族）---
 PROJECT_HA_FILLER = "HA_filler"
 PROJECT_BOTOX = "botulinum_toxin"
-PROJECT_TYPES: frozenset[str] = frozenset({PROJECT_HA_FILLER, PROJECT_BOTOX})
+PROJECT_BIOSTIMULATOR = "biostimulator"  # PDLLA/PLLA 胶原刺激剂（艾维岚/童颜针），机制异于 HA
+PROJECT_TYPES: frozenset[str] = frozenset(
+    {PROJECT_HA_FILLER, PROJECT_BOTOX, PROJECT_BIOSTIMULATOR}
+)
+
+# === 机制语境（injection-effect-standards.md §0.1）===
+# 三类机制的术后视觉性质 + 时间锚点完全不同，决定"术后稳定态"怎么画。compose_effect_prompt
+# 按 case 实际含的机制注入对应语境，让模拟用对的时间锚点与视觉语言。
+_MECHANISM_CONTEXT: dict[str, str] = {
+    PROJECT_HA_FILLER: (
+        "玻尿酸(HA)：即刻有真实体积，效果=治疗区局部体积/轮廓塑形；模拟对标术后约 2 周消肿"
+        "稳定态（体积比即刻略收敛），保毛孔真实质感与自然红润健康气色，不磨皮不漂白。"
+    ),
+    PROJECT_BOTOX: (
+        "肉毒：神经调节、无体积、不改肤质；动态纹软化仅在做表情时显现，静止中性正脸可不明显"
+        "（不强求可见变化）；减弱非消除，保留自然表情动度，不磨皮、不僵脸。"
+    ),
+    PROJECT_BIOSTIMULATOR: (
+        "胶原刺激剂(PDLLA/PLLA，如艾维岚/童颜针)：无即刻体积，效果渐进；模拟对标术后 3-6 月"
+        "成熟态 = 整体紧致 / 全局饱满 / 肤质改善的自然年轻化，绝非即刻局部隆起。"
+    ),
+}
 
 # --- 强度档（修正②：默认 natural = 对标真实术后，非保守；上下两档备用）---
 STRENGTH_SUBTLE = "subtle"
@@ -36,8 +57,32 @@ STRENGTHS: tuple[str, ...] = (STRENGTH_SUBTLE, STRENGTH_NATURAL, STRENGTH_STRONG
 _STRENGTH_LANG: dict[str, str] = {
     STRENGTH_SUBTLE: "效果克制、细微可辨即可",
     STRENGTH_NATURAL: "效果清晰可见但自然，对标该术式真实可达的术后稳定效果（不保守、不夸张）",
-    STRENGTH_STRONG: "效果明显，达到该术式真实可达的较强一档，但严守下方红线不得过度失真",
+    STRENGTH_STRONG: "效果明显且方向明确、一眼可辨（达到该术式真实可达的较强一档）；宁可偏强也不要保守到看不出变化，但严守下方红线不得过度失真",
 }
+
+# === 正脸/侧脸 可见性 gate（injection-effect-standards.md §0.2）===
+# 部位效果的主可见视角：frontal=正脸即可见 / profile=侧脸才是主战场（正脸几乎不可见）
+# / expression=仅做表情时显（静止中性脸不可见）。喂正脸 case 照片时，profile/expression
+# 部位若强推完整效果即失真（鼻背变直/颏前突在正脸推不出、肉毒动态纹静态无变化）——这是
+# 之前正脸鼻/下巴模拟失败的根因（FDA/共识坐实，详见 injection-effect-standards.md）。
+REGION_EFFECT_VIEW: dict[str, str] = {
+    "鼻背": "profile",
+    "鼻基底": "profile",
+    "下巴": "profile",
+    "川字": "expression",
+    "额纹": "expression",
+    "鱼尾纹": "expression",
+}
+
+# profile 部位在正脸图上只能推的「正脸可见」部分（替代完整 do_right，避免强推侧脸效果）。
+FRONTAL_REFRAME: dict[str, str] = {
+    "鼻背": "正脸只做鼻梁中线高光更对称、更连续，两侧鼻背美学线对称；鼻背变直/驼峰填平/鼻尖抬升属侧脸效果，正脸不强推、不增宽鼻梁",
+    "鼻基底": "正脸只做鼻基底区轻微支撑、鼻周过渡自然；鼻背变直/鼻尖抬升属侧脸效果，正脸不强推",
+    "下巴": "正脸只做下庭比例略拉长、下颌缘到颏部过渡略清晰；颏前突（E-line）属侧脸效果，正脸不强推前突",
+}
+
+# expression 部位（肉毒动态纹）在静止中性正脸的诚实备注。
+_EXPRESSION_FRONTAL_CAVEAT = "动态纹仅做表情时显现，静止中性正脸可不明显，不强求可见变化"
 
 
 # === L1：品牌 → 项目类型 + 时间锚（人工权威，反臆造）===
@@ -70,6 +115,19 @@ BRAND_TO_PROJECT: dict[str, dict[str, Any]] = {
         "source": "user_authoritative + effect-evidence-library §0.1/§2",
         "confidence": "high",
     },
+    "弗缦": {
+        "project": PROJECT_HA_FILLER,
+        "project_cn": "玻尿酸填充",
+        "ingredient": "玻尿酸(HA)",
+        "time_anchor": {
+            "即刻": "偏满偏肿（HA 亲水吸水 + 注入体积已在 + 针孔泛红）",
+            "消肿": "1-2 周",
+            "稳定代表态": "3-4 周，体积比即刻略收敛",
+            "维持": "HA 约 6-12 月",
+        },
+        "source": "user_authoritative (owner confirmed 2026-06-01: 弗缦=玻尿酸 HA filler)",
+        "confidence": "high",
+    },
 }
 
 
@@ -89,6 +147,53 @@ EFFECT_ROWS: dict[tuple[str, str], dict[str, Any]] = {
         "guardrail": "E-line 上唇后≈4mm/下唇后≈2mm（族裔差异大）；颏突约平面后 3mm；正脸下巴轮廓自然",
         "evidence": "系统综述 N=2738 + RCT（强）",
     },
+    # 以下 4 行 = effect-evidence-library §1（填充类）已有但此前未港的权威行（逐字转录，
+    # 键对齐 atlas region key；鼻背/鼻基底 共享库「鼻基底/鼻」行）。泪沟=Phase 0 锚点 + 案例库
+    # 最常见部位；鼻背令 海魅注射鼻子 的 case 多解析一个 effect pair。
+    (PROJECT_HA_FILLER, "泪沟"): {
+        "do_right": "凹陷填平、眼下阴影变淡、睑-颊平滑过渡",
+        "avoid": ["Tyndall 蓝灰", "眼下持续浮肿/眼袋", "sunset eyes", "松鼠脸"],
+        "guardrail": "填平到齐平不填出凸度；薄皮肤勿透蓝；单侧仅约 0.45mL",
+        "evidence": "共识（Anido 2021）+ 回顾性 N=155",
+    },
+    (PROJECT_HA_FILLER, "苹果肌"): {
+        "do_right": "颧高点抬升（外上象限）、侧面 Ogee 曲线恢复、法令纹间接变浅",
+        "avoid": ["pillow face/飞碟脸", "花栗鼠颊", "整脸均匀鼓起", "微笑异常前突"],
+        "guardrail": "高点在外上（Hinderer 线交点）非鼻侧；定向投影非弥散膨胀",
+        "evidence": "共识综述（Hinderer 线既定标准）",
+    },
+    (PROJECT_HA_FILLER, "鼻基底"): {
+        "do_right": "鼻背视觉变直、鼻尖适度抬升、鼻基底支撑",
+        "avoid": ["Avatar nose（鼻背增宽、鼻颊界限消失）", "鼻尖过度抬升", "鼻梁过厚"],
+        "guardrail": "保守微调；正面不增宽；用量本就最小（均值 0.8mL）；血管高危区，模拟应保守",
+        "evidence": "开放标签 N=52 + 综述",
+    },
+    (PROJECT_HA_FILLER, "鼻背"): {
+        "do_right": "鼻背明显拉高变挺、沿鼻梁中线延伸出一条连续清晰的高光带、鼻尖适度抬升、鼻基底支撑（正面不增宽）",
+        "avoid": ["Avatar nose（鼻背增宽、鼻颊界限消失）", "鼻尖过度抬升", "鼻梁过厚"],
+        "guardrail": "保守微调；正面不增宽；用量本就最小（均值 0.8mL）；血管高危区，模拟应保守",
+        "evidence": "开放标签 N=52 + 综述",
+    },
+    # 以下 4 行 = injection-effect-standards.md 厂商级新增（卧蚕/太阳穴/法令纹 HA + 咬肌 肉毒）。
+    (PROJECT_HA_FILLER, "卧蚕"): {
+        # ⚠️ 与泪沟方向相反：卧蚕是「塑造饱满」，不是「填平」。
+        "do_right": "紧贴下睫毛线正下方塑造细窄、柔和、连续的横向饱满隆起（卧蚕），微笑时随眼轮匝肌自然鼓起更明显、眼神亲和年轻；静态低调自然——是塑造饱满，不是填平凹陷",
+        "avoid": ["腊肠卧蚕（粗圆僵硬）", "做成显老的眼袋（更大更靠下、发暗下垂）", "整片浮肿/泡眼", "静态就过度膨出（应笑时显、静时收）"],
+        "guardrail": "睑前深层皮下、紧贴睫毛线的窄带；小颗粒低黏弹软胶；极少量、宁窄勿宽（精确 mL 个体化，无共识值）",
+        "evidence": "Life(Basel) 2025 charming roll 技术综述（中）",
+    },
+    (PROJECT_HA_FILLER, "太阳穴"): {
+        "do_right": "填平颞凹、上面部从骨感/凹陷/憔悴变饱满流畅、发际-眉尾-颧弓-额头过渡顺滑，改善太阳穴塌陷显老/显凶",
+        "avoid": ["颞区鼓出/膨隆不自然", "表浅注射结节/可见隆起", "左右不对称"],
+        "guardrail": "骨膜上深层、保守；⚠️ 颞区血管高危（颞深↔眼动脉吻合，误注致失明/坏死），模拟必须保守",
+        "evidence": "FDA Voluma XC 颞部指征 2024 + 颞区血管 meta（强）",
+    },
+    (PROJECT_HA_FILLER, "法令纹"): {
+        "do_right": "鼻唇沟变浅但不完全消失（保留自然鼻唇过渡）；优先靠苹果肌从上方支撑间接变浅，沟本身仅轻度填充精修",
+        "avoid": ["填到沟完全消失（法令是正常解剖，全消显假）", "鼻旁/颊隆起成嵴", "孤立猛填忽略苹果肌缺失", "pillow face 局部膨胀"],
+        "guardrail": "朝目标区间靠一档、非全消；优先苹果肌地基（间接），直接填仅做剩余精修；深度分层",
+        "evidence": "MD Codes NL1-3 + cheek-first 原则 PMC8012343 + Voluma 间接减轻法令（强）",
+    },
     (PROJECT_BOTOX, "额纹"): {
         "do_right": "静止/抬眉横纹变浅减少、额头平顺、保留抬眉动度",
         "avoid": ["frozen 额头", "纹 100% 消失如磨皮", "眉毛下垂", "上睑沉重"],
@@ -102,6 +207,14 @@ EFFECT_ROWS: dict[tuple[str, str], dict[str, Any]] = {
         "guardrail": "眉间放松平顺；不抬外侧眉；保眉自然形",
         "evidence": "多 RCT + Cochrane（极强）",
         "ground_truth_note": "无照片 GT，纯循证预测",
+    },
+    (PROJECT_BOTOX, "咬肌"): {
+        # 瘦脸针：肉毒里唯一在静态正脸有明显宽度变化者（靠继发萎缩，起效最慢）。
+        "do_right": "下面部（下颌角/bigonial 宽度）变窄、方/国字脸→V/瓜子/卵圆脸轮廓柔化、咬肌膨隆消退；中面颊饱满度保留、笑容对称自然",
+        "avoid": ["矛盾性鼓包（咬牙时咬肌前部异常鼓出）", "面颊凹陷/sunken cheek（剂量过大显疲惫非瘦）", "太阳穴下塌", "笑容不对称/歪嘴"],
+        "guardrail": "只动下面部宽度，不动中面容积/太阳穴；笑容对称+咀嚼保留；非越瘦越好，过度=凹陷（萎缩约 8-35%）",
+        "evidence": "前瞻+3D 研究 PMC4230655/PMC12512921（强，off-label 但大量同行评审）",
+        "ground_truth_note": "肉毒咬肌即刻零变化，靠继发萎缩、可见轮廓峰值约 12 周（起效最慢）；无照片 GT 纯循证预测",
     },
 }
 
@@ -217,20 +330,29 @@ def parse_procedures(raw: str) -> dict[str, Any]:
 
 
 def build_effect_prompt_fragment(
-    project: str, region_key: str, strength: str = STRENGTH_NATURAL
+    project: str, region_key: str, strength: str = STRENGTH_NATURAL, view: str = "frontal"
 ) -> str | None:
     """单部位循证效果 prompt 片段（prompt 库核心单元）。
 
     组成：方向（做对）+ 强度语 + 红线（避免过度失真）+ 量化护栏 [+ 无 GT 诚实备注]。
     未登记 (项目,部位) → None（fail-closed，不编造效果语言）。
+
+    ``view`` = 待模拟照片视角（默认 frontal 正脸）。正脸图上：profile 部位（鼻背/下巴等）
+    用 ``FRONTAL_REFRAME`` 只推正脸可见部分（不强推侧脸效果）；expression 部位（动态纹）
+    加静态不可见备注。见 REGION_EFFECT_VIEW / injection-effect-standards.md §0.2。
     """
     row = effect_row(project, region_key)
     if row is None:
         return None
     strength_lang = _STRENGTH_LANG.get(strength, _STRENGTH_LANG[STRENGTH_NATURAL])
+    effect_view = REGION_EFFECT_VIEW.get(region_key, "frontal")
     avoid = "；".join(row["avoid"])
+    if view == "frontal" and effect_view == "profile" and region_key in FRONTAL_REFRAME:
+        direction = FRONTAL_REFRAME[region_key]
+    else:
+        direction = row["do_right"]
     parts = [
-        f"【{region_key}】方向：{row['do_right']}。",
+        f"【{region_key}】方向：{direction}。",
         f"强度：{strength_lang}。",
         f"红线（避免过度失真）：{avoid}。",
         f"护栏：{row['guardrail']}。",
@@ -238,6 +360,8 @@ def build_effect_prompt_fragment(
     note = row.get("ground_truth_note")
     if note:
         parts.append(f"备注（循证预测，无照片 GT）：{note}。")
+    if view == "frontal" and effect_view == "expression":
+        parts.append(f"备注：{_EXPRESSION_FRONTAL_CAVEAT}。")
     return " ".join(parts)
 
 
@@ -259,18 +383,29 @@ def compose_effect_prompt(
     strength: str = STRENGTH_NATURAL,
     do_not_touch: list[str] | None = None,
     scenario_note: str | None = None,
+    view: str = "frontal",
 ) -> str:
     """把多部位循证片段 + 身份铁律 + do_not_touch 组装成完整效果 prompt（prompt 库输出）。
 
     ``source`` = parse_procedures 结果 或 [(project, region), ...]。
     ``do_not_touch`` = 未做的部位（精准对应 + 不外扩，修正③：协调但只在做了的部位内）。
+    ``view`` = 待模拟照片视角（默认 frontal）：正脸图对 profile/expression 部位做 gate（见
+    build_effect_prompt_fragment / REGION_EFFECT_VIEW），避免在正脸强推侧脸/表情态效果。
     """
     pairs = _pairs_from(source)
     lines: list[str] = [
         "任务：医美术后效果模拟。严格只强化以下**实际做过**的术式部位，绝不无中生有添加未做的项目。",
     ]
+    # 机制语境：按 case 实际含的机制（HA/肉毒/胶原刺激剂）注入对应时间锚点+视觉性质，
+    # 让模拟用对的"术后稳定态"逻辑（混合机制 case 各注一条）。
+    seen_mechanisms: list[str] = []
+    for project, _region in pairs:
+        if project in _MECHANISM_CONTEXT and project not in seen_mechanisms:
+            seen_mechanisms.append(project)
+    for project in seen_mechanisms:
+        lines.append(f"机制语境：{_MECHANISM_CONTEXT[project]}")
     for project, region in pairs:
-        frag = build_effect_prompt_fragment(project, region, strength)
+        frag = build_effect_prompt_fragment(project, region, strength, view)
         if frag:
             lines.append(frag)
     if do_not_touch:

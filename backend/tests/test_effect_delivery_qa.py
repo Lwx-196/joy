@@ -26,6 +26,8 @@ import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
 
+from PIL import Image
+
 from backend.services.effect_delivery_qa import (
     REVIEW_CLEARED,
     REVIEW_REJECTED,
@@ -106,6 +108,16 @@ def _pair(tmp_path: Path, tag: str) -> tuple[Path, Path]:
     baseline = _img(tmp_path, f"{tag}-pre.jpg", b"\xff\xd8" + tag.encode() + b"-pre")
     candidate = _img(tmp_path, f"{tag}-after.jpg", b"\xff\xd8" + tag.encode() + b"-after")
     return baseline, candidate
+
+
+def _real_img(
+    path: Path, *, color: tuple[int, int, int] = (120, 90, 80), size: tuple[int, int] = (64, 64)
+) -> Path:
+    """A real, decodable PNG — required to exercise the pixel no-change pre-check
+    (the byte-string ``_pair`` fixtures are undecodable, so the pre-check
+    fail-opens straight to the judge, leaving the legacy tests unchanged)."""
+    Image.new("RGB", size, color).save(path, "PNG")
+    return path
 
 
 def _mem() -> sqlite3.Connection:
@@ -194,6 +206,77 @@ def test_unreadable_image_unavailable(tmp_path: Path) -> None:
     assert v.verdict == "unavailable"
     assert v.held is True
     assert provider.calls == 0  # never even reached the judge
+
+
+# ---------------------------------------------------------------------------
+# Deterministic no-change pre-check (Step 1.5, L-151) — a candidate visually
+# identical to its baseline is a no-change projection (FAILURE), held BEFORE the
+# confirmation-biased judge can hallucinate a pass.
+# ---------------------------------------------------------------------------
+
+
+def test_no_visible_change_held_without_judge(tmp_path: Path) -> None:
+    # Identical pixels (the stub floor): held deterministically, judge never
+    # consulted — even though this stub judge would claim candidate-wins.
+    baseline = _real_img(tmp_path / "nc-pre.png")
+    candidate = _real_img(tmp_path / "nc-after.png")  # same color → identical pixels
+    provider = StubEffectJudge("candidate")
+    qa = _qa(provider)
+    v = qa.assess(baseline=baseline, candidate=candidate)
+    assert v.verdict == "fail"
+    assert v.hard_veto_reason == "no_visible_change"
+    assert "no_visible_change" in v.risk_flags
+    assert v.held is True and v.deliverable is False
+    assert provider.calls == 0  # judge never consulted
+    assert "no visible change" in v.reason
+
+
+def test_visible_change_reaches_judge(tmp_path: Path) -> None:
+    # A clearly different candidate passes the pre-check → the judge decides.
+    baseline = _real_img(tmp_path / "vc-pre.png", color=(120, 90, 80))
+    candidate = _real_img(tmp_path / "vc-after.png", color=(40, 200, 60))
+    provider = StubEffectJudge("candidate")
+    qa = _qa(provider)
+    v = qa.assess(baseline=baseline, candidate=candidate)
+    assert provider.calls == 1
+    assert v.winner_role == "candidate" and v.verdict == "pass"
+
+
+def test_no_visible_change_is_pixel_based_not_hash(tmp_path: Path) -> None:
+    # Candidate is a lossless re-container (BMP) of the baseline: DIFFERENT bytes
+    # (content_hash would differ) but identical pixels → still held. Proves the
+    # guard is pixel-based, not a byte-hash equality check.
+    baseline = _real_img(tmp_path / "px-pre.png", color=(118, 92, 84))
+    candidate = tmp_path / "px-after.bmp"
+    Image.open(baseline).save(candidate, "BMP")
+    assert baseline.read_bytes() != candidate.read_bytes()  # bytes differ
+    provider = StubEffectJudge("candidate")
+    qa = _qa(provider)
+    v = qa.assess(baseline=baseline, candidate=candidate)
+    assert v.verdict == "fail"
+    assert v.hard_veto_reason == "no_visible_change"
+    assert provider.calls == 0
+
+
+def test_no_visible_change_cached_and_clearable(tmp_path: Path) -> None:
+    # The no-change fail caches, lists in the human-review queue, and a human can
+    # clear it (defense-in-depth against a pre-check false-kill of a true subtle
+    # effect).
+    conn = _mem()
+    baseline = _real_img(tmp_path / "cl-pre.png")
+    candidate = _real_img(tmp_path / "cl-after.png")
+    provider = StubEffectJudge("candidate")
+    qa = EffectDeliveryQA(provider, conn)
+    v = qa.assess(baseline=baseline, candidate=candidate)
+    assert v.held is True
+    again = qa.assess(baseline=baseline, candidate=candidate)
+    assert again.cached is True  # second served from cache
+    assert provider.calls == 0  # never consulted across both calls
+    assert [p.content_hash for p in qa.pending_reviews()] == [v.content_hash]
+    qa.clear_effect(v.content_hash, reviewed_by="doctor", note="真 subtle 效果，人工放行")
+    after = qa.assess(baseline=baseline, candidate=candidate)
+    assert after.review_status == REVIEW_CLEARED
+    assert after.deliverable is True
 
 
 # ---------------------------------------------------------------------------

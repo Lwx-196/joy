@@ -59,9 +59,62 @@ def test_effect_rows_for_case45_projects():
     assert glab and glab.get("ground_truth_note")
 
 
+def test_ha_filler_region_rows_ported_from_library():
+    # effect-evidence-library §1 行港进 EFFECT_ROWS（grounded 转录，非臆造）：泪沟=Phase 0
+    # 锚点 + 库最常见部位；鼻背令「海魅注射鼻子」类 case 多解析一个 effect pair。
+    for region in ("泪沟", "苹果肌", "鼻基底", "鼻背"):
+        row = prm.effect_row(prm.PROJECT_HA_FILLER, region)
+        assert row is not None, region
+        assert row["do_right"] and isinstance(row["avoid"], list) and row["avoid"]
+        assert row["guardrail"] and row["evidence"]
+
+
+def test_frontal_gate_reframes_profile_regions():
+    # 正脸 gate：profile 部位（下巴/鼻背）只推正脸可见部分，不强推侧脸效果（鼻背变直/颏前突）
+    chin = prm.build_effect_prompt_fragment(prm.PROJECT_HA_FILLER, "下巴", view="frontal")
+    assert "正脸不强推前突" in chin and "下庭" in chin
+    assert "前突度增加" not in chin  # 完整 do_right 的侧脸语言被 reframe 掉
+    nose = prm.build_effect_prompt_fragment(prm.PROJECT_HA_FILLER, "鼻背", view="frontal")
+    assert "侧脸" in nose and "中线高光" in nose
+    # 非正脸视角（profile）→ 推完整 do_right（侧脸主战场）
+    chin_side = prm.build_effect_prompt_fragment(prm.PROJECT_HA_FILLER, "下巴", view="profile")
+    assert "前突度增加" in chin_side
+    # frontal 部位（泪沟）不受 gate 影响 → 完整 do_right
+    tt = prm.build_effect_prompt_fragment(prm.PROJECT_HA_FILLER, "泪沟", view="frontal")
+    assert "凹陷填平" in tt
+
+
+def test_mechanism_context_injected_per_case():
+    # 机制语境按 case 实际含的机制注入：HA-only → 只 HA 语境
+    ha = prm.compose_effect_prompt([(prm.PROJECT_HA_FILLER, "泪沟")])
+    assert "机制语境：玻尿酸(HA)" in ha and "机制语境：肉毒" not in ha
+    # 混合（肉毒+HA）→ 两条都注入
+    mixed = prm.compose_effect_prompt([(prm.PROJECT_BOTOX, "川字"), (prm.PROJECT_HA_FILLER, "唇")])
+    assert "机制语境：肉毒" in mixed and "机制语境：玻尿酸(HA)" in mixed
+    # 肉毒静态无变化的诚实标注（防 judge 把静态正脸无变化判失败）
+    assert "静止中性正脸可不明显" in mixed
+
+
+def test_new_region_rows_grounded():
+    # injection-effect-standards 厂商级新增行（atlas key 都存在 → 能从 case 名解析）
+    for proj, region in [
+        (prm.PROJECT_HA_FILLER, "卧蚕"), (prm.PROJECT_HA_FILLER, "太阳穴"),
+        (prm.PROJECT_HA_FILLER, "法令纹"), (prm.PROJECT_BOTOX, "咬肌"),
+    ]:
+        row = prm.effect_row(proj, region)
+        assert row and row["do_right"] and isinstance(row["avoid"], list) and row["avoid"]
+        assert row["guardrail"] and row["evidence"]
+    # 卧蚕 = 塑造饱满（与泪沟填平方向相反，prompt 不能混）
+    wocan = prm.effect_row(prm.PROJECT_HA_FILLER, "卧蚕")["do_right"]
+    assert "塑造" in wocan and "饱满" in wocan and "不是填平" in wocan
+    # 咬肌(瘦脸) = 肉毒，带即刻零变化/12 周时间锚点
+    masseter = prm.effect_row(prm.PROJECT_BOTOX, "咬肌")
+    assert masseter.get("ground_truth_note") and "12 周" in masseter["ground_truth_note"]
+
+
 def test_effect_row_unknown_pair_is_none():
     # not seeded → None (do NOT fabricate effect language)
-    assert prm.effect_row(prm.PROJECT_HA_FILLER, "太阳穴") is None
+    assert prm.effect_row(prm.PROJECT_HA_FILLER, "耳") is None
     assert prm.effect_row("__nope__", "唇") is None
 
 
@@ -120,8 +173,8 @@ def test_build_effect_prompt_fragment_contains_evidence():
 
 
 def test_build_effect_prompt_fragment_unknown_returns_none():
-    # fail-closed: no evidence row → no fabricated effect language
-    assert prm.build_effect_prompt_fragment(prm.PROJECT_HA_FILLER, "太阳穴") is None
+    # fail-closed: no evidence row → no fabricated effect language（耳=未登记部位）
+    assert prm.build_effect_prompt_fragment(prm.PROJECT_HA_FILLER, "耳") is None
 
 
 def test_build_effect_prompt_fragment_strength_modulates():
