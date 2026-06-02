@@ -90,22 +90,31 @@ def test_census_batch_2026_06_02():
     assert prm.resolve_brand("黑金") is None
 
 
-def test_regenerative_caha_pmma_effect_deferred():
-    # PLLA 生物刺激剂 / CaHA 微晶瓷 / PMMA 永久 已注册识别（不被误猜成 HA），但暂无 effect_rows
-    # → 发货 fail-closed（待下轮补）。三者机制各异（CaHA/PMMA 有即刻体积、PLLA 无），独立类型。
-    for proj in (prm.PROJECT_BIOSTIMULATOR, prm.PROJECT_CAHA, prm.PROJECT_PMMA, prm.PROJECT_PCL):
-        for region in ("泪沟", "苹果肌", "下颌线", "全脸"):
+def test_immediate_volume_regenerative_fill_reuse():
+    # 即刻体积型再生（CaHA/PCL/PMMA）在深层结构填充区（苹果肌/法令纹，Radiesse/少女针经典）复用
+    # HA 视觉行 → 可发货；薄层浅区（泪沟/唇/卧蚕）它们一般不用 → 不复用 None。
+    for proj in (prm.PROJECT_CAHA, prm.PROJECT_PCL, prm.PROJECT_PMMA):
+        for region in ("苹果肌", "法令纹"):
+            assert prm.effect_row(proj, region) == prm.effect_row(prm.PROJECT_HA_FILLER, region), (proj, region)
+        for region in ("泪沟", "唇", "卧蚕"):
             assert prm.effect_row(proj, region) is None, (proj, region)
-    # 各自机制语境就位，compose 能注入对应语境，绝不臆造成 HA
+
+
+def test_plla_biostimulator_no_fill_rows_global_effect():
+    # 循证 injection-effect-standards §2 铁律：PLLA 纯生物刺激剂术后稳定态是全局渐进紧致/饱满/
+    # 肤质，**绝不能画成即刻局部体积爆出** → per-region 填充行恒 None（不复用 HA），效果走机制语境。
+    for region in ("泪沟", "苹果肌", "法令纹", "下颌线", "全脸"):
+        assert prm.effect_row(prm.PROJECT_BIOSTIMULATOR, region) is None, region
+    # 各机制语境就位，compose 注入对应语境，绝不臆造成 HA
     bio = prm.compose_effect_prompt([(prm.PROJECT_BIOSTIMULATOR, "苹果肌")])
-    caha = prm.compose_effect_prompt([(prm.PROJECT_CAHA, "鼻基底")])
-    pmma = prm.compose_effect_prompt([(prm.PROJECT_PMMA, "下巴")])
+    caha = prm.compose_effect_prompt([(prm.PROJECT_CAHA, "苹果肌")])
     pcl = prm.compose_effect_prompt([(prm.PROJECT_PCL, "下巴")])
+    pmma = prm.compose_effect_prompt([(prm.PROJECT_PMMA, "下巴")])
     assert "机制语境：胶原刺激剂" in bio
-    assert "机制语境：羟基磷灰石(CaHA" in caha
-    assert "机制语境：PMMA" in pmma
+    assert "机制语境：羟基磷灰石(CaHA" in caha and "颧高点抬升" in caha  # CaHA 苹果肌 复用 HA 片段
     assert "机制语境：聚己内酯(PCL" in pcl
-    for p in (bio, caha, pmma, pcl):
+    assert "机制语境：PMMA" in pmma
+    for p in (bio, caha, pcl, pmma):
         assert "机制语境：玻尿酸(HA)" not in p
 
 

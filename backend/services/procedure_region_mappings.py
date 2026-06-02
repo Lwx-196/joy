@@ -580,25 +580,30 @@ def resolve_brand(brand: str) -> dict[str, Any] | None:
 
 # 胶原蛋白填充剂的单部位视觉效果复用 HA 填充行：即刻体积的软组织填充区，术后稳定态的单部位
 # 视觉结果与 HA 一致（材质差异体现在机制语境/维持时长，不改 do_right/avoid/guardrail）。仅限
-# 胶原临床实际用于填充的软组织区（= 正脸填充类）；结构性支撑区（鼻背/鼻基底/下巴）胶原一般
-# 不用 → 不 fallback，保持 fail-closed（不编造胶原在那些部位的效果）。
-_COLLAGEN_REUSES_HA_REGION: frozenset[str] = frozenset(
-    {"泪沟", "苹果肌", "唇", "法令纹", "卧蚕"}
-)
+# === 即刻体积型机制复用 HA 填充视觉行（material 差异由机制语境承载，单部位即刻填充视觉一致）===
+# 仅限各机制临床实际用于填充的部位：胶原=软组织全填充区；CaHA/PCL/PMMA=深层结构（苹果肌/法令
+# 纹，Radiesse/少女针经典颊+法令），不含泪沟/唇/卧蚕（薄层浅区它们一般不用）。
+# ⚠️ PLLA 纯生物刺激剂（PROJECT_BIOSTIMULATOR）**故意不在此列**——循证库 injection-effect-
+# standards §2 铁律：其术后稳定态是「渐进全局紧致/饱满/肤质改善、看不出某点多体积」，
+# **绝不能画成即刻局部体积爆出**（那是 HA 逻辑会失真）。故 PLLA 无 fill 复用、effect_row 恒
+# None，效果走机制语境的全局年轻化描述（非 per-region 填充）。
+_FILL_REUSE_HA: dict[str, frozenset[str]] = {
+    PROJECT_COLLAGEN_FILLER: frozenset({"泪沟", "苹果肌", "唇", "法令纹", "卧蚕"}),
+    PROJECT_CAHA: frozenset({"苹果肌", "法令纹"}),
+    PROJECT_PCL: frozenset({"苹果肌", "法令纹"}),
+    PROJECT_PMMA: frozenset({"苹果肌", "法令纹"}),
+}
 
 
 def effect_row(project: str, region_key: str) -> dict[str, Any] | None:
     """(项目类型, 部位) → 循证效果行；未登记返回 None（不得编造效果语言）。
 
-    胶原蛋白填充剂（即刻体积）在软组织填充区（``_COLLAGEN_REUSES_HA_REGION``）复用 HA 填充
-    视觉行——单部位术后稳定态视觉与 HA 一致，材质差异由机制语境承载。结构性区不复用 → None。
+    即刻体积型机制（胶原/CaHA/PCL/PMMA）在各自填充区（``_FILL_REUSE_HA``）复用 HA 填充视觉
+    行——单部位术后稳定态视觉与 HA 一致，材质差异由机制语境承载。结构性/浅区不复用 → None。
+    PLLA 纯生物刺激剂不复用（全局渐进非局部填充，见 ``_FILL_REUSE_HA`` 注释）。
     """
     row = EFFECT_ROWS.get((project, region_key))
-    if (
-        row is None
-        and project == PROJECT_COLLAGEN_FILLER
-        and region_key in _COLLAGEN_REUSES_HA_REGION
-    ):
+    if row is None and region_key in _FILL_REUSE_HA.get(project, frozenset()):
         row = EFFECT_ROWS.get((PROJECT_HA_FILLER, region_key))
     return dict(row) if row is not None else None
 
