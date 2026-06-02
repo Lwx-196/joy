@@ -27,15 +27,23 @@ def _spec(tmp_path: Path, customer: str, case_leaf: str):
 
 
 class _FakeVerdict:
-    def __init__(self, verdict="pass", winner_role="candidate", hard_veto_reason=None):
+    def __init__(
+        self, verdict="pass", winner_role="candidate", hard_veto_reason=None, review_status="pending"
+    ):
         self.verdict = verdict
         self.winner_role = winner_role
         self.hard_veto_reason = hard_veto_reason
         self.confidence = 0.85
         self.content_hash = "fakehash"
+        self.review_status = review_status
+        self.review_note = None
 
     @property
-    def deliverable(self) -> bool:  # winner=candidate→pass→True（若信任会 auto-ship）
+    def deliverable(self) -> bool:  # CLEARED→True / REJECTED→False / 否则信 judge pass
+        if self.review_status == "cleared":
+            return True
+        if self.review_status == "rejected":
+            return False
         return self.verdict == "pass"
 
     @property
@@ -75,18 +83,41 @@ def test_effect_lane_opt_in_default_off(monkeypatch):
     assert mod._effect_projection_enabled_default() is True
 
 
-def test_effect_lane_all_held_even_when_judge_says_candidate(tmp_path, monkeypatch):
-    # BLOCKER-C：judge winner=candidate（deliverable=True）→ 该件仍 held，passed 恒空。
+def test_effect_lane_judge_pass_alone_is_held(tmp_path, monkeypatch):
+    # BLOCKER-C：judge winner=candidate/pass 但未经 operator review（pending）→ 该件 held，
+    # passed 恒空（lane 不读 verdict.deliverable，judge pass 单独不发货）。
     specs = [_spec(tmp_path, "郭若煊", "郭若煊__2026.4.1弗缦1.0注射泪沟")]
     gen: list = []
     _wire(monkeypatch, tmp_path, specs, gen_counter=gen)
-    qa = _FakeQA(_FakeVerdict(verdict="pass", winner_role="candidate"))
+    qa = _FakeQA(_FakeVerdict(verdict="pass", winner_role="candidate", review_status="pending"))
     out = tmp_path / "delivery"
     passed, held = mod._run_effect_delivery(out, dry_run=False, qa=qa, cases_root=tmp_path)
-    assert passed == []  # 全件 held（lane 层硬覆盖，不读 verdict.deliverable）
+    assert passed == []  # judge pass 单独不够 → held
     assert len(held) == 1
     assert held[0]["advisory_judge"]["winner_role"] == "candidate"
+
+
+def test_effect_lane_ships_only_operator_cleared(tmp_path, monkeypatch):
+    # operator clear_effect → review_status=CLEARED → lane 发货（held↔clear 工作流打通）。
+    specs = [_spec(tmp_path, "郭若煊", "郭若煊__2026.4.1弗缦1.0注射泪沟")]
+    gen: list = []
+    _wire(monkeypatch, tmp_path, specs, gen_counter=gen)
+    qa = _FakeQA(_FakeVerdict(verdict="pass", winner_role="candidate", review_status="cleared"))
+    out = tmp_path / "delivery"
+    passed, held = mod._run_effect_delivery(out, dry_run=False, qa=qa, cases_root=tmp_path)
+    assert len(passed) == 1 and held == []
     assert (out / "郭若煊" / "effect-projection").is_dir()
+    assert Path(passed[0]["dest_path"]).is_file()
+
+
+def test_effect_lane_rejected_is_held(tmp_path, monkeypatch):
+    # operator REJECTED → 仍 held（不发货）。
+    specs = [_spec(tmp_path, "郭若煊", "郭若煊__2026.4.1弗缦1.0注射泪沟")]
+    gen: list = []
+    _wire(monkeypatch, tmp_path, specs, gen_counter=gen)
+    qa = _FakeQA(_FakeVerdict(verdict="pass", winner_role="candidate", review_status="rejected"))
+    passed, held = mod._run_effect_delivery(tmp_path / "d3", dry_run=True, qa=qa, cases_root=tmp_path)
+    assert passed == [] and len(held) == 1
 
 
 def test_effect_lane_generation_cache_skips_reburn(tmp_path, monkeypatch):

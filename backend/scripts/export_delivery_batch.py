@@ -225,9 +225,11 @@ def _run_effect_delivery(
     from backend import source_images
     from backend.scripts import focal_p4_packet_builder as fp4
     from backend.services import effect_delivery_selector as sel
+    from backend.services.effect_delivery_qa import REVIEW_CLEARED
 
     specs = fp4.discover_cases(cases_root, aga.MD_ANATOMICAL_KEYWORDS, source_images._phase_from_filename)
     cache_dir = _effect_cache_dir()
+    passed_rows: list[dict] = []
     held_rows: list[dict] = []
     eligible = 0
 
@@ -260,24 +262,38 @@ def _run_effect_delivery(
             job_id=_EFFECT_JOB_BASE - idx,
             ab_unit_id=spec.case_dir.name,
         )
-        # BLOCKER-C 全件 held：忽略 verdict.deliverable（winner=candidate→pass→True=auto-ship
-        # 是「判官可门控」语义；launch=advisory）→ 无条件入 held，passed 恒空。
-        dest_path: str | None = None
-        if not dry_run:
-            dest = output_dir / customer / EFFECT_OUTPUT_SUBDIR / f"{spec.slug}__effect.png"
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(candidate, dest)
-            dest_path = str(dest)
-        held_rows.append(
-            _effect_held_row(
-                customer=customer, case_name=spec.case_dir.name, effect_pairs=in_scope,
-                candidate_path=dest_path or str(candidate), baseline_path=baseline_path,
-                verdict=verdict, reason=verdict.reason, cache_hit=cache_hit,
+        # launch posture (BLOCKER-C): judge is ADVISORY — ship ONLY when an operator
+        # has explicitly released the hash (review_status == CLEARED). A judge "pass"
+        # alone is NOT enough (held); REJECTED + pending all stay held. We deliberately
+        # do NOT read verdict.deliverable (it returns True on an unreviewed judge pass).
+        if verdict.review_status == REVIEW_CLEARED:
+            dest_path = str(candidate)
+            if not dry_run:
+                dest = output_dir / customer / EFFECT_OUTPUT_SUBDIR / f"{spec.slug}__effect.png"
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(candidate, dest)
+                dest_path = str(dest)
+            passed_rows.append(
+                {
+                    "customer": customer,
+                    "case_name": spec.case_dir.name,
+                    "effect_pairs": [list(p) for p in in_scope],
+                    "dest_path": dest_path,
+                    "cleared_by": verdict.review_note or "operator",
+                    "advisory_judge": {"verdict": verdict.verdict, "winner_role": verdict.winner_role},
+                }
             )
-        )
+        else:
+            held_rows.append(
+                _effect_held_row(
+                    customer=customer, case_name=spec.case_dir.name, effect_pairs=in_scope,
+                    candidate_path=str(candidate), baseline_path=baseline_path,
+                    verdict=verdict, reason=verdict.reason, cache_hit=cache_hit,
+                )
+            )
 
     _write_effect_held_report(output_dir, held_rows, dry_run, discovered=len(specs), eligible=eligible)
-    return [], held_rows
+    return passed_rows, held_rows
 
 
 def _held_row(held: HeldBoard) -> dict:
@@ -504,6 +520,7 @@ def export(
     held: list[HeldBoard] = []
     single_image_rows: list[dict] = []
     single_image_held: list[dict] = []
+    effect_passed: list[dict] = []
     effect_held: list[dict] = []
     try:
         board_qa = _build_board_qa(conn, db_path.parent) if qa_enabled else None
@@ -577,7 +594,7 @@ def export(
             try:
                 effect_qa = _build_effect_qa(conn, db_path.parent)
                 cases_root = effect_cases_root or _effect_cases_root_default()
-                _, effect_held = _run_effect_delivery(
+                effect_passed, effect_held = _run_effect_delivery(
                     output_dir, dry_run=dry_run, qa=effect_qa, cases_root=cases_root
                 )
             except Exception as exc:  # noqa: BLE001 - effect lane never blocks boards/closeups
@@ -621,8 +638,8 @@ def export(
         )
     if effect_projection_enabled:
         print(
-            f"  🧪 Effect-projection: {len(effect_held)} held for review "
-            "(0 auto-shipped — judge advisory + mandatory human review)"
+            f"  🧪 Effect-projection: {len(effect_passed)} shipped (operator-cleared) / "
+            f"{len(effect_held)} held (judge advisory + mandatory human review)"
         )
     if not dry_run:
         print(f"  📋 CSV: {csv_path}")
