@@ -33,18 +33,65 @@ def test_unknown_brand_fails_closed():
     assert prm.resolve_brand("   ") is None
 
 
-def test_tear_trough_ha_brands_registered():
-    # owner handoff 2026-06-02 权威分类「泪沟 HA 品牌」→ 全部 HA filler，复用 HA 机制时间锚。
-    for brand in ("盈致", "妮凯丽", "柯芮琦", "薇旖美", "玻尿酸"):
+def test_ha_filler_brands_registered():
+    # 仅剩真 HA：盈致（owner 6-02 批次保留，权威源查无此名 → confidence=inferred 待确认）+
+    # 玻尿酸 generic。柯芮琦/薇旖美/妮凯丽 经 6-02 核查推翻为胶原（见下方胶原测试）。
+    for brand in ("盈致", "玻尿酸"):
         spec = prm.resolve_brand(brand)
         assert spec is not None, brand
         assert spec["project"] == prm.PROJECT_HA_FILLER, brand
         assert "玻尿酸" in spec["ingredient"], brand
         assert "稳定代表态" in spec["time_anchor"], brand
-    # 胶原（胶原刺激剂/童颜针）机制不同，owner 未归 HA → 仍 fail-closed（不臆造成 HA）。
+    # 胶原刺激剂/童颜针（PLLA）机制不同且未注册 → 仍 fail-closed（不臆造成 HA）。
     assert prm.resolve_brand("胶原") is None
     # generic「玻尿酸」substring 命中无品牌的玻尿酸 case。
     assert prm.resolve_brand("玻尿酸注射") is not None
+
+
+def test_collagen_filler_brands_reclassified():
+    # 2026-06-02 web 权威核查推翻 owner 误标 HA：弗缦/妮凯丽/柯芮琦/薇旖美 实为胶原蛋白填充剂
+    # （即刻体积 + 渐进再生，机制异于 HA）。
+    for brand in ("弗缦", "妮凯丽", "柯芮琦", "薇旖美"):
+        spec = prm.resolve_brand(brand)
+        assert spec is not None, brand
+        assert spec["project"] == prm.PROJECT_COLLAGEN_FILLER, brand
+        assert "胶原" in spec["ingredient"], brand
+        assert "玻尿酸" not in spec["ingredient"], brand   # 不再误标 HA
+        assert spec["confidence"] == "high", brand
+        assert ("核查" in spec["source"]) or ("NMPA" in spec["source"]), brand
+    # 盈致：owner 6-02 权威确认 = 乔雅登旗下玻尿酸（HA，非胶原）→ high confidence HA。
+    ying = prm.resolve_brand("盈致")
+    assert ying["project"] == prm.PROJECT_HA_FILLER and ying["confidence"] == "high"
+    assert "乔雅登" in ying["ingredient"]
+
+
+def test_collagen_reuses_ha_fill_effect_rows():
+    # 胶原即刻体积 → 软组织填充区复用 HA 视觉行（单部位术后视觉与 HA 一致）。
+    for region in ("泪沟", "苹果肌", "唇", "法令纹", "卧蚕"):
+        col = prm.effect_row(prm.PROJECT_COLLAGEN_FILLER, region)
+        ha = prm.effect_row(prm.PROJECT_HA_FILLER, region)
+        assert col is not None and col == ha, region
+    # 结构性支撑区（鼻背/鼻基底/下巴）胶原一般不用 → 不复用，fail-closed（不编造效果）。
+    for region in ("鼻背", "鼻基底", "下巴"):
+        assert prm.effect_row(prm.PROJECT_COLLAGEN_FILLER, region) is None, region
+
+
+def test_collagen_mechanism_context_injected():
+    # 胶原 case → 注入胶原机制语境（即刻体积 + 再生 + 不致 Tyndall），不是 HA 语境。
+    prompt = prm.compose_effect_prompt([(prm.PROJECT_COLLAGEN_FILLER, "泪沟")])
+    assert "机制语境：胶原蛋白填充剂" in prompt
+    assert "机制语境：玻尿酸(HA)" not in prompt
+    # 仍带泪沟视觉方向（复用 HA 行）+ 身份铁律
+    assert "凹陷填平" in prompt and ("身份" in prompt or "同一" in prompt)
+
+
+def test_collagen_case_parses_to_collagen_project():
+    # 真实库案例名（弗缦泪沟）→ 解析绑定 COLLAGEN，仍命中泪沟（eligible 不回归）。
+    p = prm.parse_procedures("2026.4.1弗缦1.0注射泪沟")
+    assert not p["needs_human_review"], p
+    proc = {pr["brand"]: pr for pr in p["procedures"]}
+    assert proc["弗缦"]["project"] == prm.PROJECT_COLLAGEN_FILLER
+    assert "泪沟" in proc["弗缦"]["regions"]
 
 
 def test_every_brand_entry_has_provenance():

@@ -25,9 +25,13 @@ from backend.services import facial_region_atlas as atlas
 # --- 项目类型（成分族）---
 PROJECT_HA_FILLER = "HA_filler"
 PROJECT_BOTOX = "botulinum_toxin"
-PROJECT_BIOSTIMULATOR = "biostimulator"  # PDLLA/PLLA 胶原刺激剂（艾维岚/童颜针），机制异于 HA
+PROJECT_BIOSTIMULATOR = "biostimulator"  # PDLLA/PLLA 胶原刺激剂（艾维岚/童颜针），无即刻体积、渐进
+# 胶原蛋白填充剂（弗缦/薇旖美/柯芮琦/妮凯丽/双美，I/III 型胶原或重组人源化胶原）：即刻有体积
+# （注射即填充）+ 渐进刺激自体胶原再生。机制异于 HA（材质/维持/不致 Tyndall）与 PLLA 生物刺激
+# 剂（那个无即刻体积）。泪沟尤偏胶原——薄眼皮下不像 HA 透蓝灰（Tyndall）。
+PROJECT_COLLAGEN_FILLER = "collagen_filler"
 PROJECT_TYPES: frozenset[str] = frozenset(
-    {PROJECT_HA_FILLER, PROJECT_BOTOX, PROJECT_BIOSTIMULATOR}
+    {PROJECT_HA_FILLER, PROJECT_BOTOX, PROJECT_BIOSTIMULATOR, PROJECT_COLLAGEN_FILLER}
 )
 
 # === 机制语境（injection-effect-standards.md §0.1）===
@@ -45,6 +49,12 @@ _MECHANISM_CONTEXT: dict[str, str] = {
     PROJECT_BIOSTIMULATOR: (
         "胶原刺激剂(PDLLA/PLLA，如艾维岚/童颜针)：无即刻体积，效果渐进；模拟对标术后 3-6 月"
         "成熟态 = 整体紧致 / 全局饱满 / 肤质改善的自然年轻化，绝非即刻局部隆起。"
+    ),
+    PROJECT_COLLAGEN_FILLER: (
+        "胶原蛋白填充剂(I/III 型胶原或重组人源化胶原，如弗缦/薇旖美/柯芮琦/妮凯丽)：即刻有真实"
+        "体积（注射即填充）并渐进刺激自体胶原；模拟对标术后约 2 周消肿稳定态的局部体积/轮廓改善"
+        "（胶原不像 HA 强亲水吸水，肿胀通常更轻、薄皮下不透蓝灰 Tyndall），保毛孔真实质感与自然"
+        "红润健康气色，不磨皮不漂白。"
     ),
 }
 
@@ -115,72 +125,76 @@ BRAND_TO_PROJECT: dict[str, dict[str, Any]] = {
         "source": "user_authoritative + effect-evidence-library §0.1/§2",
         "confidence": "high",
     },
+    # === 胶原蛋白填充剂（机制 = PROJECT_COLLAGEN_FILLER，即刻体积 + 渐进再生）===
+    # 修正记录（2026-06-02，web 权威核查）：弗缦/柯芮琦/薇旖美/妮凯丽 原被 owner 6-01/6-02
+    # 误标为 HA（「泪沟 HA 品牌」批次），实为胶原蛋白填充剂——已逐个 NMPA/权威源核实推翻。
+    # 临床上泪沟尤偏胶原正因其不致 Tyndall 蓝灰（见 EFFECT_ROWS 泪沟 avoid 首条）。时间锚为
+    # 机制级（所有胶原填充共享），inline 与 HA 风格一致。粒径差异不入 time_anchor。
     "弗缦": {
-        "project": PROJECT_HA_FILLER,
-        "project_cn": "玻尿酸填充",
-        "ingredient": "玻尿酸(HA)",
+        "project": PROJECT_COLLAGEN_FILLER,
+        "project_cn": "胶原蛋白填充",
+        "ingredient": "牛胶原蛋白(I+III型，原名肤美达)",
         "time_anchor": {
-            "即刻": "偏满偏肿（HA 亲水吸水 + 注入体积已在 + 针孔泛红）",
-            "消肿": "1-2 周",
-            "稳定代表态": "3-4 周，体积比即刻略收敛",
-            "维持": "HA 约 6-12 月",
+            "即刻": "即刻有体积（注射即填充 + 针孔泛红；胶原不强亲水吸水，肿胀通常较 HA 轻）",
+            "消肿": "数天-1 周",
+            "稳定代表态": "约 2 周稳定，体积接近注射量",
+            "维持": "约 6-12 月，期间渐进刺激自体胶原再生",
         },
-        "source": "user_authoritative (owner confirmed 2026-06-01: 弗缦=玻尿酸 HA filler)",
+        "source": "NMPA 医用胶原充填剂(械三) + web 核查 2026-06-02（推翻 owner 6-01 误标 HA）",
         "confidence": "high",
     },
-    # 泪沟 HA 品牌扩充（owner handoff 2026-06-02 权威分类「泪沟 HA 品牌」）。HA 时间锚是
-    # 机制级（所有 HA 填充共享 aquaphilic 动力学），复用弗缦结构；品牌粒径/交联差异不入
-    # time_anchor（其只供 prompt 时间语境，不作品牌特异声明）。若某品牌动力学特殊请改本表。
+    # 盈致：owner 6-02 权威确认 = 乔雅登(Juvederm/艾尔建)旗下玻尿酸（HA）。与同批被误标的
+    # 柯芮琦/薇旖美/妮凯丽（实为胶原）不同——盈致确为 HA。乔雅登是 HA 龙头，分类自洽。
     "盈致": {
         "project": PROJECT_HA_FILLER,
         "project_cn": "玻尿酸填充",
-        "ingredient": "玻尿酸(HA)",
+        "ingredient": "玻尿酸(HA，乔雅登/Juvederm 旗下)",
         "time_anchor": {
             "即刻": "偏满偏肿（HA 亲水吸水 + 注入体积已在 + 针孔泛红）",
             "消肿": "1-2 周",
             "稳定代表态": "3-4 周，体积比即刻略收敛",
             "维持": "HA 约 6-12 月",
         },
-        "source": "user_authoritative (owner handoff 2026-06-02: 泪沟 HA 品牌)",
+        "source": "user_authoritative (owner confirmed 2026-06-02: 盈致=乔雅登旗下玻尿酸 HA)",
         "confidence": "high",
     },
     "妮凯丽": {
-        "project": PROJECT_HA_FILLER,
-        "project_cn": "玻尿酸填充",
-        "ingredient": "玻尿酸(HA)",
+        "project": PROJECT_COLLAGEN_FILLER,
+        "project_cn": "胶原蛋白填充",
+        "ingredient": "胶原蛋白(I/III型，牛跟腱提取，日本进口械三)",
         "time_anchor": {
-            "即刻": "偏满偏肿（HA 亲水吸水 + 注入体积已在 + 针孔泛红）",
-            "消肿": "1-2 周",
-            "稳定代表态": "3-4 周，体积比即刻略收敛",
-            "维持": "HA 约 6-12 月",
+            "即刻": "即刻有体积（注射即填充 + 针孔泛红；胶原不强亲水吸水，肿胀通常较 HA 轻）",
+            "消肿": "数天-1 周",
+            "稳定代表态": "约 2 周稳定，体积接近注射量",
+            "维持": "约 6-12 月，期间渐进刺激自体胶原再生",
         },
-        "source": "user_authoritative (owner handoff 2026-06-02: 泪沟 HA 品牌)",
+        "source": "web 核查 2026-06-02（推翻 owner 6-02 误标 HA；同批均证实胶原）",
         "confidence": "high",
     },
     "柯芮琦": {
-        "project": PROJECT_HA_FILLER,
-        "project_cn": "玻尿酸填充",
-        "ingredient": "玻尿酸(HA)",
+        "project": PROJECT_COLLAGEN_FILLER,
+        "project_cn": "胶原蛋白填充",
+        "ingredient": "牛胶原蛋白(85%I+15%III，浙江珂瑞康；库内亦写作「珂芮绮」)",
         "time_anchor": {
-            "即刻": "偏满偏肿（HA 亲水吸水 + 注入体积已在 + 针孔泛红）",
-            "消肿": "1-2 周",
-            "稳定代表态": "3-4 周，体积比即刻略收敛",
-            "维持": "HA 约 6-12 月",
+            "即刻": "即刻有体积（注射即填充 + 针孔泛红；胶原不强亲水吸水，肿胀通常较 HA 轻）",
+            "消肿": "数天-1 周",
+            "稳定代表态": "约 2 周稳定，体积接近注射量",
+            "维持": "约 6-12 月，期间渐进刺激自体胶原再生",
         },
-        "source": "user_authoritative (owner handoff 2026-06-02: 泪沟 HA 品牌)",
+        "source": "NMPA 注射用面部胶原蛋白植入剂 2025 + web 核查 2026-06-02（推翻 owner 6-02 误标 HA）",
         "confidence": "high",
     },
     "薇旖美": {
-        "project": PROJECT_HA_FILLER,
-        "project_cn": "玻尿酸填充",
-        "ingredient": "玻尿酸(HA)",
+        "project": PROJECT_COLLAGEN_FILLER,
+        "project_cn": "胶原蛋白填充",
+        "ingredient": "重组III型人源化胶原蛋白(锦波)",
         "time_anchor": {
-            "即刻": "偏满偏肿（HA 亲水吸水 + 注入体积已在 + 针孔泛红）",
-            "消肿": "1-2 周",
-            "稳定代表态": "3-4 周，体积比即刻略收敛",
-            "维持": "HA 约 6-12 月",
+            "即刻": "即刻有体积（注射即填充 + 针孔泛红；胶原不强亲水吸水，肿胀通常较 HA 轻）",
+            "消肿": "数天-1 周",
+            "稳定代表态": "约 2 周稳定，体积接近注射量",
+            "维持": "约 6-12 月，期间渐进刺激自体胶原再生",
         },
-        "source": "user_authoritative (owner handoff 2026-06-02: 泪沟 HA 品牌)",
+        "source": "NMPA 国械注准20213130488 + web 核查 2026-06-02（推翻 owner 6-02 误标 HA）",
         "confidence": "high",
     },
     # generic「玻尿酸」（owner 可选）：substring 匹配，命中文件夹名含「玻尿酸」的无品牌 case。
@@ -316,9 +330,28 @@ def resolve_brand(brand: str) -> dict[str, Any] | None:
     return None
 
 
+# 胶原蛋白填充剂的单部位视觉效果复用 HA 填充行：即刻体积的软组织填充区，术后稳定态的单部位
+# 视觉结果与 HA 一致（材质差异体现在机制语境/维持时长，不改 do_right/avoid/guardrail）。仅限
+# 胶原临床实际用于填充的软组织区（= 正脸填充类）；结构性支撑区（鼻背/鼻基底/下巴）胶原一般
+# 不用 → 不 fallback，保持 fail-closed（不编造胶原在那些部位的效果）。
+_COLLAGEN_REUSES_HA_REGION: frozenset[str] = frozenset(
+    {"泪沟", "苹果肌", "唇", "法令纹", "卧蚕"}
+)
+
+
 def effect_row(project: str, region_key: str) -> dict[str, Any] | None:
-    """(项目类型, 部位) → 循证效果行；未登记返回 None（不得编造效果语言）。"""
+    """(项目类型, 部位) → 循证效果行；未登记返回 None（不得编造效果语言）。
+
+    胶原蛋白填充剂（即刻体积）在软组织填充区（``_COLLAGEN_REUSES_HA_REGION``）复用 HA 填充
+    视觉行——单部位术后稳定态视觉与 HA 一致，材质差异由机制语境承载。结构性区不复用 → None。
+    """
     row = EFFECT_ROWS.get((project, region_key))
+    if (
+        row is None
+        and project == PROJECT_COLLAGEN_FILLER
+        and region_key in _COLLAGEN_REUSES_HA_REGION
+    ):
+        row = EFFECT_ROWS.get((PROJECT_HA_FILLER, region_key))
     return dict(row) if row is not None else None
 
 
@@ -487,7 +520,8 @@ def compose_effect_prompt(
 
 
 __all__ = [
-    "PROJECT_HA_FILLER", "PROJECT_BOTOX", "PROJECT_TYPES",
+    "PROJECT_HA_FILLER", "PROJECT_BOTOX", "PROJECT_BIOSTIMULATOR",
+    "PROJECT_COLLAGEN_FILLER", "PROJECT_TYPES",
     "STRENGTH_SUBTLE", "STRENGTH_NATURAL", "STRENGTH_STRONG", "STRENGTHS",
     "BRAND_TO_PROJECT", "EFFECT_ROWS", "IDENTITY_LOCKS",
     "resolve_brand", "effect_row", "parse_procedures",

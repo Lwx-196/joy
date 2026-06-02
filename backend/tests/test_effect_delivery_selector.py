@@ -12,8 +12,10 @@ from backend.services import procedure_region_mappings as prm
 # --- resolve_effect_pairs（反臆造 fail-closed）---
 
 def test_resolve_effect_pairs_real_tear_trough():
+    # 弗缦 = 胶原蛋白填充（2026-06-02 web 核查修正，原误标 HA）；胶原在泪沟复用 HA 视觉行
+    # → pair 仍产出，发货不回归。
     pairs, _parsed = sel.resolve_effect_pairs("郭若煊__2026.4.1弗缦1.0注射泪沟")
-    assert (prm.PROJECT_HA_FILLER, "泪沟") in pairs
+    assert (prm.PROJECT_COLLAGEN_FILLER, "泪沟") in pairs
 
 
 def test_resolve_effect_pairs_unknown_brand_drops_fail_closed():
@@ -68,7 +70,7 @@ def test_select_effect_eligible_classifies_with_reasons():
     by_name = {r["case_name"]: r for r in res}
     tear = by_name["郭若煊__2026.4.1弗缦1.0注射泪沟"]
     assert tear["eligible"] is True
-    assert (prm.PROJECT_HA_FILLER, "泪沟") in tear["effect_pairs"]
+    assert (prm.PROJECT_COLLAGEN_FILLER, "泪沟") in tear["effect_pairs"]  # 弗缦=胶原（6-02 修正）
     unknown = by_name["测试__某未知牌子注射泪沟"]
     assert unknown["eligible"] is False
     assert any("no_evidence_anchored_pairs" in r for r in unknown["skip_reasons"])
