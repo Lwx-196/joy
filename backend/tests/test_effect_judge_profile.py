@@ -141,6 +141,37 @@ def test_four_effect_criteria_keywords_present():
     assert "natural_not_overdone" in prompt
 
 
+# --- §4 owner-aesthetic calibration (Phase 6) -------------------------------
+
+def test_natural_criterion_rewards_real_skin_texture():
+    # §4: a CREDIBLE post-op look KEEPS real skin texture — pores / a slight healthy
+    # flush are GOOD signs of a faithful edit, NOT defects. (Why the judge tied the
+    # owner-preferred gpt-edit raw before: it failed to reward natural restraint.)
+    prompt = judge._judge_prompt(_effect_item())
+    assert "微微红润健康气色" in prompt
+    assert "毛孔" in prompt or "real skin texture" in prompt
+    assert "真实可信术后感" in prompt
+
+
+def test_plastic_oversmoothed_is_a_natural_defect():
+    # §4 inverse: a plastic / over-smoothed / whitened look (磨皮塑料感) is ITSELF an
+    # over-distortion defect that LOWERS the candidate's natural score even when the
+    # effect direction is correct — not a "clean" win.
+    prompt = judge._judge_prompt(_effect_item())
+    assert "磨皮塑料感" in prompt
+
+
+def test_aesthetic_calibration_only_in_effect_profile():
+    # the §4 aesthetic language must not leak into the fidelity / board profiles.
+    fid = judge._judge_prompt(
+        {"ab_unit_id": "x", "judge_profile": "single_image_fidelity",
+         "focus_targets": ["泪沟"], "criteria": ["sharpness"]}
+    )
+    board = judge._judge_prompt({"ab_unit_id": "y", "criteria": ["overall quality"]})
+    assert "磨皮塑料感" not in fid and "微微红润健康气色" not in fid
+    assert "磨皮塑料感" not in board and "微微红润健康气色" not in board
+
+
 def test_required_json_keys_match_runner_parser():
     # the parser (_judgment_from_parsed) reads these keys — keep contract aligned.
     prompt = judge._judge_prompt(_effect_item())
