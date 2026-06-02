@@ -28,24 +28,24 @@ def test_known_brands_resolve_with_provenance():
 
 def test_unknown_brand_fails_closed():
     # 反臆造：未知品牌不猜成分/项目 → None（调用方须标人工核对）
-    assert prm.resolve_brand("童颜针X") is None
+    assert prm.resolve_brand("某XYZ未知针剂") is None
     assert prm.resolve_brand("") is None
     assert prm.resolve_brand("   ") is None
 
 
 def test_ha_filler_brands_registered():
-    # 仅剩真 HA：盈致（owner 6-02 批次保留，权威源查无此名 → confidence=inferred 待确认）+
-    # 玻尿酸 generic。柯芮琦/薇旖美/妮凯丽 经 6-02 核查推翻为胶原（见下方胶原测试）。
+    # 真 HA：盈致（=乔雅登 Endyne）/ 玻尿酸 generic。柯芮琦/薇旖美/妮凯丽 经 6-02 核查
+    # 推翻为胶原（见下方胶原测试）。
     for brand in ("盈致", "玻尿酸"):
         spec = prm.resolve_brand(brand)
         assert spec is not None, brand
         assert spec["project"] == prm.PROJECT_HA_FILLER, brand
         assert "玻尿酸" in spec["ingredient"], brand
         assert "稳定代表态" in spec["time_anchor"], brand
-    # 胶原刺激剂/童颜针（PLLA）机制不同且未注册 → 仍 fail-closed（不臆造成 HA）。
-    assert prm.resolve_brand("胶原") is None
     # generic「玻尿酸」substring 命中无品牌的玻尿酸 case。
     assert prm.resolve_brand("玻尿酸注射") is not None
+    # generic「胶原」substring 命中含胶原的无品牌 case → collagen_filler（6-02 普查新增）。
+    assert prm.resolve_brand("胶原")["project"] == prm.PROJECT_COLLAGEN_FILLER
 
 
 def test_collagen_filler_brands_reclassified():
@@ -63,6 +63,38 @@ def test_collagen_filler_brands_reclassified():
     ying = prm.resolve_brand("盈致")
     assert ying["project"] == prm.PROJECT_HA_FILLER and ying["confidence"] == "high"
     assert "乔雅登" in ying["ingredient"]
+
+
+def test_census_batch_2026_06_02():
+    # 2026-06-02 NMPA 权威普查批次：案例库 fail-closed 真品牌按机制收录（全 NMPA-cited）。
+    by_mech = {
+        prm.PROJECT_HA_FILLER: ("乔雅登", "朔颜", "缇颜", "娇兰", "嗨体", "海媚", "塑公主", "熊猫针"),
+        prm.PROJECT_COLLAGEN_FILLER: ("珂芮绮", "肤莱美", "肤柔美", "肤丽美", "肤力原", "爱贝芙"),
+        prm.PROJECT_BIOSTIMULATOR: ("童颜针", "普丽妍", "塑妍萃", "菲林", "云镜", "云境"),
+        prm.PROJECT_BOTOX: ("保妥适", "吉适", "吉士"),
+    }
+    for mech, brands in by_mech.items():
+        for b in brands:
+            spec = prm.resolve_brand(b)
+            assert spec is not None and spec["project"] == mech, b
+    # substring 家族命中
+    assert prm.resolve_brand("乔雅登丰颜")["project"] == prm.PROJECT_HA_FILLER
+    assert prm.resolve_brand("普丽妍T")["project"] == prm.PROJECT_BIOSTIMULATOR  # T=同产品
+    # 别名指回已注册同一产品（同 project）
+    assert prm.resolve_brand("海媚")["project"] == prm.resolve_brand("海魅")["project"]
+    assert prm.resolve_brand("珂芮绮")["project"] == prm.resolve_brand("柯芮琦")["project"]
+    # 黑金=飞顿黑金超光子仪器（光子设备非注射）→ 故意不注册 → fail-closed
+    assert prm.resolve_brand("黑金") is None
+
+
+def test_biostimulator_registered_but_effect_deferred():
+    # 生物刺激剂已注册识别（不被误猜成 HA），但暂无 effect_rows → 发货 fail-closed（待下轮补）。
+    assert prm.resolve_brand("童颜针")["project"] == prm.PROJECT_BIOSTIMULATOR
+    for region in ("泪沟", "苹果肌", "下颌线", "全脸"):
+        assert prm.effect_row(prm.PROJECT_BIOSTIMULATOR, region) is None, region
+    # 机制语境就位（即刻零体积/渐进），compose 能注入，不臆造成 HA
+    bio = prm.compose_effect_prompt([(prm.PROJECT_BIOSTIMULATOR, "苹果肌")])
+    assert "机制语境：胶原刺激剂" in bio and "机制语境：玻尿酸(HA)" not in bio
 
 
 def test_collagen_reuses_ha_fill_effect_rows():
