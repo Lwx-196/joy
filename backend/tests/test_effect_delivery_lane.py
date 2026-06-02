@@ -14,6 +14,7 @@ from PIL import Image
 from backend import ai_generation_adapter as aga
 from backend.scripts import export_delivery_batch as mod
 from backend.scripts import focal_p4_packet_builder as fp4
+from backend.services import effect_delivery_selector as sel
 
 
 def _spec(tmp_path: Path, customer: str, case_leaf: str):
@@ -73,6 +74,9 @@ def _wire(monkeypatch, tmp_path: Path, specs, *, gen_counter: list):
         return {"output_refs": [{"kind": "generated_raw", "path": str(raw)}], "audit": {}}
 
     monkeypatch.setattr(aga, "run_ps_model_router_after_simulation", _fake_run)
+    # default: source-quality gate passes (1-face clean single) — isolates existing
+    # tests from mediapipe (a dedicated test overrides it to a multi-face board).
+    monkeypatch.setattr(sel, "source_quality_suspect", lambda _p: None)
     return cache
 
 
@@ -140,6 +144,21 @@ def test_effect_lane_scope_gate_skips_profile(tmp_path, monkeypatch):
     qa = _FakeQA()
     passed, held = mod._run_effect_delivery(tmp_path / "d", dry_run=True, qa=qa, cases_root=tmp_path)
     assert passed == [] and held == []  # 鼻背=profile → scope gate skip
+
+
+def test_effect_lane_source_quality_board_held_no_generation(tmp_path, monkeypatch):
+    # 源图质量门：baseline 是「术前｜术后」双拼板（≥2 张脸）→ 入 held 标 suspect、
+    # 跳过生成（不烧 gpt-image-2），判官也不调。康巧佳唇案的真实失败模式。
+    specs = [_spec(tmp_path, "康巧佳", "康巧佳__2025.10.29海魅1.0ml注射唇")]
+    gen: list = []
+    _wire(monkeypatch, tmp_path, specs, gen_counter=gen)
+    monkeypatch.setattr(sel, "source_quality_suspect", lambda _p: sel.SOURCE_MULTIFACE_REASON)
+    qa = _FakeQA()
+    passed, held = mod._run_effect_delivery(tmp_path / "dq", dry_run=False, qa=qa, cases_root=tmp_path)
+    assert passed == [] and len(held) == 1
+    assert gen == []  # 关键：跳过生成，不烧 quota
+    assert qa.calls == 0  # 也不调判官
+    assert "source_quality_suspect" in held[0]["reason"]
     assert gen == []  # 没投影 → 不烧 quota
 
 

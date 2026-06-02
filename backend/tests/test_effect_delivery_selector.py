@@ -79,3 +79,44 @@ def test_scope_gate_profile_only_yields_no_in_scope():
     in_scope, skipped = sel.scope_gate([(prm.PROJECT_HA_FILLER, "鼻背")])
     assert in_scope == []
     assert skipped and "profile_only:鼻背" in skipped[0]
+
+
+# --- 源图质量门（人脸计数；mediapipe 懒加载 + fail-open，逻辑用 monkeypatch 测，CI 安全）---
+
+def test_source_quality_single_face_ok(monkeypatch):
+    # 干净术前单图 = 1 张脸 → 放行（None）。
+    monkeypatch.setattr(sel, "count_baseline_faces", lambda _p: 1)
+    assert sel.source_quality_suspect("clean.png") is None
+
+
+def test_source_quality_multi_face_flagged(monkeypatch):
+    # 术前｜术后双拼板 = 2 张脸 → 标 suspect（康巧佳唇案的真实失败模式）。
+    monkeypatch.setattr(sel, "count_baseline_faces", lambda _p: 2)
+    assert sel.source_quality_suspect("board.png") == sel.SOURCE_MULTIFACE_REASON
+
+
+def test_source_quality_fail_open_when_face_count_unavailable(monkeypatch):
+    # 人脸数不可测（None）→ fail-OPEN 放行（held 队列兜底，不静默拦干净 case）。
+    monkeypatch.setattr(sel, "count_baseline_faces", lambda _p: None)
+    assert sel.source_quality_suspect("unknown.png") is None
+
+
+def test_source_quality_zero_faces_not_a_board(monkeypatch):
+    # 0 脸（纯色/检测不到）不是「板」信号 → 放行。
+    monkeypatch.setattr(sel, "count_baseline_faces", lambda _p: 0)
+    assert sel.source_quality_suspect("noface.png") is None
+
+
+def test_count_baseline_faces_fail_open_without_mediapipe(monkeypatch):
+    # 模拟 CI（无 mediapipe）：懒 import 抛错 → None（保模块可 import、CI collection 不崩）。
+    import builtins
+
+    real_import = builtins.__import__
+
+    def _no_mediapipe(name, *args, **kwargs):
+        if name == "mediapipe" or name.startswith("mediapipe."):
+            raise ImportError("simulated: no mediapipe in CI venv")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", _no_mediapipe)
+    assert sel.count_baseline_faces("any.png") is None
