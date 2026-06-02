@@ -25,13 +25,23 @@ from backend.services import facial_region_atlas as atlas
 # --- 项目类型（成分族）---
 PROJECT_HA_FILLER = "HA_filler"
 PROJECT_BOTOX = "botulinum_toxin"
-PROJECT_BIOSTIMULATOR = "biostimulator"  # PDLLA/PLLA 胶原刺激剂（艾维岚/童颜针），无即刻体积、渐进
+PROJECT_BIOSTIMULATOR = "biostimulator"  # 纯 PLLA/PDLLA 胶原刺激剂（艾维岚/童颜针/塑妍萃），无即刻体积、渐进
 # 胶原蛋白填充剂（弗缦/薇旖美/柯芮琦/妮凯丽/双美，I/III 型胶原或重组人源化胶原）：即刻有体积
 # （注射即填充）+ 渐进刺激自体胶原再生。机制异于 HA（材质/维持/不致 Tyndall）与 PLLA 生物刺激
 # 剂（那个无即刻体积）。泪沟尤偏胶原——薄眼皮下不像 HA 透蓝灰（Tyndall）。
 PROJECT_COLLAGEN_FILLER = "collagen_filler"
+# CaHA 羟基磷灰石/微晶瓷（菲林/云境/Radiesse）：**hybrid** = 即刻有体积（凝胶载体微球即刻填充）
+# + 渐进刺激自体胶原（微球被替代）。机制异于纯 PLLA 生物刺激剂（那个无即刻体积），比 HA 硬、
+# 维持更久（~12-18 月），多用于深层结构支撑（鼻/下颌）。
+PROJECT_CAHA = "calcium_hydroxylapatite"
+# PMMA 聚甲基丙烯酸甲酯（爱贝芙）：即刻体积（牛胶原载体）+ **永久**（PMMA 微球不降解，载体吸收
+# 后被结缔组织包裹永久留存）。不可逆，机制异于一切可降解填充。
+PROJECT_PMMA = "pmma_permanent"
 PROJECT_TYPES: frozenset[str] = frozenset(
-    {PROJECT_HA_FILLER, PROJECT_BOTOX, PROJECT_BIOSTIMULATOR, PROJECT_COLLAGEN_FILLER}
+    {
+        PROJECT_HA_FILLER, PROJECT_BOTOX, PROJECT_BIOSTIMULATOR,
+        PROJECT_COLLAGEN_FILLER, PROJECT_CAHA, PROJECT_PMMA,
+    }
 )
 
 # === 机制语境（injection-effect-standards.md §0.1）===
@@ -55,6 +65,16 @@ _MECHANISM_CONTEXT: dict[str, str] = {
         "体积（注射即填充）并渐进刺激自体胶原；模拟对标术后约 2 周消肿稳定态的局部体积/轮廓改善"
         "（胶原不像 HA 强亲水吸水，肿胀通常更轻、薄皮下不透蓝灰 Tyndall），保毛孔真实质感与自然"
         "红润健康气色，不磨皮不漂白。"
+    ),
+    PROJECT_CAHA: (
+        "羟基磷灰石(CaHA，微晶瓷，如菲林/云境/Radiesse)：即刻有体积（凝胶载体微球即刻填充）+ 渐进"
+        "刺激自体胶原（微球被替代）；模拟对标术后约 2 周稳定的体积/轮廓改善（比 HA 硬，多用于深层"
+        "结构支撑如鼻/下颌），保毛孔真实质感与自然气色，不磨皮不漂白。"
+    ),
+    PROJECT_PMMA: (
+        "PMMA(聚甲基丙烯酸甲酯，如爱贝芙)：即刻有体积（牛胶原载体填充）+ 永久（PMMA 微球不降解，"
+        "载体吸收后永久留存）；模拟对标术后约 2 周稳定的局部体积/轮廓改善，保毛孔真实质感与自然"
+        "气色，不磨皮不漂白。"
     ),
 }
 
@@ -125,6 +145,20 @@ _BOTOX_ANCHOR: dict[str, str] = {
     "峰值": "1-2 周",
     "维持": "约 3-6 月",
     "范式": "neuromodulation 减弱非麻痹，保表情",
+}
+# CaHA（微晶瓷）：即刻体积 + 渐进胶原刺激，维持长于 HA。
+_CAHA_ANCHOR: dict[str, str] = {
+    "即刻": "即刻有体积（CaHA 微球凝胶载体即刻填充 + 针孔泛红）",
+    "消肿": "数天-1 周",
+    "稳定代表态": "约 2 周稳定，之后渐进刺激自体胶原",
+    "维持": "约 12-18 月（长于 HA）",
+}
+# PMMA：即刻体积（牛胶原载体）+ 永久（PMMA 微球不降解）。
+_PMMA_ANCHOR: dict[str, str] = {
+    "即刻": "即刻有体积（牛胶原载体填充 + 针孔泛红）",
+    "消肿": "1-3 月（载体胶原逐渐被替代）",
+    "稳定代表态": "约 1-3 月稳定，PMMA 微球永久留存",
+    "维持": "永久（不可降解，不可逆）",
 }
 BRAND_TO_PROJECT: dict[str, dict[str, Any]] = {
     "海魅": {
@@ -322,13 +356,14 @@ BRAND_TO_PROJECT: dict[str, dict[str, Any]] = {
         "ingredient": "凝固型猪 I 型胶原蛋白(双美 Sunmax，含利多卡因)", "time_anchor": _COLLAGEN_ANCHOR,
         "source": "双美第三代 + 核查 2026-06-02（独立注册证待 NMPA 直查，proactive）", "confidence": "high",
     },
+    # --- PMMA 永久填充（PROJECT_PMMA；即刻体积 + 不可降解永久；⚠️ effect_rows 延后）---
     "爱贝芙": {  # ⚠️ 80%牛胶原 + 20%PMMA = 永久填充，机制特殊（proactive）
-        "project": PROJECT_COLLAGEN_FILLER, "project_cn": "胶原蛋白填充",
+        "project": PROJECT_PMMA, "project_cn": "PMMA永久填充",
         "ingredient": "⚠️80%牛胶原+20%PMMA微球=永久填充(汉福 Artecoll；胶原载体降解后 PMMA 永久留存)",
-        "time_anchor": _COLLAGEN_ANCHOR,
+        "time_anchor": _PMMA_ANCHOR,
         "source": "NMPA 国械注进20163132859 + 核查 2026-06-02（PMMA 永久，proactive）", "confidence": "high",
     },
-    # --- 生物刺激剂（PROJECT_BIOSTIMULATOR；⚠️ 暂无 effect_rows → 发货 fail-closed，待下轮补 effect）---
+    # --- 生物刺激剂 纯 PLLA/PDLLA（PROJECT_BIOSTIMULATOR；无即刻体积；⚠️ 暂无 effect_rows → 发货 fail-closed）---
     "童颜针": {  # generic PLLA/PDLLA
         "project": PROJECT_BIOSTIMULATOR, "project_cn": "胶原刺激剂(童颜针)",
         "ingredient": "PLLA/PDLLA 聚乳酸(generic 童颜针，无即刻体积、渐进再生)", "time_anchor": _BIOSTIM_ANCHOR,
@@ -344,22 +379,23 @@ BRAND_TO_PROJECT: dict[str, dict[str, Any]] = {
         "ingredient": "PLLA 聚左旋乳酸(=Sculptra 塑妍萃，高德美)", "time_anchor": _BIOSTIM_ANCHOR,
         "source": "NMPA 国械注进20243130557 + 核查 2026-06-02", "confidence": "high",
     },
+    # --- CaHA 微晶瓷（PROJECT_CAHA；即刻体积 + 渐进胶原刺激 hybrid，异于纯 PLLA；⚠️ effect_rows 延后）---
     "菲林": {  # = 菲林普利 CaHA ⚠️ 面部超适应症
-        "project": PROJECT_BIOSTIMULATOR, "project_cn": "胶原刺激剂(CaHA)",
+        "project": PROJECT_CAHA, "project_cn": "微晶瓷(CaHA)",
         "ingredient": "⚠️CaHA 羟基磷灰石(菲林普利，四川拜阿蒙；注册为骨缺损，面部属超适应症)",
-        "time_anchor": _BIOSTIM_ANCHOR,
+        "time_anchor": _CAHA_ANCHOR,
         "source": "NMPA 国械注准20173130346 + 核查 2026-06-02（off-label 面部）", "confidence": "high",
     },
     "云镜": {  # 海魅·云境 CaHA ⚠️ 超适应症
-        "project": PROJECT_BIOSTIMULATOR, "project_cn": "胶原刺激剂(CaHA)",
+        "project": PROJECT_CAHA, "project_cn": "微晶瓷(CaHA)",
         "ingredient": "⚠️CaHA 羟基磷灰石(海魅·云境，昊海；注册为骨缺损，面部属超适应症)",
-        "time_anchor": _BIOSTIM_ANCHOR,
+        "time_anchor": _CAHA_ANCHOR,
         "source": "NMPA 国械注准20183131912 + 核查 2026-06-02（off-label 面部）", "confidence": "high",
     },
     "云境": {  # 云镜 另一写法
-        "project": PROJECT_BIOSTIMULATOR, "project_cn": "胶原刺激剂(CaHA)",
+        "project": PROJECT_CAHA, "project_cn": "微晶瓷(CaHA)",
         "ingredient": "⚠️CaHA 羟基磷灰石(=云镜 另一写法，海魅·云境，昊海；面部超适应症)",
-        "time_anchor": _BIOSTIM_ANCHOR,
+        "time_anchor": _CAHA_ANCHOR,
         "source": "NMPA 国械注准20183131912 + 核查 2026-06-02（off-label 面部）", "confidence": "high",
     },
     # --- 肉毒 ---
@@ -688,7 +724,7 @@ def compose_effect_prompt(
 
 __all__ = [
     "PROJECT_HA_FILLER", "PROJECT_BOTOX", "PROJECT_BIOSTIMULATOR",
-    "PROJECT_COLLAGEN_FILLER", "PROJECT_TYPES",
+    "PROJECT_COLLAGEN_FILLER", "PROJECT_CAHA", "PROJECT_PMMA", "PROJECT_TYPES",
     "STRENGTH_SUBTLE", "STRENGTH_NATURAL", "STRENGTH_STRONG", "STRENGTHS",
     "BRAND_TO_PROJECT", "EFFECT_ROWS", "IDENTITY_LOCKS",
     "resolve_brand", "effect_row", "parse_procedures",
