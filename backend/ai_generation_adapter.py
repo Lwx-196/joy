@@ -410,6 +410,15 @@ def _finalize_prompt(prompt_body: str, model_name: str | None = None) -> str:
 FIDELITY_MODE = "fidelity"
 EFFECT_PROJECTION_MODE = "effect_projection"
 
+# effect_projection 的两种锚定策略（仅 effect mode 生效）：
+#   mask_anchor = AI 整帧 → 只锁回治疗区，mask 外字节级 == 原图（旧默认，BC）
+#   raw_first   = 直接交付 raw AI 全脸协调精修（owner 配方：忠实编辑器 gpt-image-2
+#                 images_edit 下 mask-anchor 反而抹掉协调感；raw 最自然/保毛孔/红润）
+# 函数默认 mask_anchor 保 BC；effect 投影交付 lane 显式传 raw_first。
+ANCHOR_MODE_MASK = "mask_anchor"
+ANCHOR_MODE_RAW = "raw_first"
+VALID_ANCHOR_MODES = (ANCHOR_MODE_MASK, ANCHOR_MODE_RAW)
+
 
 def build_after_enhancement_prompt(
     focus_targets: list[str],
@@ -3641,7 +3650,12 @@ def run_ps_model_router_after_simulation(
     effect_pairs: list[tuple[str, str]] | None = None,
     do_not_touch: list[str] | None = None,
     strength: str | None = None,
+    anchor_mode: str = ANCHOR_MODE_MASK,
 ) -> dict[str, Any]:
+    if anchor_mode not in VALID_ANCHOR_MODES:
+        raise ValueError(
+            f"anchor_mode must be one of {VALID_ANCHOR_MODES}, got {anchor_mode!r}"
+        )
     if stress.is_stress_mode() and not stress.allow_external_ai():
         return _run_stress_stub_after_simulation(
             job_id=job_id,
@@ -3721,11 +3735,14 @@ def run_ps_model_router_after_simulation(
     if not _same_path(generated, raw_generated_path):
         shutil.copyfile(generated, raw_generated_path)
     generated = raw_generated_path
-    # effect_projection 硬底线：AI 整帧输出 → 只锁回治疗区，mask 外字节级 == 原图（身份保护）。
-    # fidelity 模式 final_source 即 raw AI（generated），下游 watermark/heatmap 逐字 BC。
+    # effect_projection 两种锚定策略（见 ANCHOR_MODE_*）：
+    #   mask_anchor（默认/BC）：AI 整帧 → 只锁回治疗区，mask 外字节级 == 原图（身份硬底线）。
+    #   raw_first（owner 配方）：直接交付 raw AI 全脸协调精修，不锚定（mask-anchor 反而抹协调感）。
+    # fidelity 模式 final_source 恒为 raw AI（generated），下游 watermark/heatmap 逐字 BC。
     final_source = generated
     effect_anchored_path: Path | None = None
-    if mode == EFFECT_PROJECTION_MODE:
+    mask_anchored = mode == EFFECT_PROJECTION_MODE and anchor_mode == ANCHOR_MODE_MASK
+    if mask_anchored:
         final_source = _apply_effect_mask_anchor(
             original_path=after_image_path,
             ai_output_path=generated,
@@ -3779,7 +3796,8 @@ def run_ps_model_router_after_simulation(
             "mix_with_real_case": False,
             "can_publish_default": False,
             "simulation_mode": mode,
-            "mask_anchored": mode == EFFECT_PROJECTION_MODE,
+            "mask_anchored": mask_anchored,
+            "anchor_mode": anchor_mode if mode == EFFECT_PROJECTION_MODE else None,
         },
     }
     (output_dir / "audit.json").write_text(json.dumps(audit, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -3826,6 +3844,7 @@ def run_after_simulation(
     effect_pairs: list[tuple[str, str]] | None = None,
     do_not_touch: list[str] | None = None,
     strength: str | None = None,
+    anchor_mode: str = ANCHOR_MODE_MASK,
 ) -> dict[str, Any]:
     if provider == COMFYUI_PROVIDER:
         # effect_projection 暂只在 PS(gpt-image-2) 路线落地（plan 2.3 已验证路线）；
@@ -3857,5 +3876,6 @@ def run_after_simulation(
             effect_pairs=effect_pairs,
             do_not_touch=do_not_touch,
             strength=strength,
+            anchor_mode=anchor_mode,
         )
     raise ValueError(f"unsupported simulation provider: {provider}")

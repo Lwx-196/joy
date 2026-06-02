@@ -20,6 +20,7 @@ import shutil
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from backend.services.board_delivery_qa import BoardDeliveryQA
 from backend.services.delivery_gate import (
@@ -38,6 +39,9 @@ from backend.services.single_image_delivery import (
 from backend.services.single_image_delivery_qa import SingleImageDeliveryQA, SingleImageQAVerdict
 from backend.services.simulation_delivery_gate import SimulationDeliveryGate
 from backend.services.vlm_provider import VLMProvider
+
+if TYPE_CHECKING:
+    from backend.services.effect_delivery_qa import EffectDeliveryQA, EffectQAVerdict
 
 DB_PATH = Path(__file__).resolve().parent.parent.parent / "case-workbench.db"
 DEFAULT_OUTPUT = Path(__file__).resolve().parent.parent.parent / "delivery"
@@ -67,6 +71,245 @@ def _build_single_image_qa(conn: sqlite3.Connection, repo_root: Path) -> SingleI
     env = dict(os.environ)
     env.update(_load_env_file(repo_root / "tasks" / "t54_vertex_adc.local.env"))
     return SingleImageDeliveryQA(conn, env=env)
+
+
+# ── Effect-projection delivery lane (anchored-sim Phase 4) ──────────────────
+# 第三条 opt-in 交付 lane（与 D6 板 / #51 closeups 并列）。从案例库 discover 术前图
+# → raw-first gpt-image-2 投影 → EffectDeliveryQA advisory 判官 → 全件 held 人工审核。
+# 输入源 = 文件系统案例库（不是 DB 板）：术前 before 图只在案例库，DeliverableItem 没有
+# （focal_p4 注释：DB abs_path 指向另一拷贝、tags_json 空，DB 路由=0 case）。
+EFFECT_RECIPE_VERSION = "raw_first-gpt-image-2-v1"  # 配方版本 → 生成缓存键的一部分
+EFFECT_OUTPUT_SUBDIR = "effect-projection"
+_EFFECT_JOB_BASE = -990_000  # 合成 job_id（避开真 case_id；与 calibration 的 -920000 不撞）
+
+
+def _build_effect_qa(conn: sqlite3.Connection, repo_root: Path) -> "EffectDeliveryQA":
+    from backend.services.effect_delivery_qa import EffectDeliveryQA
+
+    env = dict(os.environ)
+    env.update(_load_env_file(repo_root / "tasks" / "t54_vertex_adc.local.env"))
+    return EffectDeliveryQA(VLMProvider(env=env), conn, purpose="judge")
+
+
+def _effect_cache_dir() -> Path:
+    """跨 export 持久化的生成缓存目录（按 before-hash+pairs+recipe 复用，不重烧 quota）。"""
+    from backend import ai_generation_adapter as aga
+
+    return aga.SIMULATION_ROOT.parent / "effect_projection_cache"
+
+
+def _effect_generate_candidate(
+    before_path: Path,
+    effect_pairs: list[tuple[str, str]],
+    *,
+    job_id: int,
+    cache_dir: Path,
+    allow_generate: bool = True,
+) -> tuple[Path | None, bool]:
+    """raw-first effect 投影 + 生成缓存。返回 (candidate_path | None, cache_hit)。
+
+    缓存键 = sha256(术前图字节 + 排序后的 effect_pairs + recipe 版本)。命中则复用、不烧
+    gpt-image-2 quota（owner 成本决策）。未命中走生产 node router(raw_first) → 取
+    output_refs 的 generated_raw（raw-first 无 effect_anchored）。``allow_generate=False``
+    （dry-run）且未命中缓存 → 返回 ``(None, False)``，**不生成、不烧 quota**（预览用）。
+    """
+    import hashlib
+
+    from backend import ai_generation_adapter as aga
+
+    key_src = (
+        before_path.read_bytes()
+        + repr(sorted(effect_pairs)).encode("utf-8")
+        + EFFECT_RECIPE_VERSION.encode("utf-8")
+    )
+    key = hashlib.sha256(key_src).hexdigest()[:40]
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cached = cache_dir / f"{key}.png"
+    if cached.is_file():
+        return cached, True
+    if not allow_generate:
+        return None, False  # dry-run + 未缓存：跳过生成（0 quota），调用方记 would-project
+
+    result = aga.run_ps_model_router_after_simulation(
+        job_id=job_id,
+        after_image_path=before_path,
+        before_image_path=None,
+        focus_targets=[region for _, region in effect_pairs],
+        brand="fumei",
+        mode=aga.EFFECT_PROJECTION_MODE,
+        effect_pairs=list(effect_pairs),
+        anchor_mode=aga.ANCHOR_MODE_RAW,
+    )
+    refs = {
+        r["kind"]: r["path"]
+        for r in result.get("output_refs", [])
+        if isinstance(r, dict) and r.get("kind") and r.get("path")
+    }
+    candidate = refs.get("generated_raw")  # raw-first：交付源 = raw AI 全脸精修
+    if not candidate:
+        raise RuntimeError(f"effect projection produced no candidate: refs={sorted(refs)}")
+    shutil.copyfile(candidate, cached)
+    return cached, False
+
+
+def _effect_held_row(
+    *,
+    customer: str,
+    case_name: str,
+    effect_pairs: list[tuple[str, str]],
+    candidate_path: str | None,
+    baseline_path: str,
+    verdict: "EffectQAVerdict | None" = None,
+    reason: str,
+    cache_hit: bool = False,
+) -> dict:
+    """effect held 队列一行。judge verdict 仅作 advisory 字段（不决定发货）。"""
+    row: dict = {
+        "customer": customer,
+        "case_name": case_name,
+        "effect_pairs": [list(p) for p in effect_pairs],
+        "baseline_path": baseline_path,
+        "candidate_path": candidate_path,
+        "cache_hit": cache_hit,
+        "reason": reason,
+    }
+    if verdict is not None:
+        row["advisory_judge"] = {
+            "verdict": verdict.verdict,
+            "winner_role": verdict.winner_role,
+            "confidence": verdict.confidence,
+            "hard_veto_reason": verdict.hard_veto_reason,
+            "content_hash": verdict.content_hash,
+        }
+    return row
+
+
+def _write_effect_held_report(
+    output_dir: Path, held: list[dict], dry_run: bool, *, discovered: int, eligible: int
+) -> Path | None:
+    if dry_run or not held:
+        return None
+    output_dir.mkdir(parents=True, exist_ok=True)
+    path = output_dir / "effect_held_review.json"
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "discovered_cases": discovered,
+                "eligible_cases": eligible,
+                "held_count": len(held),
+                "note": (
+                    "Effect-projection deliverables — ALL held for mandatory human "
+                    "review at launch (judge is advisory only, never auto-ships). "
+                    "no_visible_change is a deterministic hard veto. Boards/closeups "
+                    "are unaffected. Clear via EffectDeliveryQA.clear_effect."
+                ),
+                "images": held,
+            },
+            f,
+            ensure_ascii=False,
+            indent=2,
+        )
+    print(f"  🧪 Effect-projection held-review queue: {path}")
+    return path
+
+
+def _run_effect_delivery(
+    output_dir: Path,
+    *,
+    dry_run: bool,
+    qa: "EffectDeliveryQA",
+    cases_root: Path,
+) -> tuple[list[dict], list[dict]]:
+    """Discover 案例库 → scope-gate eligible → raw-first 投影(缓存) → advisory 判官 →
+    全件 held。返回 (passed, held)；**passed 恒为空**（launch posture = 判官 advisory，
+    lane 层硬覆盖、不读 verdict.deliverable、不调 screen_effect_deliverables）。
+    """
+    from backend import ai_generation_adapter as aga
+    from backend import source_images
+    from backend.scripts import focal_p4_packet_builder as fp4
+    from backend.services import effect_delivery_selector as sel
+    from backend.services.effect_delivery_qa import REVIEW_CLEARED
+
+    specs = fp4.discover_cases(cases_root, aga.MD_ANATOMICAL_KEYWORDS, source_images._phase_from_filename)
+    cache_dir = _effect_cache_dir()
+    passed_rows: list[dict] = []
+    held_rows: list[dict] = []
+    eligible = 0
+
+    for idx, spec in enumerate(specs):
+        pairs, _parsed = sel.resolve_effect_pairs(spec.case_dir.name)
+        in_scope, _skips = sel.scope_gate(pairs)
+        if not in_scope:
+            continue  # 不在上线 scope（profile/expression/out-of-scope）或无 evidence pair
+        eligible += 1
+        customer = spec.case_dir.parent.name or "case"
+        baseline_path = str(spec.before_path)
+        try:
+            candidate, cache_hit = _effect_generate_candidate(
+                spec.before_path, in_scope, job_id=_EFFECT_JOB_BASE - idx,
+                cache_dir=cache_dir, allow_generate=not dry_run,
+            )
+        except Exception as exc:  # noqa: BLE001 — fail-closed: 投影失败该 case 入 held 报错，不阻塞
+            held_rows.append(
+                _effect_held_row(
+                    customer=customer, case_name=spec.case_dir.name, effect_pairs=in_scope,
+                    candidate_path=None, baseline_path=baseline_path,
+                    reason=f"projection_error: {type(exc).__name__}: {str(exc)[:160]}",
+                )
+            )
+            continue
+
+        if candidate is None:
+            # dry-run + 未缓存：预览，不生成不评判（0 quota）。
+            held_rows.append(
+                _effect_held_row(
+                    customer=customer, case_name=spec.case_dir.name, effect_pairs=in_scope,
+                    candidate_path=None, baseline_path=baseline_path,
+                    reason="would_project (dry-run, not generated — real run burns gpt-image-2 quota)",
+                )
+            )
+            continue
+
+        verdict = qa.assess(
+            baseline=spec.before_path,
+            candidate=candidate,
+            effect_pairs=in_scope,
+            job_id=_EFFECT_JOB_BASE - idx,
+            ab_unit_id=spec.case_dir.name,
+        )
+        # launch posture (BLOCKER-C): judge is ADVISORY — ship ONLY when an operator
+        # has explicitly released the hash (review_status == CLEARED). A judge "pass"
+        # alone is NOT enough (held); REJECTED + pending all stay held. We deliberately
+        # do NOT read verdict.deliverable (it returns True on an unreviewed judge pass).
+        if verdict.review_status == REVIEW_CLEARED:
+            dest_path = str(candidate)
+            if not dry_run:
+                dest = output_dir / customer / EFFECT_OUTPUT_SUBDIR / f"{spec.slug}__effect.png"
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(candidate, dest)
+                dest_path = str(dest)
+            passed_rows.append(
+                {
+                    "customer": customer,
+                    "case_name": spec.case_dir.name,
+                    "effect_pairs": [list(p) for p in in_scope],
+                    "dest_path": dest_path,
+                    "cleared_by": verdict.review_note or "operator",
+                    "advisory_judge": {"verdict": verdict.verdict, "winner_role": verdict.winner_role},
+                }
+            )
+        else:
+            held_rows.append(
+                _effect_held_row(
+                    customer=customer, case_name=spec.case_dir.name, effect_pairs=in_scope,
+                    candidate_path=str(candidate), baseline_path=baseline_path,
+                    verdict=verdict, reason=verdict.reason, cache_hit=cache_hit,
+                )
+            )
+
+    _write_effect_held_report(output_dir, held_rows, dry_run, discovered=len(specs), eligible=eligible)
+    return passed_rows, held_rows
 
 
 def _held_row(held: HeldBoard) -> dict:
@@ -286,11 +529,15 @@ def export(
     db_path: Path = DB_PATH,
     qa_enabled: bool = True,
     single_image_enabled: bool = False,
+    effect_projection_enabled: bool = False,
+    effect_cases_root: Path | None = None,
 ) -> list[dict]:
     conn = _connect(db_path)
     held: list[HeldBoard] = []
     single_image_rows: list[dict] = []
     single_image_held: list[dict] = []
+    effect_passed: list[dict] = []
+    effect_held: list[dict] = []
     try:
         board_qa = _build_board_qa(conn, db_path.parent) if qa_enabled else None
         gate = DeliveryGate(conn, board_qa=board_qa)
@@ -357,6 +604,17 @@ def export(
                 )
             except Exception as exc:  # noqa: BLE001 - companion artifacts never block boards
                 print(f"  ⚠️  Single-image delivery skipped: {type(exc).__name__}: {str(exc)[:160]}")
+
+        if effect_projection_enabled:
+            print("\n  🧪 Effect-projection lane: enabled (ALL held for human review)")
+            try:
+                effect_qa = _build_effect_qa(conn, db_path.parent)
+                cases_root = effect_cases_root or _effect_cases_root_default()
+                effect_passed, effect_held = _run_effect_delivery(
+                    output_dir, dry_run=dry_run, qa=effect_qa, cases_root=cases_root
+                )
+            except Exception as exc:  # noqa: BLE001 - effect lane never blocks boards/closeups
+                print(f"  ⚠️  Effect-projection lane skipped: {type(exc).__name__}: {str(exc)[:160]}")
     finally:
         conn.close()
 
@@ -394,6 +652,11 @@ def export(
             f"  🖼  Single-image closeups: {len(single_image_rows)} ship / "
             f"{len(single_image_held)} held"
         )
+    if effect_projection_enabled:
+        print(
+            f"  🧪 Effect-projection: {len(effect_passed)} shipped (operator-cleared) / "
+            f"{len(effect_held)} held (judge advisory + mandatory human review)"
+        )
     if not dry_run:
         print(f"  📋 CSV: {csv_path}")
         print(f"  📋 JSON: {json_path}")
@@ -413,6 +676,21 @@ def _single_image_enabled_default() -> bool:
     return str(os.environ.get("CASE_WORKBENCH_SINGLE_IMAGE_DELIVERY", "0")).strip().lower() in {
         "1", "true", "yes", "on",
     }
+
+
+def _effect_projection_enabled_default() -> bool:
+    return str(os.environ.get("CASE_WORKBENCH_EFFECT_DELIVERY", "0")).strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
+def _effect_cases_root_default() -> Path:
+    env = os.environ.get("CASE_WORKBENCH_EFFECT_CASES_ROOT")
+    if env:
+        return Path(env)
+    from backend.scripts.effect_calibration_packet_builder import DEFAULT_CASES_ROOT
+
+    return DEFAULT_CASES_ROOT
 
 
 def main() -> None:
@@ -438,10 +716,30 @@ def main() -> None:
         action="store_false",
         help="Disable standalone closeup delivery even if the env flag is set.",
     )
+    parser.add_argument(
+        "--effect-projection",
+        dest="effect_projection",
+        action="store_true",
+        default=None,
+        help="Add raw-first AI effect-projection deliverables (ALL held for review, "
+             "judge advisory). Discovers from the case library; burns gpt-image-2 quota "
+             "(generation-cached). Opt-in, default OFF.",
+    )
+    parser.add_argument(
+        "--no-effect-projection",
+        dest="effect_projection",
+        action="store_false",
+        help="Disable effect-projection lane even if the env flag is set.",
+    )
     args = parser.parse_args()
     qa_enabled = _qa_enabled_default() and not args.no_qa
     single_image_enabled = (
         _single_image_enabled_default() if args.single_image is None else args.single_image
+    )
+    effect_projection_enabled = (
+        _effect_projection_enabled_default()
+        if args.effect_projection is None
+        else args.effect_projection
     )
     if not qa_enabled:
         print("⚠️  Board QA gate DISABLED — boards ship without VLM screening.")
@@ -451,6 +749,7 @@ def main() -> None:
         db_path=args.db,
         qa_enabled=qa_enabled,
         single_image_enabled=single_image_enabled,
+        effect_projection_enabled=effect_projection_enabled,
     )
 
 
