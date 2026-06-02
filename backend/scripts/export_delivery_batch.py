@@ -245,6 +245,18 @@ def _run_effect_delivery(
         eligible += 1
         customer = spec.case_dir.parent.name or "case"
         baseline_path = str(spec.before_path)
+        # 源图质量门：effect 投影要术前单张干净照。discover 可能把「术前｜术后」双拼板/
+        # 多人源当 baseline（编辑成品板=garbage-in）→ ≥2 张脸标 suspect、入 held、跳过生成
+        # （省 gpt-image-2）。fail-open：人脸数不可测则放行（held 队列兜底）。
+        suspect = sel.source_quality_suspect(spec.before_path)
+        if suspect:
+            held_rows.append(
+                _effect_held_row(
+                    customer=customer, case_name=spec.case_dir.name, effect_pairs=in_scope,
+                    candidate_path=None, baseline_path=baseline_path, reason=suspect,
+                )
+            )
+            continue
         try:
             candidate, cache_hit = _effect_generate_candidate(
                 spec.before_path, in_scope, job_id=_EFFECT_JOB_BASE - idx,

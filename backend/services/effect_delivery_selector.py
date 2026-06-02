@@ -78,6 +78,62 @@ def scope_gate(
     return in_scope, skipped
 
 
+# 源图质量门（owner 2026-06-02 retry）：effect 投影要术前「单张干净照」做 baseline。
+# 案例库 discover 可能把「术前｜术后」双拼板/多拼板当 baseline（如康巧佳唇案）→ AI 是在
+# 编辑成品板 = garbage-in，judge 还可能 flip-flop 误 pass。真信号 = 人脸计数：干净单图恰
+# 1 张脸，双拼板/多人源 ≥2 张脸（aspect-ratio 分不开——唇板 1.54 ≈ 干净 landscape 单图 1.50）。
+SOURCE_MULTIFACE_REASON = "source_quality_suspect:multi_face_board(术前｜术后双拼板/多人源非干净单图)"
+_FACE_MODEL_ENV = "CASE_WORKBENCH_FACE_LANDMARKER_TASK"
+_FACE_MODEL_DEFAULT = "~/.cache/feishu-claude/mediapipe/face_landmarker.task"
+
+
+def count_baseline_faces(baseline_path: Any) -> int | None:
+    """术前图人脸数（mediapipe FaceLandmarker）。CV 栈不可用 / 模型缺 / 解码错 → 返回
+    ``None``（fail-open）。**懒加载** mediapipe，保模块 import（及 CI collection）不依赖重 CV
+    栈——与 ``precise_face_mask`` / ``test_board_annotator`` importorskip 约定一致。
+    """
+    import os
+    from pathlib import Path
+
+    try:
+        import mediapipe as mp
+        import numpy as np
+        from mediapipe.tasks import python as mp_python
+        from mediapipe.tasks.python import vision
+        from PIL import Image, ImageOps
+    except Exception:  # noqa: BLE001 - CI venv 故意无 mediapipe → fail-open
+        return None
+
+    model = Path(os.path.expanduser(os.environ.get(_FACE_MODEL_ENV, _FACE_MODEL_DEFAULT)))
+    if not model.is_file():
+        return None
+    try:
+        options = vision.FaceLandmarkerOptions(
+            base_options=mp_python.BaseOptions(model_asset_path=str(model)),
+            num_faces=5,
+            min_face_detection_confidence=0.4,
+            min_face_presence_confidence=0.4,
+        )
+        with vision.FaceLandmarker.create_from_options(options) as landmarker:
+            pil = ImageOps.exif_transpose(Image.open(baseline_path)).convert("RGB")
+            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=np.asarray(pil))
+            return len(landmarker.detect(mp_image).face_landmarks)
+    except Exception:  # noqa: BLE001 - any detection error → fail-open (held backstop)
+        return None
+
+
+def source_quality_suspect(baseline_path: Any) -> str | None:
+    """干净术前单图恰 1 张脸；「术前｜术后」双拼板 / 多人源 ≥2 张脸 → 非有效投影源
+    （编辑成品板 = garbage-in）。可疑返回 held 原因，否则 ``None``。**Fail-OPEN**：人脸数
+    不可测（``None``）时返回 ``None`` 放行——强制人工 held 队列是真兜底，测不出的源不该
+    静默拦掉可能干净的 case。0 脸（纯色/检测不到）也放行（不是「板」信号）。
+    """
+    faces = count_baseline_faces(baseline_path)
+    if faces is not None and faces >= 2:
+        return SOURCE_MULTIFACE_REASON
+    return None
+
+
 def select_effect_eligible(case_names: list[str]) -> list[dict[str, Any]]:
     """对一组 case 名做 effect-eligibility 判定（lane discover 用）。
 
