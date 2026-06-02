@@ -424,25 +424,34 @@ class EffectDeliveryQA:
         candidate onto the baseline grid (mirrors ``fidelity_probes``), so an
         orientation/resize-only no-op still reads as no-change.
 
-        Fail-OPEN on any read / decode / numpy error: an unmeasurable guard must
-        never block a real candidate — it defers to the (fail-closed) judge.
+        Fail-OPEN on any read / decode error: an unmeasurable guard must never
+        block a real candidate — it defers to the (fail-closed) judge.
+
+        Pillow-only (no numpy): the CI venv is deliberately kept free of the heavy
+        CV stack (numpy/cv2 — those tests ``importorskip``), so a core safety gate
+        must not silently fail-open there. ``ImageChops``/``ImageStat`` reproduce
+        the numpy metrics exactly (mean |Δ| per channel; fraction of pixels whose
+        max channel |Δ| exceeds NO_CHANGE_PIXEL_DELTA).
         """
         try:
-            import numpy as np
-            from PIL import Image, ImageOps
+            from PIL import Image, ImageChops, ImageOps, ImageStat
 
             with Image.open(baseline) as _b:
-                arr_a = np.asarray(
-                    ImageOps.exif_transpose(_b).convert("RGB"), dtype=np.int16
-                )
+                img_a = ImageOps.exif_transpose(_b).convert("RGB")
             with Image.open(candidate) as _c:
-                cand = ImageOps.exif_transpose(_c).convert("RGB")
-            if cand.size != (arr_a.shape[1], arr_a.shape[0]):
-                cand = cand.resize((arr_a.shape[1], arr_a.shape[0]), Image.LANCZOS)
-            arr_b = np.asarray(cand, dtype=np.int16)
-            diff = np.abs(arr_a - arr_b)
-            mean_abs_delta = float(diff.mean())
-            changed_fraction = float((diff.max(axis=2) > NO_CHANGE_PIXEL_DELTA).mean())
+                img_b = ImageOps.exif_transpose(_c).convert("RGB")
+            if img_b.size != img_a.size:
+                img_b = img_b.resize(img_a.size, Image.LANCZOS)
+            diff = ImageChops.difference(img_a, img_b)  # per-channel |a-b|
+            mean_abs_delta = sum(ImageStat.Stat(diff).mean) / 3.0  # mean over R,G,B
+            # per-pixel max across channels, then fraction above the pixel-delta floor
+            r_band, g_band, b_band = diff.split()
+            max_channel = ImageChops.lighter(ImageChops.lighter(r_band, g_band), b_band)
+            total = img_a.width * img_a.height
+            if not total:
+                return None
+            changed = sum(max_channel.histogram()[NO_CHANGE_PIXEL_DELTA + 1:])
+            changed_fraction = changed / total
         except Exception:  # noqa: BLE001 - best-effort guard; defer to the judge on error
             return None
         if (
