@@ -33,6 +33,20 @@ def test_unknown_brand_fails_closed():
     assert prm.resolve_brand("   ") is None
 
 
+def test_tear_trough_ha_brands_registered():
+    # owner handoff 2026-06-02 权威分类「泪沟 HA 品牌」→ 全部 HA filler，复用 HA 机制时间锚。
+    for brand in ("盈致", "妮凯丽", "柯芮琦", "薇旖美", "玻尿酸"):
+        spec = prm.resolve_brand(brand)
+        assert spec is not None, brand
+        assert spec["project"] == prm.PROJECT_HA_FILLER, brand
+        assert "玻尿酸" in spec["ingredient"], brand
+        assert "稳定代表态" in spec["time_anchor"], brand
+    # 胶原（胶原刺激剂/童颜针）机制不同，owner 未归 HA → 仍 fail-closed（不臆造成 HA）。
+    assert prm.resolve_brand("胶原") is None
+    # generic「玻尿酸」substring 命中无品牌的玻尿酸 case。
+    assert prm.resolve_brand("玻尿酸注射") is not None
+
+
 def test_every_brand_entry_has_provenance():
     assert prm.BRAND_TO_PROJECT, "must seed authoritative brands"
     for brand, spec in prm.BRAND_TO_PROJECT.items():
