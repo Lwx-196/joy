@@ -73,8 +73,16 @@ def _run_path_rules_tier(
 ) -> dict[str, dict[str, Any]]:
     signals: dict[str, dict[str, Any]] = {}
     for obs in observations:
-        text = f"{obs.image_path} {obs.image_abs_path.parent.name}"
-        phase, confidence, reasoning = _phase_from_text(text)
+        filename = Path(obs.image_path).name
+        phase, confidence, reasoning = _phase_from_text(filename)
+        if phase == "unknown":
+            stem = Path(obs.image_path).stem
+            phase, confidence, reasoning = _phase_from_text(stem)
+        if phase == "unknown":
+            phase, confidence, reasoning = _phase_from_text(obs.image_path)
+        if phase == "unknown":
+            parent = obs.image_abs_path.parent.name
+            phase, confidence, reasoning = _phase_from_text(parent)
         signals[obs.image_path] = {
             "phase": phase,
             "confidence": confidence,

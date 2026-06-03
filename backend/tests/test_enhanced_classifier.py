@@ -104,6 +104,33 @@ class TestRunPathRulesTier:
         assert signals["术后/side.jpg"]["phase"] == "after"
         assert signals["other.jpg"]["phase"] == "unknown"
 
+    def test_filename_takes_precedence_over_parent_dir(self):
+        """When parent dir contains both 术前 and 术后, filename wins."""
+        obs = [
+            ObservationRecord(
+                1, 1, 1,
+                "2025.8.28术前术中术后即刻/术后-正面.jpeg",
+                Path("/tmp/case/2025.8.28术前术中术后即刻/术后-正面.jpeg"),
+                "unknown", 0.25, "rules",
+            ),
+            ObservationRecord(
+                2, 1, 1,
+                "2025.8.28术前术中术后即刻/术前-正面.jpeg",
+                Path("/tmp/case/2025.8.28术前术中术后即刻/术前-正面.jpeg"),
+                "unknown", 0.25, "rules",
+            ),
+            ObservationRecord(
+                3, 1, 1,
+                "2025.8.28术前术中术后即刻/术后即刻5.jpeg",
+                Path("/tmp/case/2025.8.28术前术中术后即刻/术后即刻5.jpeg"),
+                "unknown", 0.25, "rules",
+            ),
+        ]
+        signals = _run_path_rules_tier(obs)
+        assert signals["2025.8.28术前术中术后即刻/术后-正面.jpeg"]["phase"] == "after"
+        assert signals["2025.8.28术前术中术后即刻/术前-正面.jpeg"]["phase"] == "before"
+        assert signals["2025.8.28术前术中术后即刻/术后即刻5.jpeg"]["phase"] == "after"
+
 
 # ---------------------------------------------------------------------------
 # run_enhanced_classification (dry-run = path_rules + exif only)
