@@ -12,20 +12,55 @@ from typing import Any
 from .vlm_provider import VLMProvider, VLMRequest, VLMRequestError, VLMResponse
 from .vlm_usage import record_vlm_usage
 
-CLASSIFICATION_PROMPT = """You are a medical-aesthetic source image classifier.
+CLASSIFICATION_PROMPT = """You are a medical-aesthetic clinical photography analyst.
 Classify exactly one source image. Return strict JSON only:
-{"phase":"before|during|after","view":"front|45deg|side|back","body_part":"face|body","confidence":0.0,"reasoning":"short visual evidence"}
+{"phase":"before|after|healing|uncertain","view":"front|45deg|side|back","body_part":"face|body","confidence":0.0,"reasoning":"short visual evidence","visual_cues":[]}
 
-Rules:
-- phase before means pre-treatment/source baseline; after means post-treatment result; during means intraoperative/procedure image.
-- view 45deg means oblique/three-quarter face view.
-- confidence must be a JSON number between 0 and 1.
-- Use only visual evidence from the image.
+## Phase Classification — Visual Cue Checklist
+
+**Signs suggesting POST-treatment (术后)**:
+- Localized redness (erythema) at treatment site
+- Swelling — especially periorbital, nasolabial, lip areas
+- Bruising at any stage: red/purple (fresh) → green/yellow (healing)
+- Needle puncture marks or injection site dots
+- Surgical marking pen traces (purple/blue ink on skin)
+- Adhesive tape or bandage residue
+- Visible volume increase in specific areas (lip fullness, cheek projection, tear trough fill)
+- Suture lines or wound closure strips
+- Skin surface texture change confined to treatment zone (smoother, tighter)
+
+**Signs suggesting PRE-treatment (术前)**:
+- Natural facial hollowing (tear troughs, temple concavity, nasolabial folds)
+- Consistent skin texture across face — no localized smoothing
+- No redness, bruising, swelling, or puncture marks
+- Natural volume distribution without augmentation
+- Wrinkles, fine lines, or skin laxity in treatment-candidate areas
+
+**Signs suggesting HEALING (恢复期)**:
+- Yellowing bruise (late-stage healing, 7-14 days post)
+- Residual mild swelling without acute redness
+- Partially settled filler (slight asymmetry or firmness)
+
+**When uncertain**:
+- Final healed result may look identical to pre-treatment with better proportions — use "uncertain" if no clear post-treatment visual cues
+- Phone screenshots with UI chrome (status bar, navigation) → flag in reasoning
+- Collage/composite images with multiple photos → flag in reasoning
+
+## View Classification
+- front: full frontal face, both ears potentially visible
+- 45deg: three-quarter oblique view, one ear hidden
+- side: true lateral/profile view, nose bridge silhouette visible
+- back: posterior view
+
+## Rules
+- confidence must be 0-1; use lower values when cues are ambiguous
+- visual_cues: list the specific signs you detected (e.g. ["localized redness at tear trough", "no bruising"])
+- If image contains UI chrome, watermarks, or is a phone screenshot, note in reasoning
 """
 
 LOW_CONFIDENCE_THRESHOLD = 0.65
 MIN_VLM_APPLY_CONFIDENCE = 0.85
-VALID_PHASES = {"before", "intraop", "after"}
+VALID_PHASES = {"before", "intraop", "after", "unknown"}
 VALID_VIEWS = {"front", "oblique", "side", "back"}
 VALID_BODY_PARTS = {"face", "body", "unknown"}
 
@@ -68,6 +103,7 @@ class ClassificationResult:
     output_tokens: int = 0
     usage_raw: dict[str, Any] = field(default_factory=dict)
     raw: dict[str, Any] = field(default_factory=dict)
+    visual_cues: list[str] = field(default_factory=list)
 
 
 def _now() -> str:
@@ -109,11 +145,15 @@ def _normalize_phase(value: Any) -> str:
         "post-op": "after",
         "after": "after",
         "术后": "after",
+        "healing": "after",
+        "恢复期": "after",
         "during": "intraop",
         "intraop": "intraop",
         "intra-op": "intraop",
         "procedure": "intraop",
         "术中": "intraop",
+        "uncertain": "unknown",
+        "不确定": "unknown",
     }
     phase = mapping.get(raw, raw)
     if phase not in VALID_PHASES:
@@ -168,6 +208,10 @@ def _parse_result(image_path: Path, response: VLMResponse) -> ClassificationResu
     view = _normalize_view(parsed.get("view"))
     body_part = _normalize_body_part(parsed.get("body_part"))
     confidence = _float_0_1(parsed.get("confidence"), field_name="confidence")
+    visual_cues = parsed.get("visual_cues", [])
+    if not isinstance(visual_cues, list):
+        visual_cues = []
+    visual_cues = [str(c) for c in visual_cues if c][:10]  # cap at 10 cues
     return ClassificationResult(
         image_path=image_path,
         phase=phase,
@@ -182,6 +226,7 @@ def _parse_result(image_path: Path, response: VLMResponse) -> ClassificationResu
         output_tokens=response.output_tokens,
         usage_raw=response.usage_raw,
         raw=parsed,
+        visual_cues=visual_cues,
     )
 
 
@@ -533,6 +578,7 @@ def run_classification(
                     "current_phase": item.phase,
                     "current_view": item.view,
                     "current_confidence": item.confidence,
+                    "visual_cues": result.visual_cues,
                 })
                 _record_usage(conn, item, result, status="live_no_apply")
         except (sqlite3.Error, ValueError) as exc:
