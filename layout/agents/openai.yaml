@@ -1,0 +1,7 @@
+interface:
+  display_name: "案例自动排版"
+  short_description: "真实案例目录自动识别、预检和三角度术前术后拼图"
+  default_prompt: "Use $case-layout-board to inspect and then render this real medical aesthetic case directory with an explicit brand."
+
+policy:
+  allow_implicit_invocation: true
