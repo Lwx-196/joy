@@ -655,7 +655,7 @@ def put_chinese_text(img, text, position, color=(255, 255, 255), font_scale=0.9,
 
         result = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
         img[:] = result[:]
-    except Exception as e:
+    except Exception:
         # 降级到 OpenCV 英文
         cv2.putText(img, text, position, cv2.FONT_HERSHEY_SIMPLEX, font_scale, color, thickness)
 

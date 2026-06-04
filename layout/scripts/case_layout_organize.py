@@ -17,7 +17,7 @@ from datetime import datetime
 from pathlib import Path
 
 import cv2
-from PIL import Image, ImageDraw, ImageFont, ImageOps
+from PIL import Image, ImageDraw, ImageOps
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]

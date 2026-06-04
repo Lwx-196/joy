@@ -26,7 +26,6 @@ from backend import db  # noqa: E402
 from backend.scripts.t78_slot_crop_reduction import (  # noqa: E402
     _candidate_rows,
     _crop_ok,
-    _json_dict,
     _open_tickets,
     _safe_front_alternative_pairs,
     _sharpness_ok,

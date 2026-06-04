@@ -366,7 +366,8 @@ def main(argv: list[str] | None = None) -> int:
     args = build_arg_parser().parse_args(argv)
     live_probe: LiveProbe
     if args.live_probe:
-        live_probe = lambda provider, env: _vertex_live_probe(provider, env, image_path=args.live_probe_image)
+        def live_probe(provider: str, env: dict[str, str]) -> dict[str, Any]:
+            return _vertex_live_probe(provider, env, image_path=args.live_probe_image)
     else:
         live_probe = _not_run_live_probe
     report = build_report(env=load_env(args.env_file), live_probe=live_probe, scope_label=args.scope_label)

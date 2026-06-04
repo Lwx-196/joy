@@ -1,6 +1,5 @@
 """Tests for robust background color estimation — D1 bg_letterbox fix."""
 import numpy as np
-import pytest
 
 from scripts.face_align_compare import estimate_background_color
 from scripts.render_brand_clean import clean_background_color, cover_foreground_with_background

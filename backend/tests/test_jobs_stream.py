@@ -99,9 +99,9 @@ class TestJobsStreamEndpoint:
                 assert "text/event-stream" in resp.headers["content-type"]
                 assert resp.headers["cache-control"] == "no-cache, no-transform"
                 assert resp.headers["x-accel-buffering"] == "no"
-                lines = [l for l in resp.iter_lines() if l]
+                lines = [line for line in resp.iter_lines() if line]
                 assert lines[0] == ":ok"
-                data_line = next((l for l in lines if l.startswith("data:")), None)
+                data_line = next((line for line in lines if line.startswith("data:")), None)
                 assert data_line is not None
                 payload = json.loads(data_line.removeprefix("data:").strip())
                 assert payload["job_type"] == "render"
