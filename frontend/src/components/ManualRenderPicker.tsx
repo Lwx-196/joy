@@ -168,6 +168,7 @@ function simulationStatusText(status: string): string {
   if (status === "done") return "完成";
   if (status === "done_with_issues") return "有问题";
   if (status === "failed") return "失败";
+  if (status === "queued") return "排队中";
   if (status === "running") return "生成中";
   if (status === "blocked") return "阻塞";
   return status;
@@ -292,6 +293,16 @@ export function ManualRenderPicker({ caseId, allImages, brand, seedRequest }: Pr
   const [modelName, setModelName] = useState("");
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [elapsedSec, setElapsedSec] = useState(0);
+
+  useEffect(() => {
+    if (!simulateMut.isPending) {
+      setElapsedSec(0);
+      return;
+    }
+    const id = setInterval(() => setElapsedSec((s) => s + 1), 1000);
+    return () => clearInterval(id);
+  }, [simulateMut.isPending]);
 
   const imageOptions = useMemo(() => [...allImages].sort(), [allImages]);
   const imageNameSet = useMemo(() => new Set(imageOptions), [imageOptions]);
@@ -786,7 +797,7 @@ export function ManualRenderPicker({ caseId, allImages, brand, seedRequest }: Pr
         ...region,
         label: region.label || focusTargets[index] || focusTargets.join("；") || null,
       }));
-      const result = await simulateMut.mutateAsync({
+      const mutation = simulateMut.mutateAsync({
         caseId,
         payload: {
           ...simulationInputs,
@@ -798,10 +809,14 @@ export function ManualRenderPicker({ caseId, allImages, brand, seedRequest }: Pr
           note: "由案例详情页人工整理与出图面板创建",
         },
       });
+      const timeout = new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("等待超时（180s），请在历史记录中查看结果")), 180_000),
+      );
+      const result = await Promise.race([mutation, timeout]);
       if (result.status === "failed") {
         setError(result.error_message || t("manualRender.simFailed"));
       } else {
-        setMessage(t("manualRender.simDone", { id: result.simulation_job_id, status: result.status }));
+        setMessage(`#${result.simulation_job_id} 已提交，后台生成中`);
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -1242,7 +1257,7 @@ export function ManualRenderPicker({ caseId, allImages, brand, seedRequest }: Pr
               title={simulationInputProblem ?? t("manualRender.simTitle")}
             >
               <Ico name="scan" size={11} />
-              {simulateMut.isPending ? t("manualRender.simWorking") : t("manualRender.simButton")}
+              {simulateMut.isPending ? `${t("manualRender.simWorking")} (${elapsedSec}s)` : t("manualRender.simButton")}
             </button>
           </div>
         </div>

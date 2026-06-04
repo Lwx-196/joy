@@ -23,7 +23,7 @@ from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
-from .. import _upgrade_executor, ai_generation_adapter, audit, db, issue_translator, render_executor, scanner, simulation_quality, skill_bridge, source_images, source_selection, stress
+from .. import _job_pool, _upgrade_executor, ai_generation_adapter, audit, db, issue_translator, render_executor, scanner, simulation_quality, skill_bridge, source_images, source_selection, stress
 from ..models import (
     CaseBatchUpdate,
     CaseDetail,

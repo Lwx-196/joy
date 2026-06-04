@@ -770,8 +770,8 @@ export function useSimulateCaseAfter() {
     mutationFn: (vars: { caseId: number; payload: SimulateAfterPayload }) =>
       simulateCaseAfter(vars.caseId, vars.payload),
     onSuccess: (_data, vars) => {
-      qc.invalidateQueries({ queryKey: QK.caseDetail(vars.caseId) });
-      qc.invalidateQueries({ queryKey: QK.simulationJobsForCase(vars.caseId) });
+      qc.refetchQueries({ queryKey: QK.caseDetail(vars.caseId) });
+      qc.refetchQueries({ queryKey: QK.simulationJobsForCase(vars.caseId) });
       qc.invalidateQueries({ queryKey: ["simulation", "quality-queue"] });
     },
   });
@@ -790,7 +790,13 @@ export function useCaseSimulationJobs(caseId: number | null | undefined, limit =
     queryKey: caseId ? QK.simulationJobsForCase(caseId) : ["cases", "_simulation_jobs_disabled"],
     queryFn: () => fetchCaseSimulationJobs(caseId as number, limit),
     enabled: !!caseId,
-    staleTime: 5_000,
+    staleTime: 2_000,
+    refetchInterval: (query) => {
+      const jobs = query.state.data as SimulationJob[] | undefined;
+      if (!jobs) return false;
+      const hasActive = jobs.some((j) => j.status === "queued" || j.status === "running");
+      return hasActive ? 2_000 : false;
+    },
   });
 }
 

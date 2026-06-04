@@ -33,6 +33,168 @@ def review_simulation_job_by_id(
     return _review_simulation_job_by_id(job_id, payload)
 
 
+# ---------------------------------------------------------------------------
+# Async simulation: POST creates job + submits to shared pool, returns immediately.
+# ---------------------------------------------------------------------------
+
+
+def _run_simulation_background(
+    *,
+    job_id: int,
+    ai_run_id: int,
+    provider: str,
+    after_path: Path,
+    before_path: Path | None,
+    focus_targets: list[str],
+    focus_regions: list[dict[str, Any]],
+    model_name: str | None,
+    note: str | None,
+    style_reference_paths: list[Path],
+    brand: str,
+    case_id: int,
+    input_refs: list[dict[str, Any]],
+) -> None:
+    """Worker function executed in _job_pool thread. Owns its own DB connections."""
+    try:
+        with db.connect() as conn:
+            row = conn.execute(
+                "SELECT status FROM simulation_jobs WHERE id = ?", (job_id,)
+            ).fetchone()
+            if not row or row["status"] != "queued":
+                return
+            conn.execute(
+                "UPDATE simulation_jobs SET status = 'running', updated_at = ? WHERE id = ?",
+                (datetime.now(timezone.utc).isoformat(), job_id),
+            )
+            conn.execute(
+                "UPDATE ai_runs SET status = 'running' WHERE id = ?",
+                (ai_run_id,),
+            )
+
+        result = ai_generation_adapter.run_after_simulation(
+            provider=provider,
+            job_id=job_id,
+            after_image_path=after_path,
+            before_image_path=before_path,
+            focus_targets=focus_targets,
+            focus_regions=focus_regions,
+            model_name=model_name,
+            note=note,
+            style_reference_image_paths=style_reference_paths,
+            brand=brand,
+            case_id=case_id,
+        )
+        status = str(result["status"])
+        output_refs = result["output_refs"]
+        audit_payload = {
+            **result["audit"],
+            "input_refs": input_refs,
+            "output_refs": output_refs,
+            "failure": None,
+        }
+        audit_payload = stress.tag_payload(audit_payload)
+        error_message = result.get("error_message") if status != "done" else None
+        with db.connect() as conn:
+            now = datetime.now(timezone.utc).isoformat()
+            conn.execute(
+                """
+                UPDATE simulation_jobs
+                SET status = ?,
+                    output_refs_json = ?,
+                    watermarked = ?,
+                    audit_json = ?,
+                    error_message = ?,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    status,
+                    json.dumps(output_refs, ensure_ascii=False),
+                    1 if result.get("watermarked") else 0,
+                    json.dumps(audit_payload, ensure_ascii=False),
+                    error_message,
+                    now,
+                    job_id,
+                ),
+            )
+            conn.execute(
+                """
+                UPDATE ai_runs
+                SET output_json = ?,
+                    status = ?,
+                    error_message = ?,
+                    finished_at = ?
+                WHERE id = ?
+                """,
+                (
+                    json.dumps({"output_refs": output_refs, "audit": audit_payload}, ensure_ascii=False),
+                    status,
+                    error_message,
+                    now,
+                    ai_run_id,
+                ),
+            )
+    except Exception as exc:  # noqa: BLE001
+        _tb = traceback.format_exc()
+        if len(_tb) > 16384:
+            _tb = _tb[:16384] + f"\n... [truncated {len(_tb) - 16384} chars]"
+        failure_block = {
+            "failure_stage": "provider_call",
+            "error_class": type(exc).__name__,
+            "error_message": str(exc)[:4000],
+            "provider_attempts": [
+                {
+                    "provider": provider,
+                    "model_name": model_name,
+                    "attempt": 1,
+                    "error_class": type(exc).__name__,
+                }
+            ],
+            "workflow_name": model_name,
+            "retry_trace": [],
+            "traceback": _tb,
+        }
+        audit_payload = {
+            "provider": provider,
+            "model_name": model_name,
+            "focus_targets": focus_targets,
+            "focus_regions": focus_regions,
+            "input_refs": input_refs,
+            "output_refs": [],
+            "policy": _simulation_policy(focus_regions, case_id=case_id),
+            "note": note,
+            "failure": failure_block,
+        }
+        audit_payload = stress.tag_payload(audit_payload)
+        error_message = str(exc)[:4000]
+        with db.connect() as conn:
+            now = datetime.now(timezone.utc).isoformat()
+            conn.execute(
+                """
+                UPDATE simulation_jobs
+                SET status = 'failed',
+                    output_refs_json = '[]',
+                    watermarked = 0,
+                    audit_json = ?,
+                    error_message = ?,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (json.dumps(audit_payload, ensure_ascii=False), error_message, now, job_id),
+            )
+            conn.execute(
+                """
+                UPDATE ai_runs
+                SET output_json = ?,
+                    status = 'failed',
+                    error_message = ?,
+                    finished_at = ?
+                WHERE id = ?
+                """,
+                (json.dumps({"error": error_message}, ensure_ascii=False), error_message, now, ai_run_id),
+            )
+
+
 @router.post("/{case_id}/simulate-after", response_model=SimulateAfterResponse)
 def simulate_case_after(case_id: int, payload: SimulateAfterRequest) -> SimulateAfterResponse:
     focus_targets = [x.strip() for x in payload.focus_targets if x.strip()]
@@ -86,6 +248,7 @@ def simulate_case_after(case_id: int, payload: SimulateAfterRequest) -> Simulate
             provider=provider,
             model_name=payload.model_name,
             note=payload.note,
+            status="queued",
         )
         ai_run_id = _insert_ai_run(
             conn,
@@ -95,153 +258,35 @@ def simulate_case_after(case_id: int, payload: SimulateAfterRequest) -> Simulate
             focus_targets=focus_targets,
             focus_regions=focus_regions,
             input_refs=input_refs,
-            status="running",
+            status="queued",
         )
 
-    try:
-        result = ai_generation_adapter.run_after_simulation(
-            provider=provider,
-            job_id=job_id,
-            after_image_path=after_path,
-            before_image_path=before_path,
-            focus_targets=focus_targets,
-            focus_regions=focus_regions,
-            model_name=payload.model_name,
-            note=payload.note,
-            style_reference_image_paths=style_reference_paths,
-            brand=payload.brand,
-            case_id=case_id,
-        )
-        status = str(result["status"])
-        output_refs = result["output_refs"]
-        audit_payload = {
-            **result["audit"],
-            "input_refs": input_refs,
-            "output_refs": output_refs,
-            # P0.1: 显式 failure: null 占位（避免 NULL 与 missing key 歧义）；
-            # provider 内部失败时下方 except 分支会改写为结构化 block。
-            "failure": None,
-        }
-        audit_payload = stress.tag_payload(audit_payload)
-        error_message = result.get("error_message") if status != "done" else None
-        with db.connect() as conn:
-            now = datetime.now(timezone.utc).isoformat()
-            conn.execute(
-                """
-                UPDATE simulation_jobs
-                SET status = ?,
-                    output_refs_json = ?,
-                    watermarked = ?,
-                    audit_json = ?,
-                    error_message = ?,
-                    updated_at = ?
-                WHERE id = ?
-                """,
-                (
-                    status,
-                    json.dumps(output_refs, ensure_ascii=False),
-                    1 if result.get("watermarked") else 0,
-                    json.dumps(audit_payload, ensure_ascii=False),
-                    error_message,
-                    now,
-                    job_id,
-                ),
-            )
-            conn.execute(
-                """
-                UPDATE ai_runs
-                SET output_json = ?,
-                    status = ?,
-                    error_message = ?,
-                    finished_at = ?
-                WHERE id = ?
-                """,
-                (
-                    json.dumps({"output_refs": output_refs, "audit": audit_payload}, ensure_ascii=False),
-                    status,
-                    error_message,
-                    now,
-                    ai_run_id,
-                ),
-            )
-    except Exception as exc:  # noqa: BLE001 - external model/router failure is recorded, not raised as 500
-        status = "failed"
-        output_refs = []
-        # P0.1: 结构化失败上下文 — oncall 可 SQL 归因到 failure_stage / error_class
-        # 而不必翻 stderr。保留 legacy error_message 字段向后兼容。
-        # P0.5 (review H-2): traceback 截 16KB 防 DB 行膨胀 / json.loads 在
-        # /api/render/jobs/failures/recent 拉 200 行时内存峰值。
-        _tb = traceback.format_exc()
-        if len(_tb) > 16384:
-            _tb = _tb[:16384] + f"\n... [truncated {len(_tb) - 16384} chars]"
-        failure_block = {
-            "failure_stage": "provider_call",
-            "error_class": type(exc).__name__,
-            "error_message": str(exc)[:4000],
-            "provider_attempts": [
-                {
-                    "provider": provider,
-                    "model_name": payload.model_name,
-                    "attempt": 1,
-                    "error_class": type(exc).__name__,
-                }
-            ],
-            "workflow_name": payload.model_name,
-            "retry_trace": [],
-            "traceback": _tb,
-        }
-        audit_payload = {
-            "provider": provider,
-            "model_name": payload.model_name,
-            "focus_targets": focus_targets,
-            "focus_regions": focus_regions,
-            "input_refs": input_refs,
-            "output_refs": output_refs,
-            "policy": _simulation_policy(focus_regions, case_id=case_id),
-            "note": payload.note,
-            "failure": failure_block,
-        }
-        audit_payload = stress.tag_payload(audit_payload)
-        error_message = str(exc)[:4000]
-        with db.connect() as conn:
-            now = datetime.now(timezone.utc).isoformat()
-            conn.execute(
-                """
-                UPDATE simulation_jobs
-                SET status = 'failed',
-                    output_refs_json = '[]',
-                    watermarked = 0,
-                    audit_json = ?,
-                    error_message = ?,
-                    updated_at = ?
-                WHERE id = ?
-                """,
-                (json.dumps(audit_payload, ensure_ascii=False), error_message, now, job_id),
-            )
-            conn.execute(
-                """
-                UPDATE ai_runs
-                SET output_json = ?,
-                    status = 'failed',
-                    error_message = ?,
-                    finished_at = ?
-                WHERE id = ?
-                """,
-                (json.dumps({"error": error_message}, ensure_ascii=False), error_message, now, ai_run_id),
-            )
+    _job_pool.submit(
+        _run_simulation_background,
+        job_id=job_id,
+        ai_run_id=ai_run_id,
+        provider=provider,
+        after_path=after_path,
+        before_path=before_path,
+        focus_targets=focus_targets,
+        focus_regions=focus_regions,
+        model_name=payload.model_name,
+        note=payload.note,
+        style_reference_paths=style_reference_paths,
+        brand=payload.brand,
+        case_id=case_id,
+        input_refs=input_refs,
+    )
 
     return SimulateAfterResponse(
         simulation_job_id=job_id,
         case_id=case_id,
-        status=status,
+        status="queued",
         focus_targets=focus_targets,
         focus_regions=focus_regions,
         provider=provider,
-        model_name=audit_payload.get("model_name") or payload.model_name,
+        model_name=payload.model_name,
         input_refs=input_refs,
-        output_refs=output_refs,
-        audit=audit_payload,
-        error_message=error_message,
     )
 
 

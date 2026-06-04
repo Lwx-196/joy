@@ -3672,6 +3672,7 @@ def run_ps_model_router_after_simulation(
         "--quality",
         DEFAULT_QUALITY,
     ]
+    cmd.append("--no-planner")
     if before_image_path is not None:
         cmd.extend(["--pose-ref", str(before_image_path)])
     for style_ref in style_reference_image_paths or []:

@@ -221,9 +221,9 @@ class SimulateAfterResponse(BaseModel):
     focus_regions: list[dict[str, Any]] = []
     provider: str
     model_name: str | None = None
-    input_refs: list[dict[str, Any]]
-    output_refs: list[dict[str, Any]]
-    audit: dict[str, Any]
+    input_refs: list[dict[str, Any]] = Field(default_factory=list)
+    output_refs: list[dict[str, Any]] = Field(default_factory=list)
+    audit: dict[str, Any] = Field(default_factory=dict)
     error_message: str | None = None
 
 
