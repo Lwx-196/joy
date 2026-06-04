@@ -84,6 +84,7 @@ import {
   restoreCaseImage,
   rescanCase,
   rescanCaseGroups,
+  retrySimulationJob,
   retryUpgradeJob,
   reviewCaseImage,
   reviewRenderQuality,
@@ -796,6 +797,18 @@ export function useCaseSimulationJobs(caseId: number | null | undefined, limit =
       if (!jobs) return false;
       const hasActive = jobs.some((j) => j.status === "queued" || j.status === "running");
       return hasActive ? 2_000 : false;
+    },
+  });
+}
+
+export function useRetrySimulationJob() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (vars: { caseId: number; jobId: number }) =>
+      retrySimulationJob(vars.caseId, vars.jobId),
+    onSuccess: (_data, vars) => {
+      qc.refetchQueries({ queryKey: QK.simulationJobsForCase(vars.caseId) });
+      qc.invalidateQueries({ queryKey: ["simulation", "quality-queue"] });
     },
   });
 }

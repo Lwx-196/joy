@@ -3637,6 +3637,7 @@ def run_ps_model_router_after_simulation(
     do_not_touch: list[str] | None = None,
     strength: str | None = None,
     anchor_mode: str = ANCHOR_MODE_MASK,
+    use_planner: bool = False,
 ) -> dict[str, Any]:
     if anchor_mode not in VALID_ANCHOR_MODES:
         raise ValueError(
@@ -3672,7 +3673,8 @@ def run_ps_model_router_after_simulation(
         "--quality",
         DEFAULT_QUALITY,
     ]
-    cmd.append("--no-planner")
+    if not use_planner:
+        cmd.append("--no-planner")
     if before_image_path is not None:
         cmd.extend(["--pose-ref", str(before_image_path)])
     for style_ref in style_reference_image_paths or []:
@@ -3759,6 +3761,7 @@ def run_ps_model_router_after_simulation(
         "edit_prompt": raw.get("editPrompt"),
         "planned_tasks": raw.get("plannedTasks"),
         "planner_used": bool(raw.get("plannerUsed")),
+        "use_planner": use_planner,
         "degradations": raw.get("degradations") or [],
         "elapsed_seconds": raw.get("elapsedSeconds") or {},
         "router_output_image_path": raw.get("imagePath"),
@@ -3832,6 +3835,7 @@ def run_after_simulation(
     do_not_touch: list[str] | None = None,
     strength: str | None = None,
     anchor_mode: str = ANCHOR_MODE_MASK,
+    use_planner: bool = False,
 ) -> dict[str, Any]:
     if provider == COMFYUI_PROVIDER:
         # effect_projection 暂只在 PS(gpt-image-2) 路线落地（plan 2.3 已验证路线）；
@@ -3864,6 +3868,7 @@ def run_after_simulation(
             do_not_touch=do_not_touch,
             strength=strength,
             anchor_mode=anchor_mode,
+            use_planner=use_planner,
         )
     raise ValueError(f"unsupported simulation provider: {provider}")
 

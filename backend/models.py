@@ -211,6 +211,7 @@ class SimulateAfterRequest(BaseModel):
     model_name: str | None = None
     note: str | None = None
     style_reference_paths: list[str] = Field(default_factory=list)
+    use_planner: bool = False
 
 
 class SimulateAfterResponse(BaseModel):

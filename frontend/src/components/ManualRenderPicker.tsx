@@ -17,6 +17,7 @@ import {
   usePrepareManualRenderSources,
   usePreviewManualRender,
   useReviewSimulationJob,
+  useRetrySimulationJob,
   useRenderCase,
   usePsImageModelOptions,
   useSimulateCaseAfter,
@@ -174,6 +175,35 @@ function simulationStatusText(status: string): string {
   return status;
 }
 
+const SIMULATION_PROGRESS_STAGE_TEXT: Record<string, string> = {
+  queued: "排队等待",
+  running: "执行中",
+  preparing_inputs: "准备输入",
+  direct_image_edit: "图片生成中",
+  downloading: "下载结果",
+  auditing: "审计中",
+};
+
+function isActiveSimulationJob(job: SimulationJob): boolean {
+  return job.status === "queued" || job.status === "running";
+}
+
+function simulationProgressStageText(job: SimulationJob): string {
+  const progress = job.audit.progress;
+  const stage =
+    progress && typeof progress === "object" && typeof (progress as Record<string, unknown>).stage === "string"
+      ? ((progress as Record<string, unknown>).stage as string).trim()
+      : "";
+  const key = stage || job.status;
+  return SIMULATION_PROGRESS_STAGE_TEXT[key] ?? key;
+}
+
+function simulationElapsedSeconds(job: SimulationJob, nowMs: number): number | null {
+  const createdAtMs = Date.parse(job.created_at);
+  if (!Number.isFinite(createdAtMs)) return null;
+  return Math.max(0, Math.floor((nowMs - createdAtMs) / 1000));
+}
+
 function reviewText(job: SimulationJob): string {
   if (job.review_status === "approved") return "已审核可用";
   if (job.review_status === "needs_recheck") return "需复核";
@@ -278,6 +308,7 @@ export function ManualRenderPicker({ caseId, allImages, brand, seedRequest }: Pr
   const simulationsQ = useCaseSimulationJobs(caseId, 6);
   const modelOptionsQ = usePsImageModelOptions();
   const reviewMut = useReviewSimulationJob();
+  const retryMut = useRetrySimulationJob();
   const previewUrlsRef = useRef<Set<string>>(new Set());
   const lastSeedNonceRef = useRef<number | null>(null);
   const [slotsByView, setSlotsByView] = useState<SlotsByView>(() => emptySlotsByView());
@@ -291,9 +322,11 @@ export function ManualRenderPicker({ caseId, allImages, brand, seedRequest }: Pr
   const [dragOver, setDragOver] = useState<SlotKind | null>(null);
   const [focusText, setFocusText] = useState("");
   const [modelName, setModelName] = useState("");
+  const [usePlanner, setUsePlanner] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [elapsedSec, setElapsedSec] = useState(0);
+  const [simulationNowMs, setSimulationNowMs] = useState(() => Date.now());
 
   useEffect(() => {
     if (!simulateMut.isPending) {
@@ -303,6 +336,11 @@ export function ManualRenderPicker({ caseId, allImages, brand, seedRequest }: Pr
     const id = setInterval(() => setElapsedSec((s) => s + 1), 1000);
     return () => clearInterval(id);
   }, [simulateMut.isPending]);
+
+  useEffect(() => {
+    const id = window.setInterval(() => setSimulationNowMs(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, []);
 
   const imageOptions = useMemo(() => [...allImages].sort(), [allImages]);
   const imageNameSet = useMemo(() => new Set(imageOptions), [imageOptions]);
@@ -806,6 +844,7 @@ export function ManualRenderPicker({ caseId, allImages, brand, seedRequest }: Pr
           ai_generation_authorized: true,
           provider: "ps_model_router",
           model_name: selectedModelName.trim(),
+          use_planner: usePlanner,
           note: "由案例详情页人工整理与出图面板创建",
         },
       });
@@ -834,6 +873,16 @@ export function ManualRenderPicker({ caseId, allImages, brand, seedRequest }: Pr
         payload: { verdict, reviewer, note },
       });
       setMessage(t("manualRender.reviewDone"));
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const retrySimulation = async (job: SimulationJob) => {
+    try {
+      const result = await retryMut.mutateAsync({ caseId, jobId: job.id });
+      setMessage(`#${result.simulation_job_id} 已重新提交，后台生成中`);
       setError(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -977,6 +1026,14 @@ export function ManualRenderPicker({ caseId, allImages, brand, seedRequest }: Pr
       style={{ borderColor: "var(--cyan-200)", boxShadow: "0 0 0 3px rgba(8,145,178,.04)" }}
       data-testid="manual-render-picker"
     >
+      <style>
+        {`
+          @keyframes pulse {
+            0%, 100% { background-color: var(--panel-2); }
+            50% { background-color: var(--panel-3, #e8e8e8); }
+          }
+        `}
+      </style>
       <div
         className="card-h"
         style={{ background: "var(--cyan-50)", borderBottom: "1px solid var(--cyan-200)" }}
@@ -1248,6 +1305,15 @@ export function ManualRenderPicker({ caseId, allImages, brand, seedRequest }: Pr
               </option>
             ))}
           </select>
+          <label style={{ fontSize: 11.5, display: "flex", alignItems: "center", gap: 4 }}>
+            <input
+              type="checkbox"
+              checked={usePlanner}
+              onChange={(e) => setUsePlanner(e.target.checked)}
+              disabled={busy}
+            />
+            复杂指令规划（启用 gpt-5.4 planner，增加 10-30s）
+          </label>
           <div style={{ display: "flex", justifyContent: "flex-end" }}>
             <button
               type="button"
@@ -1276,6 +1342,9 @@ export function ManualRenderPicker({ caseId, allImages, brand, seedRequest }: Pr
               const imageFile = simulationFile(job, "ai_after_simulation");
               const diff = simulationDifference(job);
               const decisionReasons = simulationDecisionReasons(job);
+              const isActiveJob = isActiveSimulationJob(job);
+              const progressStage = isActiveJob ? simulationProgressStageText(job) : "";
+              const elapsedSeconds = isActiveJob ? simulationElapsedSeconds(job, simulationNowMs) : null;
               const reviewTone =
                 job.review_status === "approved"
                   ? "var(--ok)"
@@ -1299,15 +1368,21 @@ export function ManualRenderPicker({ caseId, allImages, brand, seedRequest }: Pr
                     style={{
                       width: 82,
                       aspectRatio: "1 / 1",
-                      background: "var(--panel-2)",
+                      backgroundColor: "var(--panel-2)",
                       border: "1px solid var(--line)",
                       borderRadius: 6,
                       overflow: "hidden",
                       display: "grid",
                       placeItems: "center",
+                      animation: isActiveJob ? "pulse 1.2s ease-in-out infinite" : undefined,
                     }}
                   >
-                    {imageFile ? (
+                    {isActiveJob ? (
+                      <span style={{ display: "grid", justifyItems: "center", gap: 4, fontSize: 10.5, color: "var(--ink-3)" }}>
+                        <Ico name="image" size={18} />
+                        {progressStage}
+                      </span>
+                    ) : imageFile ? (
                       <SimulationThumb
                         href={simulationJobFileUrl(caseId, job.id, "ai_after_simulation")}
                         src={simulationJobFileUrl(caseId, job.id, "ai_after_simulation")}
@@ -1326,6 +1401,8 @@ export function ManualRenderPicker({ caseId, allImages, brand, seedRequest }: Pr
                         #{job.id}
                       </span>
                       <span className="badge">{simulationStatusText(job.status)}</span>
+                      {isActiveJob && <span className="badge">{progressStage}</span>}
+                      {elapsedSeconds !== null && <span className="badge">已耗时 {elapsedSeconds}s</span>}
                       <span className="badge" style={{ color: reviewTone }}>
                         {reviewText(job)}
                       </span>
@@ -1389,6 +1466,18 @@ export function ManualRenderPicker({ caseId, allImages, brand, seedRequest }: Pr
                           disabled={reviewMut.isPending || job.status === "running"}
                         >
                           {t("manualRender.reviewReject")}
+                        </button>
+                      </div>
+                    )}
+                    {job.status === "failed" && (
+                      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                        <button
+                          type="button"
+                          className="btn sm"
+                          onClick={() => retrySimulation(job)}
+                          disabled={retryMut.isPending}
+                        >
+                          重试
                         </button>
                       </div>
                     )}

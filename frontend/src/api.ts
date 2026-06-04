@@ -958,6 +958,7 @@ export interface SimulateAfterPayload {
   provider?: "ps_model_router";
   model_name?: string | null;
   note?: string | null;
+  use_planner?: boolean;
 }
 
 export interface SimulateAfterResponse {
@@ -1351,6 +1352,11 @@ export const restoreCaseImage = (
 export const simulateCaseAfter = (caseId: number, payload: SimulateAfterPayload) =>
   api
     .post<SimulateAfterResponse>(`/api/cases/${caseId}/simulate-after`, payload)
+    .then((r) => r.data);
+
+export const retrySimulationJob = (caseId: number, jobId: number) =>
+  api
+    .post<SimulateAfterResponse>(`/api/cases/${caseId}/simulation-jobs/${jobId}/retry`)
     .then((r) => r.data);
 
 export const fetchPsImageModelOptions = () =>

@@ -49,6 +49,7 @@ def _run_simulation_background(
     focus_regions: list[dict[str, Any]],
     model_name: str | None,
     note: str | None,
+    use_planner: bool,
     style_reference_paths: list[Path],
     brand: str,
     case_id: int,
@@ -80,6 +81,7 @@ def _run_simulation_background(
             focus_regions=focus_regions,
             model_name=model_name,
             note=note,
+            use_planner=use_planner,
             style_reference_image_paths=style_reference_paths,
             brand=brand,
             case_id=case_id,
@@ -157,6 +159,7 @@ def _run_simulation_background(
         audit_payload = {
             "provider": provider,
             "model_name": model_name,
+            "use_planner": use_planner,
             "focus_targets": focus_targets,
             "focus_regions": focus_regions,
             "input_refs": input_refs,
@@ -276,6 +279,7 @@ def simulate_case_after(case_id: int, payload: SimulateAfterRequest) -> Simulate
         brand=payload.brand,
         case_id=case_id,
         input_refs=input_refs,
+        use_planner=payload.use_planner,
     )
 
     return SimulateAfterResponse(
@@ -286,6 +290,156 @@ def simulate_case_after(case_id: int, payload: SimulateAfterRequest) -> Simulate
         focus_regions=focus_regions,
         provider=provider,
         model_name=payload.model_name,
+        input_refs=input_refs,
+    )
+
+
+def _retry_input_path(input_refs: list[Any], role: str, *, required: bool) -> Path | None:
+    for ref in input_refs:
+        if not isinstance(ref, dict) or ref.get("role") != role:
+            continue
+        raw = str(ref.get("path") or "").strip()
+        if not raw:
+            continue
+        path = Path(raw).expanduser()
+        if not path.is_absolute():
+            raise HTTPException(400, f"retry {role} path must be absolute")
+        resolved = path.resolve()
+        if not resolved.is_file():
+            raise HTTPException(404, f"retry {role} image not found")
+        if resolved.suffix.lower() not in scanner.IMAGE_EXTS:
+            raise HTTPException(400, f"unsupported retry {role} extension: {resolved.suffix}")
+        return resolved
+    if required:
+        raise HTTPException(400, f"retry {role} input_ref missing")
+    return None
+
+
+def _retry_input_paths(input_refs: list[Any], role: str) -> list[Path]:
+    paths: list[Path] = []
+    seen: set[str] = set()
+    for ref in input_refs:
+        if not isinstance(ref, dict) or ref.get("role") != role:
+            continue
+        raw = str(ref.get("path") or "").strip()
+        if not raw:
+            continue
+        path = Path(raw).expanduser()
+        if not path.is_absolute():
+            raise HTTPException(400, f"retry {role} path must be absolute")
+        resolved = path.resolve()
+        if not resolved.is_file():
+            raise HTTPException(404, f"retry {role} image not found")
+        if resolved.suffix.lower() not in scanner.IMAGE_EXTS:
+            raise HTTPException(400, f"unsupported retry {role} extension: {resolved.suffix}")
+        key = str(resolved)
+        if key not in seen:
+            seen.add(key)
+            paths.append(resolved)
+    return paths
+
+
+@router.post("/{case_id}/simulation-jobs/{job_id}/retry", response_model=SimulateAfterResponse)
+def retry_simulation_job(case_id: int, job_id: int) -> SimulateAfterResponse:
+    with db.connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM simulation_jobs WHERE id = ? AND case_id = ?",
+            (job_id, case_id),
+        ).fetchone()
+        if not row:
+            raise HTTPException(404, "simulation job not found")
+        if row["status"] != "failed":
+            raise HTTPException(400, "only failed simulation jobs can be retried")
+
+        focus_targets = [str(x).strip() for x in _json_field(row, "focus_targets_json", []) if str(x).strip()]
+        model_plan = _json_field(row, "model_plan_json", {})
+        audit_payload = _json_field(row, "audit_json", {})
+        raw_regions = (
+            model_plan.get("focus_regions")
+            if isinstance(model_plan, dict)
+            else None
+        ) or (
+            audit_payload.get("focus_regions")
+            if isinstance(audit_payload, dict)
+            else None
+        ) or []
+        focus_regions = _normalize_focus_regions(raw_regions if isinstance(raw_regions, list) else [])
+        input_refs = _json_field(row, "input_refs_json", [])
+        if not isinstance(input_refs, list):
+            input_refs = []
+
+        provider = str(
+            (model_plan.get("provider") if isinstance(model_plan, dict) else None)
+            or (audit_payload.get("provider") if isinstance(audit_payload, dict) else None)
+            or _SIMULATION_PROVIDER
+        ).strip()
+        raw_model_name = (
+            model_plan.get("model_name") if isinstance(model_plan, dict) else None
+        ) or (
+            audit_payload.get("model_name") if isinstance(audit_payload, dict) else None
+        )
+        model_name = str(raw_model_name).strip() if raw_model_name else None
+        _validate_simulation_provider(provider, model_name)
+        raw_note = audit_payload.get("note") if isinstance(audit_payload, dict) else None
+        note = str(raw_note) if raw_note is not None else None
+        use_planner = bool(
+            (model_plan.get("use_planner") if isinstance(model_plan, dict) else False)
+            or (audit_payload.get("use_planner") if isinstance(audit_payload, dict) else False)
+        )
+
+        after_path = _retry_input_path(input_refs, "after_source", required=True)
+        assert after_path is not None
+        before_path = _retry_input_path(input_refs, "before_pose_reference", required=False)
+        style_reference_paths = _retry_input_paths(input_refs, "style_reference")
+
+        new_job_id = _insert_simulation_job(
+            conn,
+            case_id=case_id,
+            focus_targets=focus_targets,
+            focus_regions=focus_regions,
+            input_refs=input_refs,
+            provider=provider,
+            model_name=model_name,
+            note=note,
+            status="queued",
+        )
+        ai_run_id = _insert_ai_run(
+            conn,
+            job_id=new_job_id,
+            provider=provider,
+            model_name=model_name,
+            focus_targets=focus_targets,
+            focus_regions=focus_regions,
+            input_refs=input_refs,
+            status="queued",
+        )
+
+    _job_pool.submit(
+        _run_simulation_background,
+        job_id=new_job_id,
+        ai_run_id=ai_run_id,
+        provider=provider,
+        after_path=after_path,
+        before_path=before_path,
+        focus_targets=focus_targets,
+        focus_regions=focus_regions,
+        model_name=model_name,
+        note=note,
+        style_reference_paths=style_reference_paths,
+        brand="fumei",
+        case_id=case_id,
+        input_refs=input_refs,
+        use_planner=use_planner,
+    )
+
+    return SimulateAfterResponse(
+        simulation_job_id=new_job_id,
+        case_id=case_id,
+        status="queued",
+        focus_targets=focus_targets,
+        focus_regions=focus_regions,
+        provider=provider,
+        model_name=model_name,
         input_refs=input_refs,
     )
 
