@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from . import db, render_quality
 from .render_queue import RENDER_QUEUE
-from .routes import audit, case_groups, cases, classification, customers, evaluations, image_workbench, issues, jobs, render, review_tickets, scan, stress, upgrade
+from .routes import audit, best_pair, case_groups, cases, classification, customers, evaluations, image_workbench, issues, jobs, render, review_tickets, scan, stress, upgrade
 from .upgrade_queue import UPGRADE_QUEUE
 
 app = FastAPI(title="case-workbench", version="0.1.0")
@@ -26,6 +26,7 @@ UPGRADE_QUEUE.recover()
 
 app.include_router(scan.router)
 app.include_router(stress.router)
+app.include_router(best_pair.router)
 app.include_router(case_groups.router)
 app.include_router(cases.router)
 app.include_router(image_workbench.router)
