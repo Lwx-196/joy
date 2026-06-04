@@ -2,12 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import {
-  CATEGORY_LABEL,
-  TIER_LABEL,
   caseFileUrl,
-  resolveCandidates,
-  type Category,
-  type CandidateResult,
   type CaseUpdatePayload,
   type ManualRenderView,
   type ReviewStatus,
@@ -40,10 +35,8 @@ import {
 import { useBrand } from "../lib/brand-context";
 import { rememberCaseVisit } from "../lib/work-queue";
 import {
-  CategoryPill,
   Ico,
   ReviewPill,
-  TierPill,
 } from "../components/atoms";
 import { EvaluateDialog } from "../components/EvaluateDialog";
 import { ImageOverridePopover } from "../components/ImageOverridePopover";
@@ -51,17 +44,23 @@ import { ManualRenderPicker, type ManualRenderSeedImage, type ManualRenderSeedRe
 import { RenderHistoryDrawer } from "../components/RenderHistoryDrawer";
 import { RenderStatusCard } from "../components/RenderStatusCard";
 import { RevisionsDrawer } from "../components/RevisionsDrawer";
+import { DiagnosticsCard } from "../features/case-detail/DiagnosticsCard";
+import { useCaseDetailDraft, useCustomerCandidates } from "../features/case-detail/hooks";
+import { ManualEditCard } from "../features/case-detail/ManualEditCard";
+import { SourceGroupPanel } from "../features/case-detail/SourceGroupPanel";
+import { SourceImageThumb } from "../features/case-detail/SourceImageThumb";
+import { SupplementCandidatesPanel } from "../features/case-detail/SupplementCandidatesPanel";
+import {
+  SOURCE_VIEW_ORDER,
+  type BulkPhaseAction,
+  type BulkViewAction,
+  type SourceGroupFilter,
+  type SourceRole,
+  type SourceRoleFilter,
+  type SourceViewFilter,
+  type SourceViewKey,
+} from "../features/case-detail/types";
 import { useHotkey } from "../hooks/useHotkey";
-
-type SourceRole = "pre" | "post" | "unl";
-type SourceViewKey = NonNullable<SkillImageMetadata["view_bucket"]> | "unknown";
-type SourceRoleFilter = SourceRole | "all" | "needs" | "manual";
-type SourceViewFilter = SourceViewKey | "all";
-type SourceGroupFilter = "all" | "needs" | "missing_phase" | "missing_view" | "bound" | "excluded" | "missing_file";
-type BulkPhaseAction = "before" | "after" | "clear";
-type BulkViewAction = "front" | "oblique" | "side" | "clear";
-
-const SOURCE_VIEW_ORDER: SourceViewKey[] = ["front", "oblique", "side", "unknown"];
 
 export default function CaseDetail() {
   const { t } = useTranslation(["caseDetail", "common", "renderHistory"]);
@@ -96,9 +95,10 @@ export default function CaseDetail() {
   const upgrading = upgradeMut.isPending;
   const enqueueingRender = renderMut.isPending;
 
-  const [candidates, setCandidates] = useState<CandidateResult | null>(null);
   const [copied, setCopied] = useState(false);
   const [editing, setEditing] = useState(false);
+  const candidates = useCustomerCandidates(data);
+  const [draft, setDraft] = useCaseDetailDraft(data, editing);
   const [sourceRoleFilter, setSourceRoleFilter] = useState<SourceRoleFilter>("all");
   const [sourceViewFilter, setSourceViewFilter] = useState<SourceViewFilter>("all");
   const [selectedSourceImages, setSelectedSourceImages] = useState<Set<string>>(() => new Set());
@@ -134,47 +134,11 @@ export default function CaseDetail() {
   const sourceGroupQ = useCaseSourceGroup(caseId || null);
 
   useHotkey("h", () => setRenderHistoryOpen((v) => !v), { ignoreInEditable: true });
-  const [draft, setDraft] = useState({
-    manual_category: "" as "" | Category,
-    manual_template_tier: "",
-    notes: "",
-    tags: "",
-    extra_blocking: [] as string[],
-  });
-
-  // Sync draft from server data when it (re)loads.
-  // Only resets when caseId changes or when not editing — preserves edits during save.
-  useEffect(() => {
-    if (!data) return;
-    if (editing) return;
-    setDraft({
-      manual_category: (data.manual_category as Category | null) ?? "",
-      manual_template_tier: data.manual_template_tier ?? "",
-      notes: data.notes ?? "",
-      tags: data.tags.join(", "),
-      extra_blocking: data.manual_blocking_codes,
-    });
-  }, [data, editing]);
 
   // Remember last visited case id for the dashboard "继续上次审核" affordance.
   useEffect(() => {
     if (caseId > 0) rememberCaseVisit(caseId);
   }, [caseId]);
-
-  // Resolve customer candidates (one-shot, not cached — depends on detail).
-  useEffect(() => {
-    if (!data) return;
-    if (!data.customer_id && data.customer_raw) {
-      let cancelled = false;
-      resolveCandidates(data.customer_raw).then((res) => {
-        if (!cancelled) setCandidates(res);
-      });
-      return () => {
-        cancelled = true;
-      };
-    }
-    setCandidates(null);
-  }, [data?.customer_id, data?.customer_raw]);
 
   const copy = async (text: string) => {
     try {
@@ -470,7 +434,6 @@ export default function CaseDetail() {
   const focusedSourceGroupSlot = sourceGroupFocusParams.get("source_group_focus") ?? "";
   const focusedIssueCode = sourceGroupFocusParams.get("issue_code") ?? "";
   const focusedIssueText = sourceGroupFocusParams.get("issue_text") ?? "";
-  const isFocusedSlot = (slot: SourceGroupSlot): boolean => focusedSourceGroupSlot === slot.view;
   const warningContainsFromCode = (code: string, text?: string): string => {
     if (text) {
       if (text.includes("方向不一致")) return "方向不一致";
@@ -486,34 +449,6 @@ export default function CaseDetail() {
     if (code === "side_face_alignment_fallback") return "侧面人脸检测失败";
     return text || code;
   };
-  const sourceKindLabel = (kind?: string | null): string => {
-    if (kind === "ready_source") return "源图配齐";
-    if (kind === "missing_before_after_pair") return "缺术前/术后配对";
-    if (kind === "insufficient_source_photos") return "真实源图不足";
-    if (kind === "generated_output_collection") return "成品集合";
-    if (kind === "manual_not_case_source_directory") return "素材归档";
-    if (kind === "missing_source_files") return "源文件缺失";
-    if (kind === "unknown_not_scanned") return "未扫描";
-    return kind || "未知";
-  };
-  const sourceGroupPhaseLabel = (phase: SourceGroupImage["phase"]): string =>
-    phase === "before" ? t("images.preOp") : phase === "after" ? t("images.postOp") : t("images.unlabeled");
-  const sourceGroupViewLabel = (view: SourceGroupImage["view"]): string =>
-    view === "front"
-      ? t("images.viewFront")
-      : view === "oblique"
-        ? t("images.viewOblique")
-        : view === "side"
-          ? t("images.viewSide")
-          : t("images.viewUnknown");
-  const pairQualityLabel = (label?: string | null): string => {
-    if (label === "strong") return "候选稳";
-    if (label === "review") return "需复核";
-    if (label === "risky") return "高风险";
-    return "未评分";
-  };
-  const candidateLine = (candidate: NonNullable<SourceGroupSlot["selected_before"]> | null, role: "前" | "后"): string =>
-    candidate ? `${role} #${candidate.case_id} ${candidate.filename} · ${candidate.selection_score}` : `${role} 未选`;
   const sourceGroupApplyOverride = (
     image: SourceGroupImage,
     kind: "phase" | "view",
@@ -994,142 +929,23 @@ export default function CaseDetail() {
     setManualSeedRequest({ nonce: manualSeedNonceRef.current, images });
     setSourceBatchMessage(t("images.sentToManual", { count: selectedSourceList.length }));
   };
-  const renderSourceThumb = (name: string, role: SourceRole) => {
-    const meta = skillMetaByFile.get(name);
-    const view = sourceViewOf(name);
-    const hasView = view !== "unknown";
-    const viewText = view === "unknown" ? "" : viewLabel(view);
-    const phaseTxt =
-      role === "pre" ? t("images.preOp") : role === "post" ? t("images.postOp") : t("images.unlabeled");
-    const rejection = meta?.rejection_reason ? `\n${t("images.rejectionTitle")}: ${meta.rejection_reason}` : "";
-    const isManualPhase = meta?.phase_override_source === "manual";
-    const isManualView = meta?.view_override_source === "manual";
-    const isManual = isManualSource(name);
-    const needsManual = needsManualSource(name);
-    const reviewState = meta?.review_state ?? null;
-    const selected = selectedSourceImages.has(name);
-    return (
-      <div
-        key={name}
-        className={`thumb${selected ? " selected" : ""}`}
-        draggable
-        data-source-file={name}
-        data-view={hasView ? view : ""}
-        data-manual={isManual ? "1" : "0"}
-        data-needs-manual={needsManual ? "1" : "0"}
-        data-review-excluded={reviewState?.render_excluded ? "1" : "0"}
-        data-selected={selected ? "1" : "0"}
-        onDragStart={(e) => {
-          e.dataTransfer.effectAllowed = "copy";
-          e.dataTransfer.setData("application/x-case-image", name);
-          e.dataTransfer.setData("text/plain", name);
-        }}
-        title={t("images.thumbnailTitle", {
-          name,
-          phase: phaseTxt,
-          view: viewText || t("images.viewUnknown"),
-          rejection,
-        })}
-        style={{ position: "relative" }}
-      >
-        <button
-          type="button"
-          className="thumb-select-btn"
-          aria-label={selected ? t("images.unselectImage") : t("images.selectImage")}
-          title={selected ? t("images.unselectImage") : t("images.selectImage")}
-          onClick={(e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            toggleSourceSelection(name);
-          }}
-        >
-          {selected ? <Ico name="check" size={11} /> : null}
-        </button>
-        <a
-          href={caseFileUrl(caseId, name)}
-          target="_blank"
-          rel="noreferrer"
-          style={{ display: "block", color: "inherit" }}
-        >
-          <img src={caseFileUrl(caseId, name)} alt={name} loading="lazy" />
-        </a>
-        <span className={`role ${role}`}>
-          {role === "pre" ? "PRE" : role === "post" ? "POST" : "UNL"}
-          {isManualPhase && (
-            <span
-              data-testid="phase-manual-marker"
-              style={{ marginLeft: 3, fontSize: 8, opacity: 0.85 }}
-              title={t("images.manualBadge")}
-            >
-              ✎
-            </span>
-          )}
-        </span>
-        {hasView && (
-          <span className={`view ${view}`}>
-            {viewText}
-            {isManualView && (
-              <span
-                data-testid="view-manual-marker"
-                style={{ marginLeft: 2, fontSize: 8 }}
-                title={t("images.manualBadge")}
-              >
-                ✎
-              </span>
-            )}
-          </span>
-        )}
-        {meta?.rejection_reason && (
-          <span className="reject" title={meta.rejection_reason}>
-            {meta.rejection_reason}
-          </span>
-        )}
-        {needsManual && (
-          <span className="class-state" title={t("images.needsManual")}>
-            {t("images.needsManualShort")}
-          </span>
-        )}
-        {reviewState && (
-          <span
-            className={`review-state ${reviewState.verdict ?? (reviewState.copied_requires_review ? "copied-review" : "")}`}
-            title={reviewState.note || reviewState.label || reviewState.verdict || ""}
-          >
-            {reviewState.label || (reviewState.verdict ? t(`preflight.reviewVerdicts.${reviewState.verdict}`, { defaultValue: reviewState.verdict }) : "待确认")}
-          </span>
-        )}
-        <button
-          type="button"
-          className="thumb-edit-btn"
-          data-testid="thumb-edit-btn"
-          aria-label={t("images.editOverride")}
-          title={t("images.editOverride")}
-          onClick={(e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            setOverrideTarget({ filename: name, anchor: e.currentTarget });
-          }}
-        >
-          <Ico name="edit" size={11} />
-        </button>
-        <button
-          type="button"
-          className="thumb-trash-btn"
-          data-testid="thumb-trash-btn"
-          aria-label={t("trash.button")}
-          title={t("trash.button")}
-          disabled={trashImageMut.isPending}
-          onClick={(e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            moveImageToTrash(name);
-          }}
-        >
-          <Ico name="x" size={11} />
-        </button>
-        <div className="name">{name}</div>
-      </div>
-    );
-  };
+  const renderSourceThumb = (name: string, role: SourceRole) => (
+    <SourceImageThumb
+      key={name}
+      name={name}
+      role={role}
+      caseId={caseId}
+      meta={skillMetaByFile.get(name)}
+      view={sourceViewOf(name)}
+      isManual={isManualSource(name)}
+      needsManual={needsManualSource(name)}
+      selected={selectedSourceImages.has(name)}
+      trashPending={trashImageMut.isPending}
+      onToggleSelection={toggleSourceSelection}
+      onEdit={setOverrideTarget}
+      onTrash={moveImageToTrash}
+    />
+  );
 
   return (
     <div style={{ height: "100%", display: "grid", gridTemplateRows: "auto 1fr", overflow: "hidden" }}>
@@ -1435,55 +1251,14 @@ export default function CaseDetail() {
                 </div>
               )}
               {supplementOpen && (
-                <div className="supplement-panel">
-                  {supplementQ.isLoading && <div className="empty">正在从全局真实照片队列查找候选…</div>}
-                  {supplementQ.isError && <div className="empty">补图候选加载失败</div>}
-                  {supplementQ.data && supplementQ.data.gaps.length === 0 && (
-                    <div className="empty">当前三联槽位已配齐，无需跨案例补图</div>
-                  )}
-                  {supplementQ.data?.gaps.map((gap) => (
-                    <div key={gap.key} className="supplement-gap">
-                      <div className="supplement-gap-head">
-                        <div>
-                          <b>{gap.view_label} · {gap.role_label}</b>
-                          <span>
-                            {gap.body_part === "body" ? "身体" : gap.body_part === "face" ? "面部" : "部位未识别"}
-                            {gap.treatment_area ? ` / ${gap.treatment_area}` : ""}
-                          </span>
-                        </div>
-                        <em>{gap.candidate_count ?? 0} 个候选</em>
-                      </div>
-                      <div className="supplement-candidate-grid">
-                        {(gap.candidates ?? []).map((candidate) => (
-                          <article key={`${gap.key}-${candidate.case_id}-${candidate.filename}`} className="supplement-candidate-card">
-                            <img src={candidate.preview_url} alt={candidate.filename} loading="lazy" />
-                            <div className="supplement-candidate-body">
-                              <b title={candidate.filename}>{candidate.filename}</b>
-                              <span>{candidate.case_title}</span>
-                              <em>{candidate.match_reasons.join(" / ")}</em>
-                              <div>
-                                <Link to={`/cases/${candidate.case_id}`}>来源 #{candidate.case_id}</Link>
-                                <button
-                                  type="button"
-                                  className="btn sm primary"
-                                  onClick={() => copySupplementCandidate(gap, candidate)}
-                                  disabled={transferImageMut.isPending}
-                                  title="复制到当前案例，并标记为补图待确认"
-                                >
-                                  {transferImageMut.isPending ? "复制中…" : "复制到本案"}
-                                </button>
-                              </div>
-                            </div>
-                          </article>
-                        ))}
-                        {(gap.candidates ?? []).length === 0 && (
-                          <div className="empty">没有找到安全候选：低置信、需换片、已排除出图的照片已被过滤</div>
-                        )}
-                      </div>
-                    </div>
-                  ))}
-                  {supplementMessage && <div className="supplement-message">{supplementMessage}</div>}
-                </div>
+                <SupplementCandidatesPanel
+                  isLoading={supplementQ.isLoading}
+                  isError={supplementQ.isError}
+                  gaps={supplementQ.data?.gaps ?? null}
+                  message={supplementMessage}
+                  isCopying={transferImageMut.isPending}
+                  onCopyCandidate={copySupplementCandidate}
+                />
               )}
               {(activePreflightBlockingItems.length > 0 || activePreflightRenderBlocking.length > 0) && (
                 <div className="preflight-issues">
@@ -1606,388 +1381,37 @@ export default function CaseDetail() {
             </section>
           )}
 
-          <section className="source-group-panel" id="source-group-preflight" data-testid="source-group-panel">
-            <div className="source-group-head">
-              <div>
-                <b>绑定源组</b>
-                <span>
-                  {sourceGroup
-                    ? `${sourceGroup.source_count} 个目录 / ${sourceGroup.image_count} 张源图`
-                    : sourceGroupQ.isLoading
-                      ? "正在读取真实来源目录…"
-                      : "未读取"}
-                </span>
-              </div>
-              <span className={`preflight-state ${sourceGroupStatusClass}`}>
-                {sourceGroup
-                  ? sourceGroup.preflight.status === "ready"
-                    ? "预检 ready"
-                    : sourceGroup.preflight.status === "blocked"
-                      ? "硬门禁阻断"
-                      : "需复检"
-                  : "加载中"}
-              </span>
-            </div>
-            {sourceGroupQ.isError && <div className="empty">绑定源组加载失败</div>}
-            {sourceGroup && (
-              <>
-                <div className="source-group-metrics">
-                  <span>主目录 #{sourceGroup.case_id}</span>
-                  <span>绑定 {sourceGroup.bound_case_ids.length}</span>
-                  <span>术前 {sourceGroup.effective_source_profile.before_count}</span>
-                  <span>术后 {sourceGroup.effective_source_profile.after_count}</span>
-                  <span>待补 {sourceGroup.preflight.needs_manual_count}</span>
-                  <span>已排除 {sourceGroup.preflight.render_excluded_count}</span>
-                  <span>ready 分 {sourceGroup.preflight.readiness_score ?? "—"}</span>
-                  <span>正式候选 {sourceGroup.preflight.formal_candidate_manifest?.selected_count ?? 0}/6</span>
-                  {sourceGroupMissingSourceCount > 0 && <span>文件缺失 {sourceGroupMissingSourceCount}</span>}
-                </div>
-                {sourceGroup.preflight.hard_blockers?.length ? (
-                  <div className="source-group-warnings">
-                    {sourceGroup.preflight.hard_blockers.slice(0, 4).map((blocker) => (
-                      <span key={blocker.code}>
-                        {blocker.message} · {blocker.recommended_action}
-                      </span>
-                    ))}
-                  </div>
-                ) : (
-                  <div className="source-group-audit">
-                    <span>正式候选 manifest</span>
-                    <b>{sourceGroup.preflight.formal_candidate_manifest?.policy ?? "source_selection_v1"} · 三联槽位已闭环</b>
-                  </div>
-                )}
-                {(focusedSourceGroupSlot || (sourceGroup.preflight.accepted_warnings?.length ?? 0) > 0) && (
-                  <div className="source-group-audit">
-                    <span>质检闭环</span>
-                    <b>
-                      {focusedSourceGroupSlot
-                        ? `正在处理 ${sourceGroupViewLabel(focusedSourceGroupSlot as SourceGroupSlot["view"])} · ${focusedIssueCode || "issue"}`
-                        : `已确认可接受 ${sourceGroup.preflight.accepted_warnings?.length ?? 0} 条`}
-                    </b>
-                  </div>
-                )}
-                <div className="source-group-filter-row" data-testid="source-group-filter-row">
-                  {sourceGroupFilterItems.map((item) => (
-                    <button
-                      key={item.key}
-                      type="button"
-                      className={`source-group-filter-btn ${sourceGroupFilter === item.key ? "active" : ""}`}
-                      onClick={() => setSourceGroupFilter(item.key)}
-                    >
-                      <span>{item.label}</span>
-                      <b>{item.count}</b>
-                    </button>
-                  ))}
-                </div>
-                <div className="source-group-bulk-bar" data-testid="source-group-bulk-bar">
-                  <span>已选 {selectedSourceGroupList.length}</span>
-                  <button
-                    type="button"
-                    className="btn sm"
-                    onClick={selectVisibleSourceGroupImages}
-                    disabled={sourceGroupVisibleImages.length === 0 || sourceActionBusy}
-                  >
-                    选择当前
-                  </button>
-                  <button
-                    type="button"
-                    className="btn sm ghost"
-                    onClick={clearSourceGroupSelection}
-                    disabled={selectedSourceGroupList.length === 0 || sourceActionBusy}
-                  >
-                    清空
-                  </button>
-                  <button type="button" className="btn sm" onClick={() => sourceGroupApplyBulkOverride("phase", "before")} disabled={selectedSourceGroupList.length === 0 || sourceActionBusy}>批设术前</button>
-                  <button type="button" className="btn sm" onClick={() => sourceGroupApplyBulkOverride("phase", "after")} disabled={selectedSourceGroupList.length === 0 || sourceActionBusy}>批设术后</button>
-                  <button type="button" className="btn sm ghost" onClick={() => sourceGroupApplyBulkOverride("phase", "clear")} disabled={selectedSourceGroupList.length === 0 || sourceActionBusy}>清阶段</button>
-                  <button type="button" className="btn sm" onClick={() => sourceGroupApplyBulkOverride("view", "front")} disabled={selectedSourceGroupList.length === 0 || sourceActionBusy}>批设正面</button>
-                  <button type="button" className="btn sm" onClick={() => sourceGroupApplyBulkOverride("view", "oblique")} disabled={selectedSourceGroupList.length === 0 || sourceActionBusy}>批设45°</button>
-                  <button type="button" className="btn sm" onClick={() => sourceGroupApplyBulkOverride("view", "side")} disabled={selectedSourceGroupList.length === 0 || sourceActionBusy}>批设侧面</button>
-                  <button type="button" className="btn sm ghost" onClick={() => sourceGroupApplyBulkOverride("view", "clear")} disabled={selectedSourceGroupList.length === 0 || sourceActionBusy}>清角度</button>
-                  <button type="button" className="btn sm" onClick={() => sourceGroupReviewSelected("usable")} disabled={selectedSourceGroupList.length === 0 || sourceActionBusy}>可用</button>
-                  <button type="button" className="btn sm ghost" onClick={() => sourceGroupReviewSelected("deferred")} disabled={selectedSourceGroupList.length === 0 || sourceActionBusy}>低优先</button>
-                  <button type="button" className="btn sm ghost" onClick={() => sourceGroupReviewSelected("needs_repick")} disabled={selectedSourceGroupList.length === 0 || sourceActionBusy}>需换片</button>
-                  <button type="button" className="btn sm danger" onClick={() => sourceGroupReviewSelected("excluded")} disabled={selectedSourceGroupList.length === 0 || sourceActionBusy}>排除出图</button>
-                  <button type="button" className="btn sm ghost" onClick={() => sourceGroupReviewSelected("reopen")} disabled={selectedSourceGroupList.length === 0 || sourceActionBusy}>重开</button>
-                </div>
-                {sourceGroup.audit.binding_note && (
-                  <div className="source-group-audit">
-                    <span>绑定备注</span>
-                    <b>{sourceGroup.audit.binding_note}</b>
-                  </div>
-                )}
-                <div className="source-group-slots">
-	                  {sourceGroup.preflight.slots.map((slot) => {
-	                    const manifestSlot = sourceGroup.preflight.formal_candidate_manifest?.slots?.[slot.view];
-	                    const qualityPrediction = manifestSlot?.quality_prediction;
-	                    return (
-	                    <div key={slot.view} className={`source-group-slot ${slot.ready ? "ready" : "blocked"} ${isFocusedSlot(slot) ? "focused" : ""}`}>
-                      <span>{slot.label}</span>
-                      <b>{slot.before_count}/{slot.after_count}</b>
-                      <em>
-                        {slot.source_case_ids.length > 0
-                          ? slot.source_case_ids.map((sourceCaseId) => `#${sourceCaseId}`).join(" / ")
-                          : "未配"}
-                      </em>
-                      <div className="source-group-candidates">
-                        <span title={slot.selected_before ? `${slot.selected_before.case_title} / ${slot.selected_before.filename} / ${slot.selected_before.selection_reasons.join("、")}` : ""}>
-                          {candidateLine(slot.selected_before, "前")}
-                        </span>
-                        <span title={slot.selected_after ? `${slot.selected_after.case_title} / ${slot.selected_after.filename} / ${slot.selected_after.selection_reasons.join("、")}` : ""}>
-                          {candidateLine(slot.selected_after, "后")}
-                        </span>
-                      </div>
-                      {(slot.selected_before || slot.selected_after) && (
-                        <div className="source-group-selection-reasons">
-                          {slot.selected_before?.selection_reasons?.[0] && <span>前：{slot.selected_before.selection_reasons[0]}</span>}
-                          {slot.selected_after?.selection_reasons?.[0] && <span>后：{slot.selected_after.selection_reasons[0]}</span>}
-                        </div>
-                      )}
-	                      {slot.pair_quality && (
-	                        <div className={`source-group-pair ${slot.pair_quality.severity}`}>
-	                          <b>{slot.pair_quality.score}</b>
-	                          <span>{pairQualityLabel(slot.pair_quality.label)}</span>
-	                          <em>{slot.pair_quality.reasons[0] ?? "首选候选已配齐"}</em>
-	                        </div>
-	                      )}
-	                      {qualityPrediction && (
-	                        <div className="source-group-selection-reasons">
-	                          <span>
-	                            出图预测：{qualityPrediction.decision === "render" ? "入选" : qualityPrediction.decision === "drop" ? "降级移除" : "阻断"}
-	                            {qualityPrediction.pair_score != null ? ` · pair ${qualityPrediction.pair_score}` : ""}
-	                          </span>
-	                          <span>{qualityPrediction.recommended_action}</span>
-	                        </div>
-	                      )}
-                      {slot.pair_quality?.warnings?.length ? (
-                        <div className="source-group-pair-warnings">
-                          {slot.pair_quality.warnings.slice(0, 2).map((warning) => (
-                            <span key={`${slot.view}-${warning.code}`}>{warning.message}</span>
-                          ))}
-                        </div>
-                      ) : null}
-                      {slot.selection_lock?.locked && (
-                        <div className="source-group-lock-note">
-                          <span>已锁片 · {slot.selection_lock.reviewer ?? "operator"}</span>
-                          <button type="button" className="btn sm ghost" onClick={() => sourceGroupClearLock(slot)} disabled={sourceActionBusy}>解除</button>
-                        </div>
-                      )}
-                      {isFocusedSlot(slot) && focusedIssueCode && (
-                        <div className="source-group-lock-note">
-                          <span>来自质检：{focusedIssueText || focusedIssueCode}</span>
-                          <button
-                            type="button"
-                            className="btn sm"
-                            onClick={() => sourceGroupAcceptWarning(slot, focusedIssueCode, focusedIssueText)}
-                            disabled={sourceActionBusy}
-                          >
-                            确认可接受
-                          </button>
-                        </div>
-                      )}
-                      {slot.selected_before && slot.selected_after && (
-                        <div className="source-group-lock-panel">
-                          <div>
-                            <b>候选重选</b>
-                            <span>当前入选可锁定；也可从备选组合里改锁片</span>
-                          </div>
-                          <button
-                            type="button"
-                            className="btn sm"
-                            onClick={() => sourceGroupLockPair(slot, slot.selected_before!, slot.selected_after!)}
-                            disabled={sourceActionBusy}
-                          >
-                            锁定当前
-                          </button>
-                          <div className="source-group-pair-grid">
-                            {slot.before_candidates.slice(0, 3).flatMap((before) =>
-                              slot.after_candidates.slice(0, 3).map((after) => (
-                                <button
-                                  key={`${slot.view}-${before.case_id}-${before.filename}-${after.case_id}-${after.filename}`}
-                                  type="button"
-                                  className="source-group-pair-option"
-                                  title={`前：${before.selection_reasons.join("、")} / 后：${after.selection_reasons.join("、")}`}
-                                  onClick={() => sourceGroupLockPair(slot, before, after)}
-                                  disabled={sourceActionBusy}
-                                >
-                                  <span>#{before.case_id} {before.filename}</span>
-                                  <span>#{after.case_id} {after.filename}</span>
-                                </button>
-                              )),
-                            )}
-                          </div>
-                        </div>
-                      )}
-	                    </div>
-	                    );
-	                  })}
-                </div>
-                {(sourceGroup.preflight.needs_manual_count > 0 || sourceGroup.preflight.missing_slots.length > 0) && (
-                  <div className="source-group-warnings">
-                    {sourceGroup.preflight.missing_slots.slice(0, 3).map((slot) => (
-                      <span key={slot.view}>
-                        {slot.label} 缺 {slot.missing.map((role) => role === "before" ? "术前" : "术后").join(" / ")}
-                      </span>
-                    ))}
-                    {sourceGroup.preflight.needs_manual_count > 0 && (
-                      <span>{sourceGroup.preflight.needs_manual_count} 张需要补阶段/角度</span>
-                    )}
-                  </div>
-                )}
-                {sourceGroup.missing_bound_case_ids.length > 0 && (
-                  <div className="source-group-warnings">
-                    <span>绑定目录已失效：{sourceGroup.missing_bound_case_ids.map((sourceCaseId) => `#${sourceCaseId}`).join("、")}</span>
-                  </div>
-                )}
-                {sourceGroupFilter === "missing_file" && (
-                  <div className="source-group-missing-files">
-                    {sourceGroupMissingFiles.length > 0
-                      ? sourceGroupMissingFiles.map((item) => (
-                          <span key={`${item.case_id}-${item.filename}`}>
-                            #{item.case_id} {item.source_title} / {item.filename}
-                          </span>
-                        ))
-                      : <span>当前源组没有缺失文件</span>}
-                  </div>
-                )}
-                <div className="source-group-source-list">
-                  {sourceGroup.sources.map((source) => (
-                    <article key={`${source.role}-${source.case_id}`} className="source-group-source">
-                      <div className="source-group-source-head">
-                        <div>
-                          <b>
-                            {source.role === "primary" ? "主目录" : "绑定目录"} #{source.case_id} · {source.case_title}
-                          </b>
-                          <span title={source.abs_path}>{source.abs_path}</span>
-                        </div>
-                        <div>
-                          <span>{sourceKindLabel(source.source_profile.source_kind)}</span>
-                          {source.missing_image_count > 0 && <span>缺失 {source.missing_image_count}</span>}
-                          {source.case_id !== caseId && <Link to={`/cases/${source.case_id}`}>打开</Link>}
-                        </div>
-                      </div>
-                      <div className="source-group-grid">
-                        {source.images
-                          .filter((image) => sourceGroupVisibleImages.some((visible) => sourceGroupImageKey(visible) === sourceGroupImageKey(image)))
-                          .map((image) => {
-                            const selected = selectedSourceGroupImages.has(sourceGroupImageKey(image));
-                            return (
-                          <div
-                            key={`${image.case_id}-${image.filename}`}
-                            className={`source-group-card ${image.render_excluded ? "excluded" : ""} ${selected ? "selected" : ""}`}
-                            draggable={image.case_id === caseId && allImages.includes(image.filename)}
-                            data-source-file={image.filename}
-                            onDragStart={(e) => {
-                              if (image.case_id !== caseId || !allImages.includes(image.filename)) {
-                                e.preventDefault();
-                                return;
-                              }
-                              e.dataTransfer.effectAllowed = "copy";
-                              e.dataTransfer.setData("application/x-case-image", image.filename);
-                              e.dataTransfer.setData("text/plain", image.filename);
-                            }}
-                            title={
-                              image.case_id === caseId && allImages.includes(image.filename)
-                                ? "可拖到右侧『人工整理与出图』槽位"
-                                : "互补目录或非当前 case 的图，无法拖到出图槽"
-                            }
-                          >
-                            <button
-                              type="button"
-                              className="source-group-select-toggle"
-                              onClick={() => toggleSourceGroupSelection(image)}
-                              aria-pressed={selected}
-                              disabled={sourceActionBusy}
-                            >
-                              {selected ? "已选" : "选择"}
-                            </button>
-                            <a href={image.preview_url} target="_blank" rel="noreferrer">
-                              <img src={image.preview_url} alt={image.filename} loading="lazy" />
-                            </a>
-                            <div className="source-group-card-body">
-                              <b title={image.filename}>{image.filename}</b>
-                              <div className="source-group-tags">
-                                <span className={image.phase === "before" ? "pre" : image.phase === "after" ? "post" : ""}>
-                                  {sourceGroupPhaseLabel(image.phase)}
-                                  {image.phase_source === "manual" ? " / 人工" : image.phase_source === "directory" ? " / 目录" : ""}
-                                </span>
-                                <span className={image.view ?? ""}>
-                                  {sourceGroupViewLabel(image.view)}
-                                  {image.view_source === "manual" ? " / 人工" : ""}
-                                </span>
-                                {image.review_state?.label && <span>{image.review_state.label}</span>}
-                              </div>
-                              <div className="source-group-card-quality">
-                                <span>{image.manual ? "人工整理优先" : "自动识别"}</span>
-                                {image.angle_confidence != null && <span>角度 {Math.round(image.angle_confidence * 100)}</span>}
-                                {image.rejection_reason === "face_detection_failure" && <span className="warn">面检复核</span>}
-                              </div>
-                              <div className="source-group-controls">
-                                <select
-                                  value={image.phase ?? ""}
-                                  onChange={(e) => sourceGroupApplyOverride(image, "phase", e.target.value)}
-                                  disabled={sourceActionBusy}
-                                  aria-label="源组阶段"
-                                >
-                                  <option value="">阶段</option>
-                                  <option value="before">术前</option>
-                                  <option value="after">术后</option>
-                                </select>
-                                <select
-                                  value={image.view ?? ""}
-                                  onChange={(e) => sourceGroupApplyOverride(image, "view", e.target.value)}
-                                  disabled={sourceActionBusy}
-                                  aria-label="源组角度"
-                                >
-                                  <option value="">角度</option>
-                                  <option value="front">正面</option>
-                                  <option value="oblique">45°</option>
-                                  <option value="side">侧面</option>
-                                </select>
-                              </div>
-                              <div className="source-group-actions">
-                                <button
-                                  type="button"
-                                  className="btn sm"
-                                  onClick={() => sourceGroupReviewImage(image, "usable")}
-                                  disabled={sourceActionBusy}
-                                >
-                                  可用
-                                </button>
-                                <button
-                                  type="button"
-                                  className="btn sm ghost"
-                                  onClick={() => sourceGroupReviewImage(image, "deferred")}
-                                  disabled={sourceActionBusy}
-                                >
-                                  低优先
-                                </button>
-                                <button
-                                  type="button"
-                                  className="btn sm danger"
-                                  onClick={() => sourceGroupReviewImage(image, "excluded")}
-                                  disabled={sourceActionBusy}
-                                >
-                                  排除
-                                </button>
-                              </div>
-                            </div>
-                          </div>
-                            );
-                          })}
-                        {source.images.filter((image) => sourceGroupVisibleImages.some((visible) => sourceGroupImageKey(visible) === sourceGroupImageKey(image))).length === 0 && (
-                          <div className="empty">
-                            {source.images.length === 0 ? "该目录没有可用于正式出图的真实源图" : "当前筛选没有可整理图片"}
-                          </div>
-                        )}
-                      </div>
-                    </article>
-                  ))}
-                </div>
-                {sourceGroupMessage && <div className="source-group-message">{sourceGroupMessage}</div>}
-              </>
-            )}
-          </section>
+          <SourceGroupPanel
+            caseId={caseId}
+            sourceGroup={sourceGroup}
+            isLoading={sourceGroupQ.isLoading}
+            isError={sourceGroupQ.isError}
+            statusClass={sourceGroupStatusClass}
+            missingSourceCount={sourceGroupMissingSourceCount}
+            filter={sourceGroupFilter}
+            filterItems={sourceGroupFilterItems}
+            visibleImages={sourceGroupVisibleImages}
+            selectedImages={selectedSourceGroupImages}
+            selectedCount={selectedSourceGroupList.length}
+            missingFiles={sourceGroupMissingFiles}
+            allImages={allImages}
+            actionBusy={sourceActionBusy}
+            message={sourceGroupMessage}
+            focusedSlot={focusedSourceGroupSlot}
+            focusedIssueCode={focusedIssueCode}
+            focusedIssueText={focusedIssueText}
+            onFilterChange={setSourceGroupFilter}
+            onSelectVisible={selectVisibleSourceGroupImages}
+            onClearSelection={clearSourceGroupSelection}
+            onBulkOverride={sourceGroupApplyBulkOverride}
+            onReviewSelected={sourceGroupReviewSelected}
+            onClearLock={sourceGroupClearLock}
+            onAcceptWarning={sourceGroupAcceptWarning}
+            onLockPair={sourceGroupLockPair}
+            onToggleSelection={toggleSourceGroupSelection}
+            onApplyOverride={sourceGroupApplyOverride}
+            onReviewImage={sourceGroupReviewImage}
+          />
 
           <div className="source-filter-panel">
             <div className="source-filter-row">
@@ -2177,349 +1601,36 @@ export default function CaseDetail() {
             seedRequest={manualSeedRequest}
           />
 
-          {/* Manual edit card */}
-          <div
-            className="card"
-            style={{ borderColor: "var(--cyan-200)", boxShadow: "0 0 0 3px rgba(8,145,178,.04)" }}
-          >
-            <div
-              className="card-h"
-              style={{ background: "var(--cyan-50)", borderBottom: "1px solid var(--cyan-200)" }}
-            >
-              <div className="t">
-                <Ico name="scan" size={13} style={{ color: "var(--cyan-ink)" }} />
-                <span style={{ color: "var(--cyan-ink)" }}>{t("edit.cardTitle")}</span>
-                {isOverridden && !editing && (
-                  <span
-                    className="badge"
-                    style={{
-                      background: "var(--amber-100)",
-                      color: "var(--amber-ink)",
-                      borderColor: "var(--amber-200)",
-                    }}
-                  >
-                    {t("edit.hasOverride")}
-                  </span>
-                )}
-              </div>
-              <div style={{ display: "flex", gap: 6, flexWrap: "wrap", justifyContent: "flex-end" }}>
-                {!editing ? (
-                  <>
-                    <button
-                      className="btn sm"
-                      onClick={() => rescanMut.mutate(caseId)}
-                      disabled={rescanning || upgrading || enqueueingRender}
-                      title={t("buttons.rescanTooltip")}
-                    >
-                      <Ico name="refresh" size={11} />
-                      {rescanning ? t("buttons.rescanning") : t("edit.autoJudge")}
-                    </button>
-                    <button
-                      className="btn sm"
-                      onClick={() => upgradeMut.mutate({ caseId, brand })}
-                      disabled={rescanning || upgrading || enqueueingRender}
-                      title={t("buttons.upgradeTooltip")}
-                      style={{ borderColor: "var(--cyan-200)", color: "var(--cyan-ink)" }}
-                    >
-                      <Ico name="scan" size={11} />
-                      {upgrading ? t("buttons.upgrading") : t("edit.deepJudge")}
-                    </button>
-                    <button
-                      className="btn sm primary"
-                      onClick={() =>
-                        renderMut.mutate({
-                          caseId,
-                          payload: { brand, template: "tri-compare", semantic_judge: "auto" },
-                        })
-                      }
-                      disabled={enqueueingRender || renderGateBlocked}
-                      title={renderGateTitle}
-                    >
-                      <Ico name="image" size={11} />
-                      {enqueueingRender ? t("buttons.enqueuing") : t("edit.autoRender")}
-                    </button>
-                    <button className="btn sm ghost" onClick={() => setEditing(true)}>
-                      <Ico name="edit" size={11} />
-                      {t("edit.editButton")}
-                    </button>
-                  </>
-                ) : (
-                  <>
-                    <button className="btn sm ghost" onClick={() => setEditing(false)} disabled={saving}>
-                      {t("edit.cancel")}
-                    </button>
-                    <button className="btn sm danger" onClick={clearOverrides} disabled={saving}>
-                      {t("edit.clearOverride")}
-                    </button>
-                    <button className="btn sm amber" onClick={saveEdits} disabled={saving}>
-                      <Ico name="check" size={11} />
-                      {saving ? t("edit.saving") : t("edit.save")}
-                    </button>
-                  </>
-                )}
-              </div>
-            </div>
-            <div className="card-b" style={{ display: "grid", gap: 12 }}>
-              {!editing && (
-                <div
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "space-between",
-                    flexWrap: "wrap",
-                    gap: 8,
-                    padding: "8px 10px",
-                    border: "1px solid var(--cyan-200)",
-                    borderRadius: 6,
-                    background: "var(--cyan-50)",
-                    color: "var(--cyan-ink)",
-                    fontSize: 11.5,
-                  }}
-                >
-                  <span>{t("edit.autoSummary")}</span>
-                  <div style={{ display: "flex", gap: 6, flexShrink: 0, flexWrap: "wrap" }}>
-                    {reviewKey !== "reviewed" && (
-                      <button
-                        className="btn sm"
-                        style={{
-                          background: "#fff",
-                          borderColor: "var(--ok-100)",
-                          color: "var(--ok)",
-                        }}
-                        onClick={() => setReview("reviewed")}
-                      >
-                        <Ico name="check" size={11} />
-                        {t("edit.markReviewed")}
-                      </button>
-                    )}
-                    {reviewKey !== "needs_recheck" && (
-                      <button className="btn sm danger" onClick={() => setReview("needs_recheck")}>
-                        <Ico name="alert" size={11} />
-                        {t("edit.needsRecheck")}
-                      </button>
-                    )}
-                    {!isHeldNow && (
-                      <button
-                        className="btn sm ghost"
-                        onClick={holdCase}
-                        disabled={saving}
-                        title={t("edit.holdTooltip")}
-                        style={{ borderStyle: "dashed", color: "var(--ink-3)", background: "#fff" }}
-                      >
-                        <Ico name="dot" size={11} />
-                        {t("edit.hold")}
-                      </button>
-                    )}
-                  </div>
-                </div>
-              )}
-              {editing && (
-                <div
-                  style={{ fontSize: 11, color: "var(--ink-3)", display: "flex", alignItems: "center", gap: 6 }}
-                >
-                  <Ico name="dot" size={8} style={{ color: "var(--amber)" }} />
-                  {t("edit.modeWarning")}
-                </div>
-              )}
-
-              <div
-                style={{
-                  display: "grid",
-                  gridTemplateColumns: "76px 1fr",
-                  gap: "10px 12px",
-                  alignItems: "center",
-                }}
-              >
-                <label style={{ fontSize: 11.5, color: "var(--ink-3)" }}>{t("edit.categoryLabel")}</label>
-                {editing ? (
-                  <select
-                    value={draft.manual_category}
-                    onChange={(e) =>
-                      setDraft({ ...draft, manual_category: e.target.value as Category | "" })
-                    }
-                    style={{ background: "#fff", borderColor: "var(--amber-200)" }}
-                  >
-                    <option value="">{t("edit.followAuto")}</option>
-                    {Object.entries(CATEGORY_LABEL).map(([k, v]) => (
-                      <option key={k} value={k}>{v}</option>
-                    ))}
-                  </select>
-                ) : (
-                  <div
-                    style={{
-                      display: "flex",
-                      alignItems: "center",
-                      gap: 8,
-                      padding: "5px 9px",
-                      borderRadius: 6,
-                      border: "1px solid var(--line)",
-                      background: "var(--panel-2)",
-                    }}
-                  >
-                    {data.manual_category ? (
-                      <CategoryPill value={data.manual_category} />
-                    ) : (
-                      <span className="layer-chip empty" style={{ height: 20 }}>
-                        <span className="lab">manual</span>
-                        {t("edit.noOverride")}
-                      </span>
-                    )}
-                    <span
-                      style={{
-                        marginLeft: "auto",
-                        fontFamily: "var(--mono)",
-                        fontSize: 10.5,
-                        color: "var(--ink-4)",
-                      }}
-                    >
-                      auto: {CATEGORY_LABEL[data.auto_category]}
-                    </span>
-                  </div>
-                )}
-
-                <label style={{ fontSize: 11.5, color: "var(--ink-3)" }}>{t("edit.templateLabel")}</label>
-                {editing ? (
-                  <select
-                    value={draft.manual_template_tier}
-                    onChange={(e) => setDraft({ ...draft, manual_template_tier: e.target.value })}
-                    style={{ background: "#fff", borderColor: "var(--amber-200)" }}
-                  >
-                    <option value="">{t("edit.followAuto")}</option>
-                    {Object.entries(TIER_LABEL).map(([k, v]) => (
-                      <option key={k} value={k}>{v}</option>
-                    ))}
-                  </select>
-                ) : (
-                  <div
-                    style={{
-                      display: "flex",
-                      alignItems: "center",
-                      gap: 8,
-                      padding: "5px 9px",
-                      borderRadius: 6,
-                      border: "1px solid var(--line)",
-                      background: "var(--panel-2)",
-                    }}
-                  >
-                    {data.manual_template_tier ? (
-                      <TierPill value={data.manual_template_tier} />
-                    ) : (
-                      <span className="layer-chip empty" style={{ height: 20 }}>
-                        <span className="lab">manual</span>
-                        {t("edit.noOverride")}
-                      </span>
-                    )}
-                    <span
-                      style={{
-                        marginLeft: "auto",
-                        fontFamily: "var(--mono)",
-                        fontSize: 10.5,
-                        color: "var(--ink-4)",
-                      }}
-                    >
-                      auto: {data.auto_template_tier ? TIER_LABEL[data.auto_template_tier] : "—"}
-                    </span>
-                  </div>
-                )}
-
-                <label style={{ fontSize: 11.5, color: "var(--ink-3)", alignSelf: "flex-start", marginTop: 6 }}>
-                  {t("edit.notesLabel")}
-                </label>
-                {editing ? (
-                  <textarea
-                    style={{
-                      minHeight: 56,
-                      borderColor: "var(--amber-200)",
-                      background: "#fff",
-                    }}
-                    value={draft.notes}
-                    onChange={(e) => setDraft({ ...draft, notes: e.target.value })}
-                    placeholder={t("edit.notesPlaceholder")}
-                  />
-                ) : (
-                  <div
-                    style={{
-                      fontSize: 12.5,
-                      color: data.notes ? "var(--ink-1)" : "var(--ink-4)",
-                      padding: "6px 0",
-                    }}
-                  >
-                    {data.notes || <span style={{ fontStyle: "italic" }}>—</span>}
-                  </div>
-                )}
-
-                <label style={{ fontSize: 11.5, color: "var(--ink-3)", alignSelf: "flex-start", marginTop: 4 }}>
-                  {t("edit.tagsLabel")}
-                </label>
-                {editing ? (
-                  <input
-                    value={draft.tags}
-                    onChange={(e) => setDraft({ ...draft, tags: e.target.value })}
-                    placeholder={t("edit.tagsPlaceholder")}
-                    style={{ borderColor: "var(--amber-200)", background: "#fff" }}
-                  />
-                ) : data.tags.length > 0 ? (
-                  <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
-                    {data.tags.map((t) => (
-                      <span key={t} className="chip on">
-                        {t}
-                      </span>
-                    ))}
-                  </div>
-                ) : (
-                  <span style={{ color: "var(--ink-4)", fontStyle: "italic" }}>—</span>
-                )}
-
-                <label style={{ fontSize: 11.5, color: "var(--ink-3)", alignSelf: "flex-start", marginTop: 4 }}>
-                  {t("edit.blockingLabel")}
-                </label>
-                <div style={{ display: "grid", gap: 6 }}>
-                  {editing && (
-                    <select
-                      value=""
-                      onChange={(e) => {
-                        if (e.target.value) toggleExtraBlocking(e.target.value);
-                      }}
-                      style={{ background: "#fff", borderColor: "var(--amber-200)" }}
-                    >
-                      <option value="">{t("edit.blockingSelectPlaceholder")}</option>
-                      {issueDict.map((iss) => (
-                        <option
-                          key={iss.code}
-                          value={iss.code}
-                          disabled={draft.extra_blocking.includes(iss.code)}
-                        >
-                          {iss.zh}
-                        </option>
-                      ))}
-                    </select>
-                  )}
-                  <div style={{ display: "flex", flexWrap: "wrap", gap: 4, minHeight: 24, alignItems: "center" }}>
-                    {(editing ? draft.extra_blocking : data.manual_blocking_codes).length > 0 ? (
-                      (editing ? draft.extra_blocking : data.manual_blocking_codes).map((code) => {
-                        const iss = issueDict.find((item) => item.code === code);
-                        return (
-                          <button
-                            key={code}
-                            type="button"
-                            className="chip danger on"
-                            onClick={() => editing && toggleExtraBlocking(code)}
-                            style={{ cursor: editing ? "pointer" : "default" }}
-                            title={code}
-                          >
-                            {iss?.zh ?? code}
-                            {editing && <Ico name="x" size={10} />}
-                          </button>
-                        );
-                      })
-                    ) : (
-                      <span style={{ color: "var(--ink-4)", fontSize: 12 }}>{t("edit.noExtraBlocking")}</span>
-                    )}
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
+          <ManualEditCard
+            data={data}
+            draft={draft}
+            editing={editing}
+            isOverridden={isOverridden}
+            reviewKey={reviewKey}
+            isHeldNow={isHeldNow}
+            issueDict={issueDict}
+            rescanning={rescanning}
+            upgrading={upgrading}
+            enqueueingRender={enqueueingRender}
+            saving={saving}
+            renderGateBlocked={renderGateBlocked}
+            renderGateTitle={renderGateTitle}
+            onDraftChange={setDraft}
+            onToggleExtraBlocking={toggleExtraBlocking}
+            onRescan={() => rescanMut.mutate(caseId)}
+            onUpgrade={() => upgradeMut.mutate({ caseId, brand })}
+            onRender={() =>
+              renderMut.mutate({
+                caseId,
+                payload: { brand, template: "tri-compare", semantic_judge: "auto" },
+              })
+            }
+            onSetEditing={setEditing}
+            onClearOverrides={clearOverrides}
+            onSaveEdits={saveEdits}
+            onSetReview={setReview}
+            onHoldCase={holdCase}
+          />
 
           {/* Customer binding card */}
           <div className="card">
@@ -2623,227 +1734,11 @@ export default function CaseDetail() {
             </div>}
           </div>
 
-          {/* Diagnostics */}
-          {data.blocking_issues.length > 0 && (() => {
-            const blocks = data.blocking_issues.filter((i) => (i.severity ?? "block") === "block");
-            const warns = data.blocking_issues.filter((i) => i.severity === "warn");
-            const autoCodes = new Set(data.auto_blocking_issues.map((i) => i.code));
-            const renderIssue = (issue: typeof data.blocking_issues[number], i: number) => {
-              const isManual = data.manual_blocking_codes.includes(issue.code);
-              const isAuto = autoCodes.has(issue.code);
-              const isBlock = (issue.severity ?? "block") === "block";
-              const accent = isManual
-                ? "var(--amber-ink)"
-                : isBlock
-                  ? "var(--err)"
-                  : "var(--amber-ink)";
-              const bg = isManual
-                ? "var(--amber-50)"
-                : isBlock
-                  ? "var(--err-50)"
-                  : "var(--amber-50)";
-              const border = isManual
-                ? "var(--amber-200)"
-                : isBlock
-                  ? "var(--err-100)"
-                  : "var(--amber-200)";
-              return (
-                <div
-                  key={`${issue.code}-${i}`}
-                  style={{
-                    display: "grid",
-                    gridTemplateColumns: "auto 1fr auto",
-                    gap: 8,
-                    padding: 8,
-                    background: bg,
-                    border: `1px solid ${border}`,
-                    borderRadius: 6,
-                  }}
-                >
-                  <Ico
-                    name={isBlock ? "alert" : "dot"}
-                    size={14}
-                    style={{ color: accent, flexShrink: 0, marginTop: 2 }}
-                  />
-                  <div style={{ minWidth: 0 }}>
-                    <div style={{ fontSize: 12.5, fontWeight: 500, color: accent }}>
-                      {issue.zh}
-                    </div>
-                    <div
-                      style={{
-                        fontFamily: "var(--mono)",
-                        fontSize: 10.5,
-                        color: "var(--ink-3)",
-                        marginTop: 1,
-                      }}
-                    >
-                      {issue.code} · {t("diagnostics.suggestionPrefix")}{issue.next}
-                    </div>
-                    {issue.files && issue.files.length > 0 && (
-                      <div
-                        style={{
-                          marginTop: 6,
-                          display: "flex",
-                          flexWrap: "wrap",
-                          gap: 4,
-                          alignItems: "center",
-                        }}
-                      >
-                        <span
-                          style={{
-                            fontSize: 10.5,
-                            color: "var(--ink-3)",
-                            marginRight: 2,
-                          }}
-                        >
-                          {t("diagnostics.affectedFiles")}
-                        </span>
-                        {issue.files.slice(0, 6).map((fn) => (
-                          <button
-                            key={fn}
-                            type="button"
-                            onClick={() => {
-                              const sel = `[data-source-file="${CSS.escape(fn)}"]`;
-                              const el = document.querySelector<HTMLElement>(sel);
-                              if (el) {
-                                el.scrollIntoView({ behavior: "smooth", block: "center" });
-                                el.classList.add("flash-highlight");
-                                setTimeout(() => el.classList.remove("flash-highlight"), 1500);
-                              }
-                            }}
-                            className="chip"
-                            style={{
-                              fontFamily: "var(--mono)",
-                              fontSize: 10.5,
-                              cursor: "pointer",
-                              border: "1px solid var(--line)",
-                              padding: "2px 6px",
-                            }}
-                            title={t("diagnostics.highlightTooltip")}
-                          >
-                            {fn}
-                          </button>
-                        ))}
-                        {issue.files.length > 6 && (
-                          <span style={{ fontSize: 10.5, color: "var(--ink-4)" }}>
-                            … +{issue.files.length - 6}
-                          </span>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                  <span
-                    className="badge"
-                    style={{
-                      background: isManual ? "var(--amber-100)" : "var(--cyan-50)",
-                      borderColor: isManual ? "var(--amber-200)" : "var(--cyan-200)",
-                      color: isManual ? "var(--amber-ink)" : "var(--cyan-ink)",
-                      height: 18,
-                      alignSelf: "start",
-                    }}
-                  >
-                    {isManual && isAuto
-                      ? t("diagnostics.autoManual")
-                      : isManual
-                        ? t("diagnostics.manual")
-                        : t("diagnostics.auto")}
-                  </span>
-                </div>
-              );
-            };
-            return (
-              <div className="card" style={{ borderColor: blocks.length > 0 ? "var(--err-100)" : "var(--amber-200)" }}>
-                <div
-                  className="card-h"
-                  style={{
-                    background: blocks.length > 0 ? "var(--err-50)" : "var(--amber-50)",
-                    borderBottom: `1px solid ${blocks.length > 0 ? "var(--err-100)" : "var(--amber-200)"}`,
-                  }}
-                >
-                  <div className="t" style={{ color: blocks.length > 0 ? "var(--err)" : "var(--amber-ink)" }}>
-                    <Ico name="alert" size={13} />
-                    {t("diagnostics.cardTitle")}
-                    {blocks.length > 0 && <span>{t("diagnostics.blockingCount", { count: blocks.length })}</span>}
-                    {warns.length > 0 && <span>{t("diagnostics.warningCount", { count: warns.length })}</span>}
-                  </div>
-                  <button type="button" className="btn sm ghost" onClick={() => setDiagnosticsOpen((v) => !v)}>
-                    <Ico name={diagnosticsOpen ? "down" : "arrow-r"} size={11} />
-                    {diagnosticsOpen ? t("diagnostics.collapse") : t("diagnostics.expand")}
-                  </button>
-                </div>
-                <div className="card-b" style={{ display: "grid", gap: 8 }}>
-                  <div
-                    style={{
-                      display: "grid",
-                      gap: 4,
-                      padding: "8px 10px",
-                      border: "1px solid var(--line-2)",
-                      borderRadius: 6,
-                      background: "var(--panel-2)",
-                      color: "var(--ink-3)",
-                      fontSize: 11.5,
-                    }}
-                  >
-                    <div>{t("diagnostics.scopeHint")}</div>
-                    <div style={{ fontFamily: "var(--mono)", color: "var(--ink-4)" }}>
-                      {t("diagnostics.caseDiagnosisSummary", {
-                        auto: data.auto_blocking_issues.length,
-                        manual: data.manual_blocking_codes.length,
-                      })}
-                      {data.latest_render_status && (
-                        <span>
-                          {" · "}
-                          {t("diagnostics.latestRender", {
-                            status: data.latest_render_status,
-                            quality: data.latest_render_quality_status ?? "—",
-                          })}
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                  {diagnosticsOpen && (
-                    <>
-                      {blocks.length > 0 && (
-                        <>
-                          {blocks.length > 0 && warns.length > 0 && (
-                            <div
-                              style={{
-                                fontSize: 10.5,
-                                color: "var(--err)",
-                                textTransform: "uppercase",
-                                letterSpacing: 0.4,
-                              }}
-                            >
-                              {t("diagnostics.blockingSection", { count: blocks.length })}
-                            </div>
-                          )}
-                          {blocks.map(renderIssue)}
-                        </>
-                      )}
-                      {warns.length > 0 && (
-                        <>
-                          {blocks.length > 0 && warns.length > 0 && (
-                            <div
-                              style={{
-                                fontSize: 10.5,
-                                color: "var(--amber-ink)",
-                                textTransform: "uppercase",
-                                letterSpacing: 0.4,
-                                marginTop: 4,
-                              }}
-                            >
-                              {t("diagnostics.warningSection", { count: warns.length })}
-                            </div>
-                          )}
-                          {warns.map(renderIssue)}
-                        </>
-                      )}
-                    </>
-                  )}
-                </div>
-              </div>
-            );
-          })()}
+          <DiagnosticsCard
+            data={data}
+            open={diagnosticsOpen}
+            onToggle={() => setDiagnosticsOpen((value) => !value)}
+          />
 
           {/* Rename suggestion */}
           {renameHint?.command && (

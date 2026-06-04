@@ -9,6 +9,7 @@
     "preview": "vite preview",
     "lint": "eslint src",
     "lint:fix": "eslint src --fix",
+    "test:unit": "vitest run",
     "test:e2e": "playwright test",
     "test:e2e:local-mainline": "PLAYWRIGHT_BASE_URL=http://127.0.0.1:5292 API_PROXY_TARGET=http://127.0.0.1:5291 playwright test",
     "test:e2e:stress": "PLAYWRIGHT_BASE_URL=http://127.0.0.1:5292 API_PROXY_TARGET=http://127.0.0.1:5291 playwright test tests/e2e/stress-smoke.spec.ts",
@@ -31,6 +32,9 @@
     "@axe-core/playwright": "^4.11.2",
     "@eslint/js": "^9.39.4",
     "@playwright/test": "^1.59.1",
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.2",
+    "@testing-library/user-event": "^14.6.1",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "@vitejs/plugin-react": "^4.3.0",
@@ -40,8 +44,10 @@
     "eslint-plugin-react": "^7.37.5",
     "eslint-plugin-react-hooks": "^7.1.1",
     "globals": "^17.5.0",
+    "jsdom": "^29.1.1",
     "typescript": "^5.6.0",
     "typescript-eslint": "^8.59.1",
-    "vite": "^6.0.0"
+    "vite": "^6.0.0",
+    "vitest": "^4.1.8"
   }
 }
