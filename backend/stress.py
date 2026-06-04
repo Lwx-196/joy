@@ -8,49 +8,38 @@ metadata and real source images.
 from __future__ import annotations
 
 import hashlib
-import os
 from pathlib import Path
 from typing import Any
 
 from fastapi import HTTPException
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+from .config import REPO_ROOT, get_settings
+
 DEFAULT_DB_PATH = REPO_ROOT / "case-workbench.db"
 
 
-def _truthy(value: str | None) -> bool:
-    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
-
-
 def configured_db_path() -> Path:
-    raw = os.environ.get("CASE_WORKBENCH_DB_PATH")
-    if not raw:
-        return DEFAULT_DB_PATH
-    return Path(raw).expanduser().resolve()
+    return get_settings().db_path()
 
 
 def output_root() -> Path | None:
-    raw = os.environ.get("CASE_WORKBENCH_OUTPUT_ROOT")
-    if not raw:
-        return None
-    return Path(raw).expanduser().resolve()
+    return get_settings().output_root()
 
 
 def is_stress_mode() -> bool:
-    return _truthy(os.environ.get("CASE_WORKBENCH_STRESS_MODE"))
+    return get_settings().case_workbench_stress_mode
 
 
 def stress_run_id() -> str | None:
-    value = os.environ.get("CASE_WORKBENCH_STRESS_RUN_ID")
-    return value.strip() if value and value.strip() else None
+    return get_settings().stress_run_id()
 
 
 def allow_destructive_actions() -> bool:
-    return _truthy(os.environ.get("CASE_WORKBENCH_STRESS_ALLOW_DESTRUCTIVE"))
+    return get_settings().case_workbench_stress_allow_destructive
 
 
 def allow_external_ai() -> bool:
-    return _truthy(os.environ.get("CASE_WORKBENCH_AI_ALLOW_EXTERNAL"))
+    return get_settings().case_workbench_ai_allow_external
 
 
 def assert_destructive_allowed(action: str) -> None:
@@ -76,13 +65,7 @@ def render_output_root(case_dir: Path, brand: str, template: str) -> Path:
 
 
 def simulation_root(default_root: Path) -> Path:
-    raw = os.environ.get("CASE_WORKBENCH_SIMULATION_ROOT")
-    if raw:
-        return Path(raw).expanduser().resolve()
-    root = output_root()
-    if root is not None:
-        return root / "simulation_jobs"
-    return default_root
+    return get_settings().simulation_root(default_root)
 
 
 def tag_payload(payload: dict[str, Any] | None) -> dict[str, Any]:

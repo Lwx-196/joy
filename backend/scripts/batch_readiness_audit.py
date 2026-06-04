@@ -341,7 +341,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         print(f"  pre_render_gate: {gate_tag}")
         if a.fix_actions:
-            print(f"  fix:")
+            print("  fix:")
             for fix in a.fix_actions:
                 print(f"    - {fix}")
     return 0

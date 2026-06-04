@@ -105,7 +105,8 @@ def run_enhance(prompt: str, out_dir: Path, max_attempts: int = 3) -> dict[str, 
             print(proc.stderr[-1500:])
             if attempt == max_attempts:
                 raise RuntimeError(f"enhance.js exit {proc.returncode}")
-            time.sleep(5); continue
+            time.sleep(5)
+            continue
 
         text = proc.stdout.strip()
         try:
@@ -115,7 +116,8 @@ def run_enhance(prompt: str, out_dir: Path, max_attempts: int = 3) -> dict[str, 
             if s < 0 or e <= s:
                 if attempt == max_attempts:
                     raise
-                time.sleep(5); continue
+                time.sleep(5)
+                continue
             raw = json.loads(text[s:e+1])
         last_raw = raw
         if raw.get("success") and raw.get("imagePath"):
@@ -152,7 +154,8 @@ def run_enhance(prompt: str, out_dir: Path, max_attempts: int = 3) -> dict[str, 
 
 
 def build_compare(before: Path, after: Path, generated: Path, out: Path, label: str) -> None:
-    import cv2, numpy as np
+    import cv2
+    import numpy as np
     panels = []
     labels = ["术前 (target angle)", "原术后", f"新 prompt 输出 ({label})"]
     for p in (before, after, generated):
@@ -180,7 +183,9 @@ def build_compare(before: Path, after: Path, generated: Path, out: Path, label: 
     big = np.zeros((composed[0].shape[0], total_w, 3), dtype=np.uint8)
     x = 0
     for p in composed:
-        w = p.shape[1]; big[:, x:x+w] = p; x += w
+        w = p.shape[1]
+        big[:, x:x+w] = p
+        x += w
     cv2.imwrite(str(out), big, [cv2.IMWRITE_JPEG_QUALITY, 90])
 
 

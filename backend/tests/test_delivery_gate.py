@@ -9,7 +9,6 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
-import pytest
 
 from backend import db
 from backend.services.delivery_gate import (

@@ -460,22 +460,22 @@ def test_quality_report_exposes_delivery_baseline_without_counting_blocked_as_re
             """,
             (done_id, json.dumps({"warning_buckets": {"actionable_count": 0}}, ensure_ascii=False), now, now),
         )
-        failed_id = conn.execute(
+        conn.execute(
             """
             INSERT INTO render_jobs
               (case_id, brand, template, status, enqueued_at, finished_at, error_message, semantic_judge)
             VALUES (?, 'fumei', 'tri-compare', 'failed', ?, ?, 'renderer timeout', 'off')
             """,
             (failed_case_id, now, now),
-        ).lastrowid
-        blocked_id = conn.execute(
+        )
+        conn.execute(
             """
             INSERT INTO render_jobs
               (case_id, brand, template, status, enqueued_at, finished_at, error_message, semantic_judge)
             VALUES (?, 'fumei', 'tri-compare', 'blocked', ?, ?, '分类未闭环', 'off')
             """,
             (blocked_case_id, now, now),
-        ).lastrowid
+        )
         issue_id = conn.execute(
             """
             INSERT INTO render_jobs

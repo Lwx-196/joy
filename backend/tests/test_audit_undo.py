@@ -5,7 +5,6 @@ Covers the core mutation/undo round-trip — the load-bearing behavior that the
 """
 from __future__ import annotations
 
-import json
 
 import pytest
 

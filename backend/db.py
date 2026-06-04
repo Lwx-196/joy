@@ -2,35 +2,23 @@
 from __future__ import annotations
 
 import contextlib
-import os
 import sqlite3
 import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
-from pathlib import Path
 
 try:
     import fcntl
 except ImportError:  # pragma: no cover - non-POSIX fallback.
     fcntl = None
 
-DB_PATH = Path(
-    os.environ.get(
-        "CASE_WORKBENCH_DB_PATH",
-        str(Path(__file__).resolve().parent.parent / "case-workbench.db"),
-    )
-).expanduser().resolve()
+from .config import get_settings
 
 
-def _env_int(name: str, default: int) -> int:
-    try:
-        return int(os.environ.get(name, str(default)))
-    except (TypeError, ValueError):
-        return default
-
-
-SQLITE_BUSY_TIMEOUT_MS = _env_int("CASE_WORKBENCH_SQLITE_BUSY_TIMEOUT_MS", 5000)
-SCHEMA_LOCK_TIMEOUT_SEC = _env_int("CASE_WORKBENCH_SCHEMA_LOCK_TIMEOUT_SEC", 30)
+_SETTINGS = get_settings()
+DB_PATH = _SETTINGS.db_path()
+SQLITE_BUSY_TIMEOUT_MS = _SETTINGS.sqlite_busy_timeout_ms
+SCHEMA_LOCK_TIMEOUT_SEC = _SETTINGS.schema_lock_timeout_sec
 SCHEMA_COMPONENT = "main"
 SCHEMA_VERSION = 6
 

@@ -4,8 +4,6 @@ from __future__ import annotations
 import pytest
 
 from backend.services.phase_fusion import (
-    VALID_PHASES,
-    VALID_SOURCES,
     FusionResult,
     PhaseSignal,
     build_signals_from_components,

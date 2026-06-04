@@ -32,7 +32,6 @@ from pathlib import Path
 from typing import Any
 
 from backend.scripts.compute_manifest_hashes import (
-    BINDING_NAMES,
     MANIFEST_RELPATH,
     REPO_ROOT_DEFAULT,
     compute_all_bindings,

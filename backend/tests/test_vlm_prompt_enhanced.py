@@ -7,7 +7,6 @@ import pytest
 
 from backend.services.vlm_source_classifier import (
     CLASSIFICATION_PROMPT,
-    ClassificationResult,
     _normalize_phase,
     _parse_result,
 )

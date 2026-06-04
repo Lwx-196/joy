@@ -30,10 +30,10 @@ jobs:
           cache: pip
 
       - name: Install backend + dev deps
-        run: pip install -r requirements-dev.txt
+        run: pip install -r requirements-dev.lock
 
       - name: Run pytest
-        run: pytest -v
+        run: pytest -v --cov=backend --cov-report=term-missing --cov-fail-under=70
 
   frontend-lint-build:
     name: Frontend lint + build (typecheck)
@@ -78,7 +78,7 @@ jobs:
           cache: pip
 
       - name: Install backend deps
-        run: pip install -r requirements.txt
+        run: pip install -r requirements.lock
 
       - uses: actions/setup-node@v4
         with:

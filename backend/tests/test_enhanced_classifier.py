@@ -5,13 +5,9 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-import pytest
 
 from backend import db
 from backend.services.enhanced_classifier import (
-    ALL_TIERS,
-    VALID_MODES,
-    _MIN_APPLY_CONFIDENCE,
     _SOURCE_TAG,
     ObservationRecord,
     _apply_fusion_result,

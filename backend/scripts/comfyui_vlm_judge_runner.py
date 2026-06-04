@@ -691,7 +691,9 @@ def run_vlm_judge(
                     "decision": f"{UNVERIFIED}：无法通过 ADC 获取 Vertex AI bearer token。",
                 }
             )
-        runtime_token_provider = lambda: cached_token
+
+        def runtime_token_provider() -> str:
+            return cached_token
 
     requests: list[VLMRequest] = []
     request_items: list[dict[str, Any]] = []

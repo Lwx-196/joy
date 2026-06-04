@@ -457,7 +457,6 @@ def test_execute_render_translates_manual_phase_into_staging_lookup(
 
     # Assertion 1: enhancement was invoked on both 'after' images, NOT on the before image
     enhanced_names = sorted(c["name"] for c in enhancement_calls)
-    expected = {"IMG_5678.jpg", "术后-A.jpg"}
 
     # Names in staging are produced by _safe_link_name(case_id, case_path, filename).
     # That function preserves Chinese chars + alphanum + `._-` and rewrites

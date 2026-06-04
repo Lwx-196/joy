@@ -10,7 +10,7 @@ import argparse
 import json
 import sqlite3
 import sys
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
@@ -209,7 +209,7 @@ def render_report(
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
     parts: list[str] = []
-    parts.append(f"# Case Workbench 交付质量报告\n")
+    parts.append("# Case Workbench 交付质量报告\n")
     parts.append(f"_生成于 {now}_\n")
 
     parts.append("## 现状对账\n")

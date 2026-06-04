@@ -411,12 +411,14 @@ def test_manual_pair_beats_pose_aligned_auto_pair_for_front_slot():
         "术前1.jpeg", score=76, phase="before",
         pose={"yaw": -1.87, "pitch": 6.0, "roll": -0.5},
     )
-    auto_before["manual"] = False; auto_before["view_source"] = "pose"
+    auto_before["manual"] = False
+    auto_before["view_source"] = "pose"
     auto_after = _candidate(
         "术后即刻3.jpeg", score=76, phase="after",
         pose={"yaw": 1.96, "pitch": 8.0, "roll": -0.6},
     )
-    auto_after["manual"] = False; auto_after["view_source"] = "pose"
+    auto_after["manual"] = False
+    auto_after["view_source"] = "pose"
 
     before, after, quality = source_selection.select_best_pair(
         "front",

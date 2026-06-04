@@ -11,6 +11,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable
 
+from backend.config import get_settings
+
 DEFAULT_BASE_URL = "https://api.deepseek.com"
 DEFAULT_MODEL = "deepseek-chat"
 TRANSIENT_STATUS_CODES = {429, 500, 502, 503, 504}
@@ -149,10 +151,14 @@ class DeepSeekClient:
         self._jitter = jitter or (lambda delay: delay + random.uniform(0.0, min(1.0, delay * 0.25)))
 
     def configure(self, *, model: str | None = None, base_url: str | None = None) -> DeepSeekConfig:
-        selected_model = (model or self.env.get("DEEPSEEK_MODEL") or DEFAULT_MODEL).strip()
-        selected_base = (base_url or self.env.get("DEEPSEEK_BASE_URL") or DEFAULT_BASE_URL).strip().rstrip("/")
+        settings = get_settings()
+        selected_model = (model or self.env.get("DEEPSEEK_MODEL") or settings.deepseek_model or DEFAULT_MODEL).strip()
+        selected_base = (
+            base_url or self.env.get("DEEPSEEK_BASE_URL") or settings.deepseek_base_url or DEFAULT_BASE_URL
+        ).strip().rstrip("/")
         endpoint = f"{selected_base}/chat/completions"
-        api_key = (self.env.get("DEEPSEEK_API_KEY") or "").strip()
+        settings_api_key = settings.deepseek_api_key.get_secret_value()
+        api_key = (self.env.get("DEEPSEEK_API_KEY") or settings_api_key or "").strip()
         if not selected_model:
             return DeepSeekConfig(model="", endpoint=endpoint, status="blocked_missing_deepseek_model")
         if not api_key:
@@ -209,9 +215,10 @@ class DeepSeekClient:
         payload: dict[str, Any],
         timeout: float,
     ) -> dict[str, Any]:
-        attempts = _int_or_zero(self.env.get("DEEPSEEK_RETRY_MAX_ATTEMPTS") or 3) or 1
-        base_seconds = float(self.env.get("DEEPSEEK_RETRY_BASE_SECONDS") or 1.0)
-        max_seconds = float(self.env.get("DEEPSEEK_RETRY_MAX_SECONDS") or 30.0)
+        settings = get_settings()
+        attempts = _int_or_zero(self.env.get("DEEPSEEK_RETRY_MAX_ATTEMPTS") or settings.deepseek_retry_max_attempts) or 1
+        base_seconds = float(self.env.get("DEEPSEEK_RETRY_BASE_SECONDS") or settings.deepseek_retry_base_seconds)
+        max_seconds = float(self.env.get("DEEPSEEK_RETRY_MAX_SECONDS") or settings.deepseek_retry_max_seconds)
         last_error: DeepSeekRequestError | None = None
         for attempt in range(1, attempts + 1):
             try:
