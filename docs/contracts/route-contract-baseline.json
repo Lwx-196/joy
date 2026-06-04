@@ -1,0 +1,3158 @@
+{
+  "route_count": 117,
+  "routes": [
+    {
+      "arguments": [
+        {
+          "annotation": "str | None",
+          "default": "Query(default=None)",
+          "kind": "positional",
+          "name": "status"
+        },
+        {
+          "annotation": "int",
+          "default": "Query(default=100, ge=1, le=1000)",
+          "kind": "positional",
+          "name": "limit"
+        }
+      ],
+      "endpoint": "list_groups",
+      "line": 57,
+      "method": "GET",
+      "path": "/api/case-groups",
+      "returns": "dict[str, Any]",
+      "route_kwargs": {},
+      "route_path": "/api/case-groups",
+      "router_prefix": "",
+      "source": "backend/routes/case_groups.py",
+      "tags": [
+        "case-groups"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "int",
+          "default": null,
+          "kind": "positional",
+          "name": "group_id"
+        },
+        {
+          "annotation": "ConfirmClassificationPayload",
+          "default": null,
+          "kind": "positional",
+          "name": "payload"
+        }
+      ],
+      "endpoint": "confirm_classification",
+      "line": 76,
+      "method": "POST",
+      "path": "/api/case-groups/{group_id}/confirm-classification",
+      "returns": "dict[str, Any]",
+      "route_kwargs": {},
+      "route_path": "/api/case-groups/{group_id}/confirm-classification",
+      "router_prefix": "",
+      "source": "backend/routes/case_groups.py",
+      "tags": [
+        "case-groups"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "int",
+          "default": null,
+          "kind": "positional",
+          "name": "group_id"
+        }
+      ],
+      "endpoint": "group_diagnosis",
+      "line": 67,
+      "method": "GET",
+      "path": "/api/case-groups/{group_id}/diagnosis",
+      "returns": "dict[str, Any]",
+      "route_kwargs": {},
+      "route_path": "/api/case-groups/{group_id}/diagnosis",
+      "router_prefix": "",
+      "source": "backend/routes/case_groups.py",
+      "tags": [
+        "case-groups"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "int",
+          "default": null,
+          "kind": "positional",
+          "name": "group_id"
+        },
+        {
+          "annotation": "GroupRenderPayload",
+          "default": null,
+          "kind": "positional",
+          "name": "payload"
+        }
+      ],
+      "endpoint": "render_group",
+      "line": 94,
+      "method": "POST",
+      "path": "/api/case-groups/{group_id}/render",
+      "returns": "dict[str, Any]",
+      "route_kwargs": {},
+      "route_path": "/api/case-groups/{group_id}/render",
+      "router_prefix": "",
+      "source": "backend/routes/case_groups.py",
+      "tags": [
+        "case-groups"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "int",
+          "default": null,
+          "kind": "positional",
+          "name": "group_id"
+        },
+        {
+          "annotation": "SimulateAfterPayload",
+          "default": null,
+          "kind": "positional",
+          "name": "payload"
+        }
+      ],
+      "endpoint": "simulate_after",
+      "line": 120,
+      "method": "POST",
+      "path": "/api/case-groups/{group_id}/simulate-after",
+      "returns": "GroupSimulateAfterResponse",
+      "route_kwargs": {
+        "response_model": "GroupSimulateAfterResponse"
+      },
+      "route_path": "/api/case-groups/{group_id}/simulate-after",
+      "router_prefix": "",
+      "source": "backend/routes/case_groups.py",
+      "tags": [
+        "case-groups"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "str | None",
+          "default": "None",
+          "kind": "positional",
+          "name": "category"
+        },
+        {
+          "annotation": "str | None",
+          "default": "None",
+          "kind": "positional",
+          "name": "tier"
+        },
+        {
+          "annotation": "int | None",
+          "default": "None",
+          "kind": "positional",
+          "name": "customer_id"
+        },
+        {
+          "annotation": "str | None",
+          "default": "None",
+          "kind": "positional",
+          "name": "review_status"
+        },
+        {
+          "annotation": "str | None",
+          "default": "None",
+          "kind": "positional",
+          "name": "q"
+        },
+        {
+          "annotation": "str | None",
+          "default": "None",
+          "kind": "positional",
+          "name": "tag"
+        },
+        {
+          "annotation": "str | None",
+          "default": "None",
+          "kind": "positional",
+          "name": "since"
+        },
+        {
+          "annotation": "str | None",
+          "default": "None",
+          "kind": "positional",
+          "name": "blocking"
+        },
+        {
+          "annotation": "bool",
+          "default": "False",
+          "kind": "positional",
+          "name": "include_held"
+        },
+        {
+          "annotation": "int",
+          "default": "Query(1, ge=1)",
+          "kind": "positional",
+          "name": "page"
+        },
+        {
+          "annotation": "int",
+          "default": "Query(50, ge=1, le=2000)",
+          "kind": "positional",
+          "name": "page_size"
+        }
+      ],
+      "endpoint": "list_cases",
+      "line": 3623,
+      "method": "GET",
+      "path": "/api/cases",
+      "returns": "CaseListResponse",
+      "route_kwargs": {
+        "response_model": "CaseListResponse"
+      },
+      "route_path": "",
+      "router_prefix": "/api/cases",
+      "source": "backend/routes/cases.py",
+      "tags": [
+        "cases"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "CaseBatchUpdate",
+          "default": null,
+          "kind": "positional",
+          "name": "payload"
+        }
+      ],
+      "endpoint": "batch_update",
+      "line": 6060,
+      "method": "POST",
+      "path": "/api/cases/batch",
+      "returns": "dict",
+      "route_kwargs": {},
+      "route_path": "/batch",
+      "router_prefix": "/api/cases",
+      "source": "backend/routes/cases.py",
+      "tags": [
+        "cases"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "BestPairBatchPayload",
+          "default": null,
+          "kind": "positional",
+          "name": "payload"
+        }
+      ],
+      "endpoint": "batch_compute",
+      "line": 40,
+      "method": "POST",
+      "path": "/api/cases/best-pair/batch-compute",
+      "returns": "dict[str, Any]",
+      "route_kwargs": {
+        "status_code": "202"
+      },
+      "route_path": "/api/cases/best-pair/batch-compute",
+      "router_prefix": "",
+      "source": "backend/routes/best_pair.py",
+      "tags": [
+        "best-pair"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "str",
+          "default": null,
+          "kind": "positional",
+          "name": "batch_id"
+        }
+      ],
+      "endpoint": "batch_compute_status",
+      "line": 47,
+      "method": "GET",
+      "path": "/api/cases/best-pair/batch-compute/{batch_id}",
+      "returns": "dict[str, Any]",
+      "route_kwargs": {},
+      "route_path": "/api/cases/best-pair/batch-compute/{batch_id}",
+      "router_prefix": "",
+      "source": "backend/routes/best_pair.py",
+      "tags": [
+        "best-pair"
+      ]
+    },
+    {
+      "arguments": [],
+      "endpoint": "ps_image_model_options",
+      "line": 3118,
+      "method": "GET",
+      "path": "/api/cases/ps-image-model-options",
+      "returns": "PsImageModelOptionsResponse",
+      "route_kwargs": {
+        "response_model": "PsImageModelOptionsResponse"
+      },
+      "route_path": "/ps-image-model-options",
+      "router_prefix": "/api/cases",
+      "source": "backend/routes/cases.py",
+      "tags": [
+        "cases"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "int",
+          "default": "Query(300, ge=1, le=2000)",
+          "kind": "positional",
+          "name": "limit"
+        }
+      ],
+      "endpoint": "quality_report",
+      "line": 3276,
+      "method": "GET",
+      "path": "/api/cases/quality-report",
+      "returns": "dict[str, Any]",
+      "route_kwargs": {},
+      "route_path": "/quality-report",
+      "router_prefix": "/api/cases",
+      "source": "backend/routes/cases.py",
+      "tags": [
+        "cases"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "int",
+          "default": "Query(100, ge=1, le=2000)",
+          "kind": "positional",
+          "name": "limit"
+        }
+      ],
+      "endpoint": "quality_report_publishable_items",
+      "line": 3282,
+      "method": "GET",
+      "path": "/api/cases/quality-report/publishable-items",
+      "returns": "dict[str, Any]",
+      "route_kwargs": {},
+      "route_path": "/quality-report/publishable-items",
+      "router_prefix": "/api/cases",
+      "source": "backend/routes/cases.py",
+      "tags": [
+        "cases"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "RenderBatchRequest",
+          "default": null,
+          "kind": "positional",
+          "name": "payload"
+        }
+      ],
+      "endpoint": "enqueue_batch",
+      "line": 843,
+      "method": "POST",
+      "path": "/api/cases/render/batch",
+      "returns": "dict",
+      "route_kwargs": {},
+      "route_path": "/api/cases/render/batch",
+      "router_prefix": "",
+      "source": "backend/routes/render.py",
+      "tags": [
+        "render"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "RenderBatchRequest",
+          "default": null,
+          "kind": "positional",
+          "name": "payload"
+        }
+      ],
+      "endpoint": "preview_batch",
+      "line": 936,
+      "method": "POST",
+      "path": "/api/cases/render/batch/preview",
+      "returns": "dict",
+      "route_kwargs": {},
+      "route_path": "/api/cases/render/batch/preview",
+      "router_prefix": "",
+      "source": "backend/routes/render.py",
+      "tags": [
+        "render"
+      ]
+    },
+    {
+      "arguments": [],
+      "endpoint": "rescan_groups",
+      "line": 50,
+      "method": "POST",
+      "path": "/api/cases/rescan-groups",
+      "returns": "dict[str, Any]",
+      "route_kwargs": {},
+      "route_path": "/api/cases/rescan-groups",
+      "router_prefix": "",
+      "source": "backend/routes/case_groups.py",
+      "tags": [
+        "case-groups"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "int",
+          "default": "Query(200, ge=1, le=1000)",
+          "kind": "positional",
+          "name": "limit"
+        }
+      ],
+      "endpoint": "get_simulation_legacy_publishable_risk",
+      "line": 3410,
+      "method": "GET",
+      "path": "/api/cases/simulation-jobs/legacy-publishable-risk",
+      "returns": "dict[str, Any]",
+      "route_kwargs": {},
+      "route_path": "/simulation-jobs/legacy-publishable-risk",
+      "router_prefix": "/api/cases",
+      "source": "backend/routes/cases.py",
+      "tags": [
+        "cases"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "LegacySimulationQuarantineRequest",
+          "default": null,
+          "kind": "positional",
+          "name": "payload"
+        }
+      ],
+      "endpoint": "quarantine_legacy_simulation_publishable_risk",
+      "line": 3471,
+      "method": "POST",
+      "path": "/api/cases/simulation-jobs/legacy-publishable-risk/quarantine",
+      "returns": "dict[str, Any]",
+      "route_kwargs": {},
+      "route_path": "/simulation-jobs/legacy-publishable-risk/quarantine",
+      "router_prefix": "/api/cases",
+      "source": "backend/routes/cases.py",
+      "tags": [
+        "cases"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "str",
+          "default": "Query('review_required')",
+          "kind": "positional",
+          "name": "status"
+        },
+        {
+          "annotation": "str | None",
+          "default": "Query(None)",
+          "kind": "positional",
+          "name": "recommendation"
+        },
+        {
+          "annotation": "int",
+          "default": "Query(100, ge=1, le=200)",
+          "kind": "positional",
+          "name": "limit"
+        }
+      ],
+      "endpoint": "list_simulation_quality_queue",
+      "line": 3123,
+      "method": "GET",
+      "path": "/api/cases/simulation-jobs/quality-queue",
+      "returns": "dict[str, Any]",
+      "route_kwargs": {},
+      "route_path": "/simulation-jobs/quality-queue",
+      "router_prefix": "/api/cases",
+      "source": "backend/routes/cases.py",
+      "tags": [
+        "cases"
+      ]
+    },
+    {
+      "arguments": [],
+      "endpoint": "get_simulation_review_policy",
+      "line": 3250,
+      "method": "GET",
+      "path": "/api/cases/simulation-jobs/review-policy",
+      "returns": "dict[str, Any]",
+      "route_kwargs": {},
+      "route_path": "/simulation-jobs/review-policy",
+      "router_prefix": "/api/cases",
+      "source": "backend/routes/cases.py",
+      "tags": [
+        "cases"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "dict[str, Any]",
+          "default": null,
+          "kind": "positional",
+          "name": "payload"
+        }
+      ],
+      "endpoint": "put_simulation_review_policy",
+      "line": 3255,
+      "method": "PUT",
+      "path": "/api/cases/simulation-jobs/review-policy",
+      "returns": "dict[str, Any]",
+      "route_kwargs": {},
+      "route_path": "/simulation-jobs/review-policy",
+      "router_prefix": "/api/cases",
+      "source": "backend/routes/cases.py",
+      "tags": [
+        "cases"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "dict[str, Any]",
+          "default": null,
+          "kind": "positional",
+          "name": "payload"
+        },
+        {
+          "annotation": "int",
+          "default": "Query(500, ge=1, le=2000)",
+          "kind": "positional",
+          "name": "limit"
+        }
+      ],
+      "endpoint": "preview_simulation_review_policy",
+      "line": 3263,
+      "method": "POST",
+      "path": "/api/cases/simulation-jobs/review-policy/preview",
+      "returns": "dict[str, Any]",
+      "route_kwargs": {},
+      "route_path": "/simulation-jobs/review-policy/preview",
+      "router_prefix": "/api/cases",
+      "source": "backend/routes/cases.py",
+      "tags": [
+        "cases"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "int",
+          "default": null,
+          "kind": "positional",
+          "name": "job_id"
+        },
+        {
+          "annotation": "str",
+          "default": "Query('ai_after_simulation')",
+          "kind": "positional",
+          "name": "kind"
+        }
+      ],
+      "endpoint": "simulation_job_file_by_id",
+      "line": 3564,
+      "method": "GET",
+      "path": "/api/cases/simulation-jobs/{job_id}/file",
+      "returns": "FileResponse",
+      "route_kwargs": {},
+      "route_path": "/simulation-jobs/{job_id}/file",
+      "router_prefix": "/api/cases",
+      "source": "backend/routes/cases.py",
+      "tags": [
+        "cases"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "int",
+          "default": null,
+          "kind": "positional",
+          "name": "job_id"
+        },
+        {
+          "annotation": "SimulationJobReviewRequest",
+          "default": null,
+          "kind": "positional",
+          "name": "payload"
+        }
+      ],
+      "endpoint": "review_simulation_job_by_id",
+      "line": 3576,
+      "method": "POST",
+      "path": "/api/cases/simulation-jobs/{job_id}/review",
+      "returns": "SimulationJob",
+      "route_kwargs": {
+        "response_model": "SimulationJob"
+      },
+      "route_path": "/simulation-jobs/{job_id}/review",
+      "router_prefix": "/api/cases",
+      "source": "backend/routes/cases.py",
+      "tags": [
+        "cases"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "str",
+          "default": "Query('all')",
+          "kind": "positional",
+          "name": "reason"
+        },
+        {
+          "annotation": "int",
+          "default": "Query(200, ge=1, le=2000)",
+          "kind": "positional",
+          "name": "limit"
+        }
+      ],
+      "endpoint": "list_source_blockers",
+      "line": 4710,
+      "method": "GET",
+      "path": "/api/cases/source-blockers",
+      "returns": "dict[str, Any]",
+      "route_kwargs": {},
+      "route_path": "/source-blockers",
+      "router_prefix": "/api/cases",
+      "source": "backend/routes/cases.py",
+      "tags": [
+        "cases"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "int",
+          "default": null,
+          "kind": "positional",
+          "name": "case_id"
+        },
+        {
+          "annotation": "SourceBlockerActionRequest",
+          "default": null,
+          "kind": "positional",
+          "name": "payload"
+        }
+      ],
+      "endpoint": "apply_source_blocker_action",
+      "line": 4762,
+      "method": "POST",
+      "path": "/api/cases/source-blockers/{case_id}/action",
+      "returns": "dict[str, Any]",
+      "route_kwargs": {},
+      "route_path": "/source-blockers/{case_id}/action",
+      "router_prefix": "/api/cases",
+      "source": "backend/routes/cases.py",
+      "tags": [
+        "cases"
+      ]
+    },
+    {
+      "arguments": [],
+      "endpoint": "stats",
+      "line": 3719,
+      "method": "GET",
+      "path": "/api/cases/stats",
+      "returns": "dict",
+      "route_kwargs": {},
+      "route_path": "/stats",
+      "router_prefix": "/api/cases",
+      "source": "backend/routes/cases.py",
+      "tags": [
+        "cases"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "CaseTrashRequest",
+          "default": null,
+          "kind": "positional",
+          "name": "payload"
+        }
+      ],
+      "endpoint": "trash_cases",
+      "line": 5223,
+      "method": "POST",
+      "path": "/api/cases/trash",
+      "returns": "CaseTrashResponse",
+      "route_kwargs": {
+        "response_model": "CaseTrashResponse"
+      },
+      "route_path": "/trash",
+      "router_prefix": "/api/cases",
+      "source": "backend/routes/cases.py",
+      "tags": [
+        "cases"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "UpgradeBatchRequest",
+          "default": null,
+          "kind": "positional",
+          "name": "payload"
+        }
+      ],
+      "endpoint": "enqueue_upgrade_batch",
+      "line": 70,
+      "method": "POST",
+      "path": "/api/cases/upgrade/batch",
+      "returns": "dict",
+      "route_kwargs": {},
+      "route_path": "/api/cases/upgrade/batch",
+      "router_prefix": "",
+      "source": "backend/routes/upgrade.py",
+      "tags": [
+        "upgrade"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "int",
+          "default": null,
+          "kind": "positional",
+          "name": "case_id"
+        }
+      ],
+      "endpoint": "case_detail",
+      "line": 5271,
+      "method": "GET",
+      "path": "/api/cases/{case_id}",
+      "returns": "CaseDetail",
+      "route_kwargs": {
+        "response_model": "CaseDetail"
+      },
+      "route_path": "/{case_id}",
+      "router_prefix": "/api/cases",
+      "source": "backend/routes/cases.py",
+      "tags": [
+        "cases"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "int",
+          "default": null,
+          "kind": "positional",
+          "name": "case_id"
+        },
+        {
+          "annotation": "CaseUpdate",
+          "default": null,
+          "kind": "positional",
+          "name": "payload"
+        }
+      ],
+      "endpoint": "update_case",
+      "line": 5388,
+      "method": "PATCH",
+      "path": "/api/cases/{case_id}",
+      "returns": "CaseDetail",
+      "route_kwargs": {
+        "response_model": "CaseDetail"
+      },
+      "route_path": "/{case_id}",
+      "router_prefix": "/api/cases",
+      "source": "backend/routes/cases.py",
+      "tags": [
+        "cases"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "int",
+          "default": null,
+          "kind": "positional",
+          "name": "case_id"
+        }
+      ],
+      "endpoint": "get_best_pair",
+      "line": 55,
+      "method": "GET",
+      "path": "/api/cases/{case_id}/best-pair",
+      "returns": "dict[str, Any]",
+      "route_kwargs": {},
+      "route_path": "/api/cases/{case_id}/best-pair",
+      "router_prefix": "",
+      "source": "backend/routes/best_pair.py",
+      "tags": [
+        "best-pair"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "int",
+          "default": null,
+          "kind": "positional",
+          "name": "case_id"
+        }
+      ],
+      "endpoint": "compute_best_pair",
+      "line": 61,
+      "method": "POST",
+      "path": "/api/cases/{case_id}/best-pair/compute",
+      "returns": "dict[str, Any]",
+      "route_kwargs": {},
+      "route_path": "/api/cases/{case_id}/best-pair/compute",
+      "router_prefix": "",
+      "source": "backend/routes/best_pair.py",
+      "tags": [
+        "best-pair"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "int",
+          "default": null,
+          "kind": "positional",
+          "name": "case_id"
+        },
+        {
+          "annotation": "str",
+          "default": "Query(default='fumei')",
+          "kind": "positional",
+          "name": "brand"
+        },
+        {
+          "annotation": "str",
+          "default": "Query(default='tri-compare')",
+          "kind": "positional",
+          "name": "template"
+        }
+      ],
+      "endpoint": "render_best_pair",
+      "line": 82,
+      "method": "POST",
+      "path": "/api/cases/{case_id}/best-pair/render",
+      "returns": "dict[str, int]",
+      "route_kwargs": {},
+      "route_path": "/api/cases/{case_id}/best-pair/render",
+      "router_prefix": "",
+      "source": "backend/routes/best_pair.py",
+      "tags": [
+        "best-pair"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "int",
+          "default": null,
+          "kind": "positional",
+          "name": "case_id"
+        },
+        {
+          "annotation": "BestPairSelectPayload",
+          "default": null,
+          "kind": "positional",
+          "name": "payload"
+        }
+      ],
+      "endpoint": "select_best_pair",
+      "line": 67,
+      "method": "POST",
+      "path": "/api/cases/{case_id}/best-pair/select",
+      "returns": "dict[str, int]",
+      "route_kwargs": {},
+      "route_path": "/api/cases/{case_id}/best-pair/select",
+      "router_prefix": "",
+      "source": "backend/routes/best_pair.py",
+      "tags": [
+        "best-pair"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "int",
+          "default": null,
+          "kind": "positional",
+          "name": "case_id"
+        },
+        {
+          "annotation": "ClassifyImagesRequest",
+          "default": null,
+          "kind": "positional",
+          "name": "payload"
+        }
+      ],
+      "endpoint": "classify_case_images",
+      "line": 5193,
+      "method": "POST",
+      "path": "/api/cases/{case_id}/classify-images",
+      "returns": "dict[str, Any]",
+      "route_kwargs": {},
+      "route_path": "/{case_id}/classify-images",
+      "router_prefix": "/api/cases",
+      "source": "backend/routes/cases.py",
+      "tags": [
+        "cases"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "int",
+          "default": null,
+          "kind": "positional",
+          "name": "case_id"
+        },
+        {
+          "annotation": "str",
+          "default": null,
+          "kind": "positional",
+          "name": "name"
+        }
+      ],
+      "endpoint": "case_file",
+      "line": 6125,
+      "method": "GET",
+      "path": "/api/cases/{case_id}/files",
+      "returns": null,
+      "route_kwargs": {},
+      "route_path": "/{case_id}/files",
+      "router_prefix": "/api/cases",
+      "source": "backend/routes/cases.py",
+      "tags": [
+        "cases"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "int",
+          "default": null,
+          "kind": "positional",
+          "name": "case_id"
+        },
+        {
+          "annotation": "str",
+          "default": null,
+          "kind": "positional",
+          "name": "filename"
+        },
+        {
+          "annotation": "ImageReviewPayload",
+          "default": null,
+          "kind": "positional",
+          "name": "payload"
+        }
+      ],
+      "endpoint": "review_case_image",
+      "line": 5481,
+      "method": "POST",
+      "path": "/api/cases/{case_id}/image-review/{filename:path}",
+      "returns": "ImageReviewResponse",
+      "route_kwargs": {
+        "response_model": "ImageReviewResponse"
+      },
+      "route_path": "/{case_id}/image-review/{filename:path}",
+      "router_prefix": "/api/cases",
+      "source": "backend/routes/cases.py",
+      "tags": [
+        "cases"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "int",
+          "default": null,
+          "kind": "positional",
+          "name": "case_id"
+        },
+        {
+          "annotation": "ImageRestoreRequest",
+          "default": null,
+          "kind": "positional",
+          "name": "payload"
+        }
+      ],
+      "endpoint": "restore_case_image",
+      "line": 5740,
+      "method": "POST",
+      "path": "/api/cases/{case_id}/images/restore",
+      "returns": "ImageRestoreResponse",
+      "route_kwargs": {
+        "response_model": "ImageRestoreResponse"
+      },
+      "route_path": "/{case_id}/images/restore",
+      "router_prefix": "/api/cases",
+      "source": "backend/routes/cases.py",
+      "tags": [
+        "cases"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "int",
+          "default": null,
+          "kind": "positional",
+          "name": "case_id"
+        },
+        {
+          "annotation": "ImageTrashRequest",
+          "default": null,
+          "kind": "positional",
+          "name": "payload"
+        }
+      ],
+      "endpoint": "trash_case_image",
+      "line": 5713,
+      "method": "POST",
+      "path": "/api/cases/{case_id}/images/trash",
+      "returns": "ImageTrashResponse",
+      "route_kwargs": {
+        "response_model": "ImageTrashResponse"
+      },
+      "route_path": "/{case_id}/images/trash",
+      "router_prefix": "/api/cases",
+      "source": "backend/routes/cases.py",
+      "tags": [
+        "cases"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "int",
+          "default": null,
+          "kind": "positional",
+          "name": "case_id"
+        },
+        {
+          "annotation": "str",
+          "default": null,
+          "kind": "positional",
+          "name": "filename"
+        },
+        {
+          "annotation": "ImageOverridePayload",
+          "default": null,
+          "kind": "positional",
+          "name": "payload"
+        }
+      ],
+      "endpoint": "patch_image_override",
+      "line": 5405,
+      "method": "PATCH",
+      "path": "/api/cases/{case_id}/images/{filename:path}",
+      "returns": "ImageOverride",
+      "route_kwargs": {
+        "response_model": "ImageOverride"
+      },
+      "route_path": "/{case_id}/images/{filename:path}",
+      "router_prefix": "/api/cases",
+      "source": "backend/routes/cases.py",
+      "tags": [
+        "cases"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "int",
+          "default": null,
+          "kind": "positional",
+          "name": "case_id"
+        },
+        {
+          "annotation": "ManualRenderPreviewRequest",
+          "default": null,
+          "kind": "positional",
+          "name": "payload"
+        }
+      ],
+      "endpoint": "preview_manual_render",
+      "line": 5647,
+      "method": "POST",
+      "path": "/api/cases/{case_id}/manual-render-preview",
+      "returns": "ManualRenderPreviewResponse",
+      "route_kwargs": {
+        "response_model": "ManualRenderPreviewResponse"
+      },
+      "route_path": "/{case_id}/manual-render-preview",
+      "router_prefix": "/api/cases",
+      "source": "backend/routes/cases.py",
+      "tags": [
+        "cases"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "int",
+          "default": null,
+          "kind": "positional",
+          "name": "case_id"
+        },
+        {
+          "annotation": "str",
+          "default": null,
+          "kind": "positional",
+          "name": "preview_id"
+        }
+      ],
+      "endpoint": "manual_render_preview_file",
+      "line": 5692,
+      "method": "GET",
+      "path": "/api/cases/{case_id}/manual-render-preview/{preview_id}/file",
+      "returns": "FileResponse",
+      "route_kwargs": {},
+      "route_path": "/{case_id}/manual-render-preview/{preview_id}/file",
+      "router_prefix": "/api/cases",
+      "source": "backend/routes/cases.py",
+      "tags": [
+        "cases"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "int",
+          "default": null,
+          "kind": "positional",
+          "name": "case_id"
+        },
+        {
+          "annotation": "ManualRenderSourcesRequest",
+          "default": null,
+          "kind": "positional",
+          "name": "payload"
+        }
+      ],
+      "endpoint": "prepare_manual_render_sources",
+      "line": 5549,
+      "method": "POST",
+      "path": "/api/cases/{case_id}/manual-render-sources",
+      "returns": "ManualRenderSourcesResponse",
+      "route_kwargs": {
+        "response_model": "ManualRenderSourcesResponse"
+      },
+      "route_path": "/{case_id}/manual-render-sources",
+      "router_prefix": "/api/cases",
+      "source": "backend/routes/cases.py",
+      "tags": [
+        "cases"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "int",
+          "default": null,
+          "kind": "positional",
+          "name": "case_id"
+        },
+        {
+          "annotation": "PreRenderGateRequest",
+          "default": null,
+          "kind": "positional",
+          "name": "payload"
+        }
+      ],
+      "endpoint": "run_pre_render_gate",
+      "line": 787,
+      "method": "POST",
+      "path": "/api/cases/{case_id}/pre-render-gate",
+      "returns": "dict[str, Any]",
+      "route_kwargs": {},
+      "route_path": "/api/cases/{case_id}/pre-render-gate",
+      "router_prefix": "",
+      "source": "backend/routes/render.py",
+      "tags": [
+        "render"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "int",
+          "default": null,
+          "kind": "positional",
+          "name": "case_id"
+        },
+        {
+          "annotation": "bool",
+          "default": "True",
+          "kind": "positional",
+          "name": "dry_run"
+        }
+      ],
+      "endpoint": "rename_suggestion",
+      "line": 6142,
+      "method": "GET",
+      "path": "/api/cases/{case_id}/rename-suggestion",
+      "returns": "dict",
+      "route_kwargs": {},
+      "route_path": "/{case_id}/rename-suggestion",
+      "router_prefix": "/api/cases",
+      "source": "backend/routes/cases.py",
+      "tags": [
+        "cases"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "int",
+          "default": null,
+          "kind": "positional",
+          "name": "case_id"
+        },
+        {
+          "annotation": "RenderRequest",
+          "default": null,
+          "kind": "positional",
+          "name": "payload"
+        }
+      ],
+      "endpoint": "enqueue_single",
+      "line": 803,
+      "method": "POST",
+      "path": "/api/cases/{case_id}/render",
+      "returns": "dict",
+      "route_kwargs": {},
+      "route_path": "/api/cases/{case_id}/render",
+      "router_prefix": "",
+      "source": "backend/routes/render.py",
+      "tags": [
+        "render"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "int",
+          "default": null,
+          "kind": "positional",
+          "name": "case_id"
+        },
+        {
+          "annotation": "str",
+          "default": "Query(DEFAULT_BRAND)",
+          "kind": "positional",
+          "name": "brand"
+        },
+        {
+          "annotation": "str",
+          "default": "Query(DEFAULT_TEMPLATE)",
+          "kind": "positional",
+          "name": "template"
+        }
+      ],
+      "endpoint": "list_render_history",
+      "line": 1070,
+      "method": "GET",
+      "path": "/api/cases/{case_id}/render/history",
+      "returns": "dict",
+      "route_kwargs": {},
+      "route_path": "/api/cases/{case_id}/render/history",
+      "router_prefix": "",
+      "source": "backend/routes/render.py",
+      "tags": [
+        "render"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "int",
+          "default": null,
+          "kind": "positional",
+          "name": "case_id"
+        },
+        {
+          "annotation": "int",
+          "default": "Query(20, le=200)",
+          "kind": "positional",
+          "name": "limit"
+        }
+      ],
+      "endpoint": "list_case_jobs",
+      "line": 988,
+      "method": "GET",
+      "path": "/api/cases/{case_id}/render/jobs",
+      "returns": "list[dict]",
+      "route_kwargs": {},
+      "route_path": "/api/cases/{case_id}/render/jobs",
+      "router_prefix": "",
+      "source": "backend/routes/render.py",
+      "tags": [
+        "render"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "int",
+          "default": null,
+          "kind": "positional",
+          "name": "case_id"
+        }
+      ],
+      "endpoint": "latest_case_job",
+      "line": 1003,
+      "method": "GET",
+      "path": "/api/cases/{case_id}/render/latest",
+      "returns": "dict",
+      "route_kwargs": {},
+      "route_path": "/api/cases/{case_id}/render/latest",
+      "router_prefix": "",
+      "source": "backend/routes/render.py",
+      "tags": [
+        "render"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "int",
+          "default": null,
+          "kind": "positional",
+          "name": "case_id"
+        },
+        {
+          "annotation": "RenderRestoreRequest",
+          "default": null,
+          "kind": "positional",
+          "name": "payload"
+        }
+      ],
+      "endpoint": "restore_render",
+      "line": 1128,
+      "method": "POST",
+      "path": "/api/cases/{case_id}/render/restore",
+      "returns": "dict",
+      "route_kwargs": {},
+      "route_path": "/api/cases/{case_id}/render/restore",
+      "router_prefix": "",
+      "source": "backend/routes/render.py",
+      "tags": [
+        "render"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "int",
+          "default": null,
+          "kind": "positional",
+          "name": "case_id"
+        }
+      ],
+      "endpoint": "undo_render",
+      "line": 1199,
+      "method": "POST",
+      "path": "/api/cases/{case_id}/render/undo",
+      "returns": "dict",
+      "route_kwargs": {},
+      "route_path": "/api/cases/{case_id}/render/undo",
+      "router_prefix": "",
+      "source": "backend/routes/render.py",
+      "tags": [
+        "render"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "int",
+          "default": null,
+          "kind": "positional",
+          "name": "case_id"
+        }
+      ],
+      "endpoint": "rescan_case",
+      "line": 6206,
+      "method": "POST",
+      "path": "/api/cases/{case_id}/rescan",
+      "returns": "CaseDetail",
+      "route_kwargs": {},
+      "route_path": "/{case_id}/rescan",
+      "router_prefix": "/api/cases",
+      "source": "backend/routes/cases.py",
+      "tags": [
+        "cases"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "int",
+          "default": null,
+          "kind": "positional",
+          "name": "case_id"
+        },
+        {
+          "annotation": "CaseRevealRequest",
+          "default": null,
+          "kind": "positional",
+          "name": "payload"
+        }
+      ],
+      "endpoint": "reveal_case_path",
+      "line": 5767,
+      "method": "POST",
+      "path": "/api/cases/{case_id}/reveal",
+      "returns": "CaseRevealResponse",
+      "route_kwargs": {
+        "response_model": "CaseRevealResponse"
+      },
+      "route_path": "/{case_id}/reveal",
+      "router_prefix": "/api/cases",
+      "source": "backend/routes/cases.py",
+      "tags": [
+        "cases"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "int",
+          "default": null,
+          "kind": "positional",
+          "name": "case_id"
+        },
+        {
+          "annotation": "int",
+          "default": "20",
+          "kind": "positional",
+          "name": "limit"
+        }
+      ],
+      "endpoint": "list_revisions",
+      "line": 14,
+      "method": "GET",
+      "path": "/api/cases/{case_id}/revisions",
+      "returns": "dict",
+      "route_kwargs": {},
+      "route_path": "/{case_id}/revisions",
+      "router_prefix": "/api/cases",
+      "source": "backend/routes/audit.py",
+      "tags": [
+        "audit"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "int",
+          "default": null,
+          "kind": "positional",
+          "name": "case_id"
+        },
+        {
+          "annotation": "SimulateAfterRequest",
+          "default": null,
+          "kind": "positional",
+          "name": "payload"
+        }
+      ],
+      "endpoint": "simulate_case_after",
+      "line": 5802,
+      "method": "POST",
+      "path": "/api/cases/{case_id}/simulate-after",
+      "returns": "SimulateAfterResponse",
+      "route_kwargs": {
+        "response_model": "SimulateAfterResponse"
+      },
+      "route_path": "/{case_id}/simulate-after",
+      "router_prefix": "/api/cases",
+      "source": "backend/routes/cases.py",
+      "tags": [
+        "cases"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "int",
+          "default": null,
+          "kind": "positional",
+          "name": "case_id"
+        },
+        {
+          "annotation": "int",
+          "default": "Query(10, ge=1, le=100)",
+          "kind": "positional",
+          "name": "limit"
+        }
+      ],
+      "endpoint": "list_case_simulation_jobs",
+      "line": 6014,
+      "method": "GET",
+      "path": "/api/cases/{case_id}/simulation-jobs",
+      "returns": "list[SimulationJob]",
+      "route_kwargs": {
+        "response_model": "list[SimulationJob]"
+      },
+      "route_path": "/{case_id}/simulation-jobs",
+      "router_prefix": "/api/cases",
+      "source": "backend/routes/cases.py",
+      "tags": [
+        "cases"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "int",
+          "default": null,
+          "kind": "positional",
+          "name": "case_id"
+        },
+        {
+          "annotation": "int",
+          "default": null,
+          "kind": "positional",
+          "name": "job_id"
+        },
+        {
+          "annotation": "str",
+          "default": "Query('ai_after_simulation')",
+          "kind": "positional",
+          "name": "kind"
+        }
+      ],
+      "endpoint": "simulation_job_file",
+      "line": 6035,
+      "method": "GET",
+      "path": "/api/cases/{case_id}/simulation-jobs/{job_id}/file",
+      "returns": "FileResponse",
+      "route_kwargs": {},
+      "route_path": "/{case_id}/simulation-jobs/{job_id}/file",
+      "router_prefix": "/api/cases",
+      "source": "backend/routes/cases.py",
+      "tags": [
+        "cases"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "int",
+          "default": null,
+          "kind": "positional",
+          "name": "case_id"
+        },
+        {
+          "annotation": "int",
+          "default": null,
+          "kind": "positional",
+          "name": "job_id"
+        },
+        {
+          "annotation": "SimulationJobReviewRequest",
+          "default": null,
+          "kind": "positional",
+          "name": "payload"
+        }
+      ],
+      "endpoint": "review_simulation_job",
+      "line": 6051,
+      "method": "POST",
+      "path": "/api/cases/{case_id}/simulation-jobs/{job_id}/review",
+      "returns": "SimulationJob",
+      "route_kwargs": {
+        "response_model": "SimulationJob"
+      },
+      "route_path": "/{case_id}/simulation-jobs/{job_id}/review",
+      "router_prefix": "/api/cases",
+      "source": "backend/routes/cases.py",
+      "tags": [
+        "cases"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "int",
+          "default": null,
+          "kind": "positional",
+          "name": "case_id"
+        },
+        {
+          "annotation": "int",
+          "default": "Query(8, ge=1, le=50)",
+          "kind": "positional",
+          "name": "limit"
+        }
+      ],
+      "endpoint": "source_binding_candidates",
+      "line": 4839,
+      "method": "GET",
+      "path": "/api/cases/{case_id}/source-binding-candidates",
+      "returns": "dict[str, Any]",
+      "route_kwargs": {},
+      "route_path": "/{case_id}/source-binding-candidates",
+      "router_prefix": "/api/cases",
+      "source": "backend/routes/cases.py",
+      "tags": [
+        "cases"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "int",
+          "default": null,
+          "kind": "positional",
+          "name": "case_id"
+        }
+      ],
+      "endpoint": "clear_source_directory_bindings",
+      "line": 4924,
+      "method": "DELETE",
+      "path": "/api/cases/{case_id}/source-bindings",
+      "returns": "dict[str, Any]",
+      "route_kwargs": {},
+      "route_path": "/{case_id}/source-bindings",
+      "router_prefix": "/api/cases",
+      "source": "backend/routes/cases.py",
+      "tags": [
+        "cases"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "int",
+          "default": null,
+          "kind": "positional",
+          "name": "case_id"
+        },
+        {
+          "annotation": "SourceDirectoryBindRequest",
+          "default": null,
+          "kind": "positional",
+          "name": "payload"
+        }
+      ],
+      "endpoint": "bind_source_directories",
+      "line": 4867,
+      "method": "POST",
+      "path": "/api/cases/{case_id}/source-bindings",
+      "returns": "dict[str, Any]",
+      "route_kwargs": {},
+      "route_path": "/{case_id}/source-bindings",
+      "router_prefix": "/api/cases",
+      "source": "backend/routes/cases.py",
+      "tags": [
+        "cases"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "int",
+          "default": null,
+          "kind": "positional",
+          "name": "case_id"
+        }
+      ],
+      "endpoint": "case_source_group",
+      "line": 5129,
+      "method": "GET",
+      "path": "/api/cases/{case_id}/source-group",
+      "returns": "dict[str, Any]",
+      "route_kwargs": {},
+      "route_path": "/{case_id}/source-group",
+      "router_prefix": "/api/cases",
+      "source": "backend/routes/cases.py",
+      "tags": [
+        "cases"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "int",
+          "default": null,
+          "kind": "positional",
+          "name": "case_id"
+        },
+        {
+          "annotation": "SourceGroupWarningAcceptanceRequest",
+          "default": null,
+          "kind": "positional",
+          "name": "payload"
+        }
+      ],
+      "endpoint": "accept_source_group_warning",
+      "line": 5056,
+      "method": "POST",
+      "path": "/api/cases/{case_id}/source-group/accepted-warnings",
+      "returns": "dict[str, Any]",
+      "route_kwargs": {},
+      "route_path": "/{case_id}/source-group/accepted-warnings",
+      "router_prefix": "/api/cases",
+      "source": "backend/routes/cases.py",
+      "tags": [
+        "cases"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "int",
+          "default": null,
+          "kind": "positional",
+          "name": "case_id"
+        },
+        {
+          "annotation": "SourceGroupSlotLockRequest",
+          "default": null,
+          "kind": "positional",
+          "name": "payload"
+        }
+      ],
+      "endpoint": "lock_source_group_slot",
+      "line": 4976,
+      "method": "POST",
+      "path": "/api/cases/{case_id}/source-group/slot-locks",
+      "returns": "dict[str, Any]",
+      "route_kwargs": {},
+      "route_path": "/{case_id}/source-group/slot-locks",
+      "router_prefix": "/api/cases",
+      "source": "backend/routes/cases.py",
+      "tags": [
+        "cases"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "int",
+          "default": null,
+          "kind": "positional",
+          "name": "case_id"
+        },
+        {
+          "annotation": "str",
+          "default": null,
+          "kind": "positional",
+          "name": "view"
+        }
+      ],
+      "endpoint": "clear_source_group_slot_lock",
+      "line": 5022,
+      "method": "DELETE",
+      "path": "/api/cases/{case_id}/source-group/slot-locks/{view}",
+      "returns": "dict[str, Any]",
+      "route_kwargs": {},
+      "route_path": "/{case_id}/source-group/slot-locks/{view}",
+      "router_prefix": "/api/cases",
+      "source": "backend/routes/cases.py",
+      "tags": [
+        "cases"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "int",
+          "default": null,
+          "kind": "positional",
+          "name": "case_id"
+        }
+      ],
+      "endpoint": "undo_case",
+      "line": 48,
+      "method": "POST",
+      "path": "/api/cases/{case_id}/undo",
+      "returns": "dict",
+      "route_kwargs": {},
+      "route_path": "/{case_id}/undo",
+      "router_prefix": "/api/cases",
+      "source": "backend/routes/audit.py",
+      "tags": [
+        "audit"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "int",
+          "default": null,
+          "kind": "positional",
+          "name": "case_id"
+        },
+        {
+          "annotation": "str",
+          "default": "'fumei'",
+          "kind": "positional",
+          "name": "brand"
+        }
+      ],
+      "endpoint": "upgrade_case",
+      "line": 6183,
+      "method": "POST",
+      "path": "/api/cases/{case_id}/upgrade",
+      "returns": "CaseDetail",
+      "route_kwargs": {},
+      "route_path": "/{case_id}/upgrade",
+      "router_prefix": "/api/cases",
+      "source": "backend/routes/cases.py",
+      "tags": [
+        "cases"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "int",
+          "default": null,
+          "kind": "positional",
+          "name": "case_id"
+        },
+        {
+          "annotation": "EnhancedClassifyRequest",
+          "default": null,
+          "kind": "positional",
+          "name": "payload"
+        }
+      ],
+      "endpoint": "classify_enhanced",
+      "line": 28,
+      "method": "POST",
+      "path": "/api/classification/{case_id}/enhanced",
+      "returns": "dict[str, Any]",
+      "route_kwargs": {},
+      "route_path": "/{case_id}/enhanced",
+      "router_prefix": "/api/classification",
+      "source": "backend/routes/classification.py",
+      "tags": [
+        "classification"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "int",
+          "default": null,
+          "kind": "positional",
+          "name": "case_id"
+        }
+      ],
+      "endpoint": "get_classification_signals",
+      "line": 51,
+      "method": "GET",
+      "path": "/api/classification/{case_id}/signals",
+      "returns": "dict[str, Any]",
+      "route_kwargs": {},
+      "route_path": "/{case_id}/signals",
+      "router_prefix": "/api/classification",
+      "source": "backend/routes/classification.py",
+      "tags": [
+        "classification"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "str | None",
+          "default": "None",
+          "kind": "positional",
+          "name": "q"
+        }
+      ],
+      "endpoint": "list_customers",
+      "line": 32,
+      "method": "GET",
+      "path": "/api/customers",
+      "returns": "list[CustomerSummary]",
+      "route_kwargs": {
+        "response_model": "list[CustomerSummary]"
+      },
+      "route_path": "",
+      "router_prefix": "/api/customers",
+      "source": "backend/routes/customers.py",
+      "tags": [
+        "customers"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "CustomerCreate",
+          "default": null,
+          "kind": "positional",
+          "name": "payload"
+        }
+      ],
+      "endpoint": "create_customer",
+      "line": 82,
+      "method": "POST",
+      "path": "/api/customers",
+      "returns": "CustomerSummary",
+      "route_kwargs": {
+        "response_model": "CustomerSummary"
+      },
+      "route_path": "",
+      "router_prefix": "/api/customers",
+      "source": "backend/routes/customers.py",
+      "tags": [
+        "customers"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "str",
+          "default": "Query(..., min_length=1)",
+          "kind": "positional",
+          "name": "raw"
+        }
+      ],
+      "endpoint": "candidates",
+      "line": 50,
+      "method": "GET",
+      "path": "/api/customers/candidates",
+      "returns": "dict",
+      "route_kwargs": {},
+      "route_path": "/candidates",
+      "router_prefix": "/api/customers",
+      "source": "backend/routes/customers.py",
+      "tags": [
+        "customers"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "int",
+          "default": null,
+          "kind": "positional",
+          "name": "customer_id"
+        }
+      ],
+      "endpoint": "customer_detail",
+      "line": 64,
+      "method": "GET",
+      "path": "/api/customers/{customer_id}",
+      "returns": "CustomerDetail",
+      "route_kwargs": {
+        "response_model": "CustomerDetail"
+      },
+      "route_path": "/{customer_id}",
+      "router_prefix": "/api/customers",
+      "source": "backend/routes/customers.py",
+      "tags": [
+        "customers"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "int",
+          "default": null,
+          "kind": "positional",
+          "name": "customer_id"
+        },
+        {
+          "annotation": "CustomerUpdate",
+          "default": null,
+          "kind": "positional",
+          "name": "payload"
+        }
+      ],
+      "endpoint": "update_customer",
+      "line": 96,
+      "method": "PATCH",
+      "path": "/api/customers/{customer_id}",
+      "returns": "CustomerSummary",
+      "route_kwargs": {
+        "response_model": "CustomerSummary"
+      },
+      "route_path": "/{customer_id}",
+      "router_prefix": "/api/customers",
+      "source": "backend/routes/customers.py",
+      "tags": [
+        "customers"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "int",
+          "default": null,
+          "kind": "positional",
+          "name": "customer_id"
+        },
+        {
+          "annotation": "CustomerMerge",
+          "default": null,
+          "kind": "positional",
+          "name": "payload"
+        }
+      ],
+      "endpoint": "merge_cases",
+      "line": 116,
+      "method": "POST",
+      "path": "/api/customers/{customer_id}/merge",
+      "returns": "dict",
+      "route_kwargs": {},
+      "route_path": "/{customer_id}/merge",
+      "router_prefix": "/api/customers",
+      "source": "backend/routes/customers.py",
+      "tags": [
+        "customers"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "str",
+          "default": "Query(...)",
+          "kind": "positional",
+          "name": "subject_kind"
+        },
+        {
+          "annotation": "int",
+          "default": "Query(...)",
+          "kind": "positional",
+          "name": "subject_id"
+        },
+        {
+          "annotation": "int",
+          "default": "Query(50, le=200)",
+          "kind": "positional",
+          "name": "limit"
+        }
+      ],
+      "endpoint": "list_by_subject",
+      "line": 173,
+      "method": "GET",
+      "path": "/api/evaluations",
+      "returns": "list[dict[str, Any]]",
+      "route_kwargs": {},
+      "route_path": "/api/evaluations",
+      "router_prefix": "",
+      "source": "backend/routes/evaluations.py",
+      "tags": [
+        "evaluations"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "EvaluationCreate",
+          "default": null,
+          "kind": "positional",
+          "name": "payload"
+        }
+      ],
+      "endpoint": "create_evaluation",
+      "line": 99,
+      "method": "POST",
+      "path": "/api/evaluations",
+      "returns": "dict[str, Any]",
+      "route_kwargs": {},
+      "route_path": "/api/evaluations",
+      "router_prefix": "",
+      "source": "backend/routes/evaluations.py",
+      "tags": [
+        "evaluations"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "str",
+          "default": "Query(...)",
+          "kind": "positional",
+          "name": "subject_kind"
+        },
+        {
+          "annotation": "str | None",
+          "default": "Query(default=None)",
+          "kind": "positional",
+          "name": "brand"
+        },
+        {
+          "annotation": "int",
+          "default": "Query(50, le=200)",
+          "kind": "positional",
+          "name": "limit"
+        }
+      ],
+      "endpoint": "list_pending",
+      "line": 199,
+      "method": "GET",
+      "path": "/api/evaluations/pending",
+      "returns": "dict[str, Any]",
+      "route_kwargs": {},
+      "route_path": "/api/evaluations/pending",
+      "router_prefix": "",
+      "source": "backend/routes/evaluations.py",
+      "tags": [
+        "evaluations"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "str",
+          "default": "Query(...)",
+          "kind": "positional",
+          "name": "subject_kind"
+        },
+        {
+          "annotation": "str | None",
+          "default": "Query(default=None)",
+          "kind": "positional",
+          "name": "brand"
+        },
+        {
+          "annotation": "int",
+          "default": "Query(20, le=200)",
+          "kind": "positional",
+          "name": "limit"
+        }
+      ],
+      "endpoint": "list_recent",
+      "line": 333,
+      "method": "GET",
+      "path": "/api/evaluations/recent",
+      "returns": "dict[str, Any]",
+      "route_kwargs": {},
+      "route_path": "/api/evaluations/recent",
+      "router_prefix": "",
+      "source": "backend/routes/evaluations.py",
+      "tags": [
+        "evaluations"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "int",
+          "default": null,
+          "kind": "positional",
+          "name": "eval_id"
+        }
+      ],
+      "endpoint": "undo_evaluation",
+      "line": 417,
+      "method": "POST",
+      "path": "/api/evaluations/{eval_id}/undo",
+      "returns": "dict[str, Any]",
+      "route_kwargs": {},
+      "route_path": "/api/evaluations/{eval_id}/undo",
+      "router_prefix": "",
+      "source": "backend/routes/evaluations.py",
+      "tags": [
+        "evaluations"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "ImageWorkbenchBatchPayload",
+          "default": null,
+          "kind": "positional",
+          "name": "payload"
+        }
+      ],
+      "endpoint": "update_image_workbench_batch",
+      "line": 2405,
+      "method": "POST",
+      "path": "/api/image-workbench/batch",
+      "returns": "dict[str, Any]",
+      "route_kwargs": {},
+      "route_path": "/api/image-workbench/batch",
+      "router_prefix": "",
+      "source": "backend/routes/image_workbench.py",
+      "tags": [
+        "image-workbench"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "ImageWorkbenchConfirmSuggestionsPayload",
+          "default": null,
+          "kind": "positional",
+          "name": "payload"
+        }
+      ],
+      "endpoint": "confirm_image_workbench_suggestions",
+      "line": 2455,
+      "method": "POST",
+      "path": "/api/image-workbench/confirm-suggestions",
+      "returns": "dict[str, Any]",
+      "route_kwargs": {},
+      "route_path": "/api/image-workbench/confirm-suggestions",
+      "router_prefix": "",
+      "source": "backend/routes/image_workbench.py",
+      "tags": [
+        "image-workbench"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "str",
+          "default": "Query('review_needed')",
+          "kind": "positional",
+          "name": "status"
+        },
+        {
+          "annotation": "str",
+          "default": "Query('all')",
+          "kind": "positional",
+          "name": "phase"
+        },
+        {
+          "annotation": "str",
+          "default": "Query('all')",
+          "kind": "positional",
+          "name": "view"
+        },
+        {
+          "annotation": "str",
+          "default": "Query('all')",
+          "kind": "positional",
+          "name": "body_part"
+        },
+        {
+          "annotation": "str",
+          "default": "Query('')",
+          "kind": "positional",
+          "name": "q"
+        },
+        {
+          "annotation": "int | None",
+          "default": "Query(default=None)",
+          "kind": "positional",
+          "name": "case_id"
+        },
+        {
+          "annotation": "int | None",
+          "default": "Query(default=None)",
+          "kind": "positional",
+          "name": "source_group_case_id"
+        },
+        {
+          "annotation": "int",
+          "default": "Query(120, ge=1, le=500)",
+          "kind": "positional",
+          "name": "limit"
+        },
+        {
+          "annotation": "int",
+          "default": "Query(0, ge=0)",
+          "kind": "positional",
+          "name": "offset"
+        }
+      ],
+      "endpoint": "list_image_classification_queue",
+      "line": 1733,
+      "method": "GET",
+      "path": "/api/image-workbench/queue",
+      "returns": "dict[str, Any]",
+      "route_kwargs": {},
+      "route_path": "/api/image-workbench/queue",
+      "router_prefix": "",
+      "source": "backend/routes/image_workbench.py",
+      "tags": [
+        "image-workbench"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "int",
+          "default": "Query(..., ge=1)",
+          "kind": "positional",
+          "name": "target_case_id"
+        },
+        {
+          "annotation": "int",
+          "default": "Query(8, ge=1, le=30)",
+          "kind": "positional",
+          "name": "limit_per_gap"
+        }
+      ],
+      "endpoint": "list_supplement_candidates",
+      "line": 2100,
+      "method": "GET",
+      "path": "/api/image-workbench/supplement-candidates",
+      "returns": "dict[str, Any]",
+      "route_kwargs": {},
+      "route_path": "/api/image-workbench/supplement-candidates",
+      "router_prefix": "",
+      "source": "backend/routes/image_workbench.py",
+      "tags": [
+        "image-workbench"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "ImageTransferPayload",
+          "default": null,
+          "kind": "positional",
+          "name": "payload"
+        }
+      ],
+      "endpoint": "transfer_image_workbench_images",
+      "line": 2544,
+      "method": "POST",
+      "path": "/api/image-workbench/transfer",
+      "returns": "dict[str, Any]",
+      "route_kwargs": {},
+      "route_path": "/api/image-workbench/transfer",
+      "router_prefix": "",
+      "source": "backend/routes/image_workbench.py",
+      "tags": [
+        "image-workbench"
+      ]
+    },
+    {
+      "arguments": [],
+      "endpoint": "issue_dict",
+      "line": 12,
+      "method": "GET",
+      "path": "/api/issues/dict",
+      "returns": "list[dict]",
+      "route_kwargs": {},
+      "route_path": "/dict",
+      "router_prefix": "/api/issues",
+      "source": "backend/routes/issues.py",
+      "tags": [
+        "issues"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "Request",
+          "default": null,
+          "kind": "positional",
+          "name": "request"
+        }
+      ],
+      "endpoint": "jobs_stream",
+      "line": 53,
+      "method": "GET",
+      "path": "/api/jobs/stream",
+      "returns": "StreamingResponse",
+      "route_kwargs": {},
+      "route_path": "/api/jobs/stream",
+      "router_prefix": "",
+      "source": "backend/routes/jobs.py",
+      "tags": [
+        "jobs"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "str",
+          "default": null,
+          "kind": "positional",
+          "name": "batch_id"
+        }
+      ],
+      "endpoint": "get_upgrade_batch",
+      "line": 96,
+      "method": "GET",
+      "path": "/api/jobs/upgrade/batches/{batch_id}",
+      "returns": "dict",
+      "route_kwargs": {},
+      "route_path": "/api/jobs/upgrade/batches/{batch_id}",
+      "router_prefix": "",
+      "source": "backend/routes/upgrade.py",
+      "tags": [
+        "upgrade"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "str",
+          "default": null,
+          "kind": "positional",
+          "name": "batch_id"
+        }
+      ],
+      "endpoint": "undo_upgrade_batch",
+      "line": 117,
+      "method": "POST",
+      "path": "/api/jobs/upgrade/batches/{batch_id}/undo",
+      "returns": "dict",
+      "route_kwargs": {},
+      "route_path": "/api/jobs/upgrade/batches/{batch_id}/undo",
+      "router_prefix": "",
+      "source": "backend/routes/upgrade.py",
+      "tags": [
+        "upgrade"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "int",
+          "default": null,
+          "kind": "positional",
+          "name": "job_id"
+        }
+      ],
+      "endpoint": "get_upgrade_job",
+      "line": 128,
+      "method": "GET",
+      "path": "/api/jobs/upgrade/{job_id}",
+      "returns": "dict",
+      "route_kwargs": {},
+      "route_path": "/api/jobs/upgrade/{job_id}",
+      "router_prefix": "",
+      "source": "backend/routes/upgrade.py",
+      "tags": [
+        "upgrade"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "int",
+          "default": null,
+          "kind": "positional",
+          "name": "job_id"
+        }
+      ],
+      "endpoint": "cancel_upgrade_job",
+      "line": 139,
+      "method": "POST",
+      "path": "/api/jobs/upgrade/{job_id}/cancel",
+      "returns": "dict",
+      "route_kwargs": {},
+      "route_path": "/api/jobs/upgrade/{job_id}/cancel",
+      "router_prefix": "",
+      "source": "backend/routes/upgrade.py",
+      "tags": [
+        "upgrade"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "int",
+          "default": null,
+          "kind": "positional",
+          "name": "job_id"
+        }
+      ],
+      "endpoint": "retry_upgrade_job",
+      "line": 147,
+      "method": "POST",
+      "path": "/api/jobs/upgrade/{job_id}/retry",
+      "returns": "dict",
+      "route_kwargs": {},
+      "route_path": "/api/jobs/upgrade/{job_id}/retry",
+      "router_prefix": "",
+      "source": "backend/routes/upgrade.py",
+      "tags": [
+        "upgrade"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "int",
+          "default": null,
+          "kind": "positional",
+          "name": "job_id"
+        },
+        {
+          "annotation": "AbFeedbackRequest",
+          "default": null,
+          "kind": "positional",
+          "name": "payload"
+        }
+      ],
+      "endpoint": "record_ab_feedback",
+      "line": 1507,
+      "method": "POST",
+      "path": "/api/render-jobs/{job_id}/ab-feedback",
+      "returns": "dict[str, Any]",
+      "route_kwargs": {},
+      "route_path": "/api/render-jobs/{job_id}/ab-feedback",
+      "router_prefix": "",
+      "source": "backend/routes/render.py",
+      "tags": [
+        "render"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "int",
+          "default": null,
+          "kind": "positional",
+          "name": "job_id"
+        },
+        {
+          "annotation": "RenderQualityReviewRequest",
+          "default": null,
+          "kind": "positional",
+          "name": "payload"
+        }
+      ],
+      "endpoint": "review_render_quality",
+      "line": 1431,
+      "method": "POST",
+      "path": "/api/render-jobs/{job_id}/quality-review",
+      "returns": "dict[str, Any]",
+      "route_kwargs": {},
+      "route_path": "/api/render-jobs/{job_id}/quality-review",
+      "router_prefix": "",
+      "source": "backend/routes/render.py",
+      "tags": [
+        "render"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "str",
+          "default": null,
+          "kind": "positional",
+          "name": "batch_id"
+        }
+      ],
+      "endpoint": "get_batch",
+      "line": 1553,
+      "method": "GET",
+      "path": "/api/render/batches/{batch_id}",
+      "returns": "dict",
+      "route_kwargs": {},
+      "route_path": "/api/render/batches/{batch_id}",
+      "router_prefix": "",
+      "source": "backend/routes/render.py",
+      "tags": [
+        "render"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "int",
+          "default": "Query(default=7, ge=1, le=90)",
+          "kind": "positional",
+          "name": "days"
+        },
+        {
+          "annotation": "str",
+          "default": "Query(default='stage')",
+          "kind": "positional",
+          "name": "group_by"
+        },
+        {
+          "annotation": "int",
+          "default": "Query(default=200, ge=1, le=1000)",
+          "kind": "positional",
+          "name": "limit"
+        }
+      ],
+      "endpoint": "list_recent_failures",
+      "line": 1626,
+      "method": "GET",
+      "path": "/api/render/jobs/failures/recent",
+      "returns": "dict[str, Any]",
+      "route_kwargs": {},
+      "route_path": "/api/render/jobs/failures/recent",
+      "router_prefix": "",
+      "source": "backend/routes/render.py",
+      "tags": [
+        "render"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "int",
+          "default": null,
+          "kind": "positional",
+          "name": "job_id"
+        }
+      ],
+      "endpoint": "get_job",
+      "line": 1244,
+      "method": "GET",
+      "path": "/api/render/jobs/{job_id}",
+      "returns": "dict",
+      "route_kwargs": {},
+      "route_path": "/api/render/jobs/{job_id}",
+      "router_prefix": "",
+      "source": "backend/routes/render.py",
+      "tags": [
+        "render"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "int",
+          "default": null,
+          "kind": "positional",
+          "name": "job_id"
+        }
+      ],
+      "endpoint": "cancel_job",
+      "line": 1574,
+      "method": "POST",
+      "path": "/api/render/jobs/{job_id}/cancel",
+      "returns": "dict",
+      "route_kwargs": {},
+      "route_path": "/api/render/jobs/{job_id}/cancel",
+      "router_prefix": "",
+      "source": "backend/routes/render.py",
+      "tags": [
+        "render"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "int",
+          "default": null,
+          "kind": "positional",
+          "name": "job_id"
+        }
+      ],
+      "endpoint": "get_failure_trace",
+      "line": 1678,
+      "method": "GET",
+      "path": "/api/render/jobs/{job_id}/failure-trace",
+      "returns": "dict[str, Any]",
+      "route_kwargs": {},
+      "route_path": "/api/render/jobs/{job_id}/failure-trace",
+      "router_prefix": "",
+      "source": "backend/routes/render.py",
+      "tags": [
+        "render"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "int",
+          "default": null,
+          "kind": "positional",
+          "name": "job_id"
+        },
+        {
+          "annotation": "str",
+          "default": "Query('output')",
+          "kind": "positional",
+          "name": "kind"
+        }
+      ],
+      "endpoint": "render_job_file",
+      "line": 1216,
+      "method": "GET",
+      "path": "/api/render/jobs/{job_id}/file",
+      "returns": "FileResponse",
+      "route_kwargs": {},
+      "route_path": "/api/render/jobs/{job_id}/file",
+      "router_prefix": "",
+      "source": "backend/routes/render.py",
+      "tags": [
+        "render"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "str",
+          "default": "Query(default=LEGACY_RENDER_DEFAULT_CUTOFF)",
+          "kind": "positional",
+          "name": "cutoff"
+        },
+        {
+          "annotation": "int",
+          "default": "Query(default=200, ge=1, le=1000)",
+          "kind": "positional",
+          "name": "limit"
+        }
+      ],
+      "endpoint": "legacy_render_risk",
+      "line": 1260,
+      "method": "GET",
+      "path": "/api/render/legacy-risk",
+      "returns": "dict[str, Any]",
+      "route_kwargs": {},
+      "route_path": "/api/render/legacy-risk",
+      "router_prefix": "",
+      "source": "backend/routes/render.py",
+      "tags": [
+        "render"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "LegacyRenderQuarantineRequest",
+          "default": null,
+          "kind": "positional",
+          "name": "payload"
+        }
+      ],
+      "endpoint": "quarantine_legacy_render_risk",
+      "line": 1270,
+      "method": "POST",
+      "path": "/api/render/legacy-risk/quarantine",
+      "returns": "dict[str, Any]",
+      "route_kwargs": {},
+      "route_path": "/api/render/legacy-risk/quarantine",
+      "router_prefix": "",
+      "source": "backend/routes/render.py",
+      "tags": [
+        "render"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "OpsAbSampleRequest",
+          "default": null,
+          "kind": "positional",
+          "name": "payload"
+        },
+        {
+          "annotation": "str | None",
+          "default": "Header(default=None, alias='X-Request-Id')",
+          "kind": "positional",
+          "name": "x_request_id"
+        }
+      ],
+      "endpoint": "ops_ab_sample",
+      "line": 2193,
+      "method": "POST",
+      "path": "/api/render/ops/ab-sample",
+      "returns": "dict[str, Any]",
+      "route_kwargs": {},
+      "route_path": "/api/render/ops/ab-sample",
+      "router_prefix": "",
+      "source": "backend/routes/render.py",
+      "tags": [
+        "render"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "OpsAlertFireRequest",
+          "default": null,
+          "kind": "positional",
+          "name": "payload"
+        },
+        {
+          "annotation": "str | None",
+          "default": "Header(default=None, alias='X-Request-Id')",
+          "kind": "positional",
+          "name": "x_request_id"
+        }
+      ],
+      "endpoint": "ops_alerts_fire",
+      "line": 2580,
+      "method": "POST",
+      "path": "/api/render/ops/alerts/fire",
+      "returns": "dict[str, Any]",
+      "route_kwargs": {},
+      "route_path": "/api/render/ops/alerts/fire",
+      "router_prefix": "",
+      "source": "backend/routes/render.py",
+      "tags": [
+        "render"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "str",
+          "default": null,
+          "kind": "positional",
+          "name": "correlation_id"
+        },
+        {
+          "annotation": "OpsAlertLifecycleRequest",
+          "default": null,
+          "kind": "positional",
+          "name": "payload"
+        }
+      ],
+      "endpoint": "ops_alerts_ack",
+      "line": 2678,
+      "method": "POST",
+      "path": "/api/render/ops/alerts/{correlation_id}/ack",
+      "returns": "dict[str, Any]",
+      "route_kwargs": {},
+      "route_path": "/api/render/ops/alerts/{correlation_id}/ack",
+      "router_prefix": "",
+      "source": "backend/routes/render.py",
+      "tags": [
+        "render"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "str",
+          "default": null,
+          "kind": "positional",
+          "name": "correlation_id"
+        },
+        {
+          "annotation": "OpsAlertLifecycleRequest",
+          "default": null,
+          "kind": "positional",
+          "name": "payload"
+        }
+      ],
+      "endpoint": "ops_alerts_resolve",
+      "line": 2701,
+      "method": "POST",
+      "path": "/api/render/ops/alerts/{correlation_id}/resolve",
+      "returns": "dict[str, Any]",
+      "route_kwargs": {},
+      "route_path": "/api/render/ops/alerts/{correlation_id}/resolve",
+      "router_prefix": "",
+      "source": "backend/routes/render.py",
+      "tags": [
+        "render"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "OpsBatchRerunRequest",
+          "default": null,
+          "kind": "positional",
+          "name": "payload"
+        },
+        {
+          "annotation": "str | None",
+          "default": "Header(default=None, alias='X-Request-Id')",
+          "kind": "positional",
+          "name": "x_request_id"
+        }
+      ],
+      "endpoint": "ops_batch_rerun",
+      "line": 2004,
+      "method": "POST",
+      "path": "/api/render/ops/batch-rerun",
+      "returns": "dict[str, Any]",
+      "route_kwargs": {},
+      "route_path": "/api/render/ops/batch-rerun",
+      "router_prefix": "",
+      "source": "backend/routes/render.py",
+      "tags": [
+        "render"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "OpsRepairQueueRequest",
+          "default": null,
+          "kind": "positional",
+          "name": "payload"
+        },
+        {
+          "annotation": "str | None",
+          "default": "Header(default=None, alias='X-Request-Id')",
+          "kind": "positional",
+          "name": "x_request_id"
+        }
+      ],
+      "endpoint": "ops_repair_queue",
+      "line": 2418,
+      "method": "POST",
+      "path": "/api/render/ops/repair-queue",
+      "returns": "dict[str, Any]",
+      "route_kwargs": {},
+      "route_path": "/api/render/ops/repair-queue",
+      "router_prefix": "",
+      "source": "backend/routes/render.py",
+      "tags": [
+        "render"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "int",
+          "default": "Query(default=7, ge=1, le=90)",
+          "kind": "positional",
+          "name": "days"
+        },
+        {
+          "annotation": "int",
+          "default": "Query(default=24, ge=1, le=24 * 14)",
+          "kind": "positional",
+          "name": "slo_window_hours"
+        },
+        {
+          "annotation": "bool",
+          "default": "Query(default=True)",
+          "kind": "positional",
+          "name": "probe_comfyui"
+        }
+      ],
+      "endpoint": "ops_vlm_comfyui_status",
+      "line": 1837,
+      "method": "GET",
+      "path": "/api/render/ops/vlm-comfyui/status",
+      "returns": "dict[str, Any]",
+      "route_kwargs": {},
+      "route_path": "/api/render/ops/vlm-comfyui/status",
+      "router_prefix": "",
+      "source": "backend/routes/render.py",
+      "tags": [
+        "render"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "OpsVlmShadowRequest",
+          "default": null,
+          "kind": "positional",
+          "name": "payload"
+        },
+        {
+          "annotation": "str | None",
+          "default": "Header(default=None, alias='X-Request-Id')",
+          "kind": "positional",
+          "name": "x_request_id"
+        }
+      ],
+      "endpoint": "ops_vlm_shadow",
+      "line": 2281,
+      "method": "POST",
+      "path": "/api/render/ops/vlm-shadow",
+      "returns": "dict[str, Any]",
+      "route_kwargs": {},
+      "route_path": "/api/render/ops/vlm-shadow",
+      "router_prefix": "",
+      "source": "backend/routes/render.py",
+      "tags": [
+        "render"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "str",
+          "default": "Query('review_required')",
+          "kind": "positional",
+          "name": "status"
+        },
+        {
+          "annotation": "str",
+          "default": "Query('all')",
+          "kind": "positional",
+          "name": "render_mode"
+        },
+        {
+          "annotation": "int",
+          "default": "Query(100, ge=1, le=200)",
+          "kind": "positional",
+          "name": "limit"
+        }
+      ],
+      "endpoint": "list_render_quality_queue",
+      "line": 1347,
+      "method": "GET",
+      "path": "/api/render/quality-queue",
+      "returns": "dict[str, Any]",
+      "route_kwargs": {},
+      "route_path": "/api/render/quality-queue",
+      "router_prefix": "",
+      "source": "backend/routes/render.py",
+      "tags": [
+        "render"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "Request",
+          "default": null,
+          "kind": "positional",
+          "name": "request"
+        }
+      ],
+      "endpoint": "render_stream",
+      "line": 1587,
+      "method": "GET",
+      "path": "/api/render/stream",
+      "returns": "StreamingResponse",
+      "route_kwargs": {},
+      "route_path": "/api/render/stream",
+      "router_prefix": "",
+      "source": "backend/routes/render.py",
+      "tags": [
+        "render"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "str | None",
+          "default": "Query(default=None)",
+          "kind": "positional",
+          "name": "status"
+        },
+        {
+          "annotation": "str | None",
+          "default": "Query(default=None)",
+          "kind": "positional",
+          "name": "ticket_type"
+        },
+        {
+          "annotation": "int | None",
+          "default": "Query(default=None)",
+          "kind": "positional",
+          "name": "case_id"
+        },
+        {
+          "annotation": "int | None",
+          "default": "Query(default=None)",
+          "kind": "positional",
+          "name": "render_job_id"
+        },
+        {
+          "annotation": "int",
+          "default": "Query(default=100, ge=1, le=500)",
+          "kind": "positional",
+          "name": "limit"
+        }
+      ],
+      "endpoint": "list_review_tickets",
+      "line": 23,
+      "method": "GET",
+      "path": "/api/review-tickets",
+      "returns": "dict[str, Any]",
+      "route_kwargs": {},
+      "route_path": "/api/review-tickets",
+      "router_prefix": "",
+      "source": "backend/routes/review_tickets.py",
+      "tags": [
+        "review-tickets"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "int",
+          "default": null,
+          "kind": "positional",
+          "name": "ticket_id"
+        },
+        {
+          "annotation": "ReviewTicketDecisionRequest",
+          "default": null,
+          "kind": "positional",
+          "name": "payload"
+        }
+      ],
+      "endpoint": "decide_review_ticket",
+      "line": 42,
+      "method": "POST",
+      "path": "/api/review-tickets/{ticket_id}/decision",
+      "returns": "dict[str, Any]",
+      "route_kwargs": {},
+      "route_path": "/api/review-tickets/{ticket_id}/decision",
+      "router_prefix": "",
+      "source": "backend/routes/review_tickets.py",
+      "tags": [
+        "review-tickets"
+      ]
+    },
+    {
+      "arguments": [
+        {
+          "annotation": "str",
+          "default": "'incremental'",
+          "kind": "positional",
+          "name": "mode"
+        }
+      ],
+      "endpoint": "trigger_scan",
+      "line": 14,
+      "method": "POST",
+      "path": "/api/scan",
+      "returns": "ScanResult",
+      "route_kwargs": {
+        "response_model": "ScanResult"
+      },
+      "route_path": "/scan",
+      "router_prefix": "/api",
+      "source": "backend/routes/scan.py",
+      "tags": [
+        "scan"
+      ]
+    },
+    {
+      "arguments": [],
+      "endpoint": "latest_scan",
+      "line": 23,
+      "method": "GET",
+      "path": "/api/scan/latest",
+      "returns": "dict",
+      "route_kwargs": {},
+      "route_path": "/scan/latest",
+      "router_prefix": "/api",
+      "source": "backend/routes/scan.py",
+      "tags": [
+        "scan"
+      ]
+    },
+    {
+      "arguments": [],
+      "endpoint": "stress_status",
+      "line": 36,
+      "method": "GET",
+      "path": "/api/stress/status",
+      "returns": "dict[str, Any]",
+      "route_kwargs": {},
+      "route_path": "/api/stress/status",
+      "router_prefix": "",
+      "source": "backend/routes/stress.py",
+      "tags": [
+        "stress"
+      ]
+    }
+  ]
+}
