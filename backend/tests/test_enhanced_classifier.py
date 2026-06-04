@@ -10,11 +10,16 @@ import pytest
 from backend import db
 from backend.services.enhanced_classifier import (
     ALL_TIERS,
+    VALID_MODES,
+    _MIN_APPLY_CONFIDENCE,
+    _SOURCE_TAG,
     ObservationRecord,
+    _apply_fusion_result,
     fetch_case_observations,
     run_enhanced_classification,
     _run_path_rules_tier,
 )
+from backend.services.phase_fusion import FusionResult
 
 
 # ---------------------------------------------------------------------------
@@ -284,3 +289,175 @@ class TestClassificationRoutes:
     def test_signals_case_not_found(self, client):
         resp = client.get("/api/classification/99999/signals")
         assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Apply mode — DB persist
+# ---------------------------------------------------------------------------
+
+class TestApplyFusionResult:
+    """Unit tests for _apply_fusion_result."""
+
+    def test_writes_resolved_phase_to_db(self, seed_case):
+        case_id = seed_case()
+        _seed_group_and_observations(case_id, [
+            {"image_path": "术前/a.jpg", "phase": "unknown", "confidence": 0.25},
+        ])
+        with db.connect() as conn:
+            obs = fetch_case_observations(conn, case_id)
+            fusion = FusionResult(
+                phase="before", confidence=0.95, reasoning="agreement: path_rules",
+                signals_used=2, agreement=True,
+            )
+            updated = _apply_fusion_result(conn, obs[0], fusion)
+        assert updated is True
+        with db.connect() as conn:
+            row = conn.execute(
+                "SELECT phase, confidence, source FROM image_observations WHERE id = ?",
+                (obs[0].observation_id,),
+            ).fetchone()
+        assert row["phase"] == "before"
+        assert row["confidence"] == 0.95
+        assert row["source"] == _SOURCE_TAG
+
+    def test_skips_unknown_phase(self, seed_case):
+        case_id = seed_case()
+        _seed_group_and_observations(case_id, [
+            {"image_path": "a.jpg", "phase": "unknown", "confidence": 0.25},
+        ])
+        with db.connect() as conn:
+            obs = fetch_case_observations(conn, case_id)
+            fusion = FusionResult(
+                phase="unknown", confidence=0.0, reasoning="no signals",
+                signals_used=0, agreement=False,
+            )
+            updated = _apply_fusion_result(conn, obs[0], fusion)
+        assert updated is False
+
+    def test_skips_low_confidence(self, seed_case):
+        case_id = seed_case()
+        _seed_group_and_observations(case_id, [
+            {"image_path": "a.jpg", "phase": "unknown", "confidence": 0.25},
+        ])
+        with db.connect() as conn:
+            obs = fetch_case_observations(conn, case_id)
+            fusion = FusionResult(
+                phase="before", confidence=0.50, reasoning="conflict",
+                signals_used=2, agreement=False,
+            )
+            updated = _apply_fusion_result(conn, obs[0], fusion)
+        assert updated is False
+
+    def test_skips_same_phase_same_source(self, seed_case):
+        case_id = seed_case()
+        _seed_group_and_observations(case_id, [
+            {"image_path": "a.jpg", "phase": "before", "confidence": 0.92,
+             "source": _SOURCE_TAG},
+        ])
+        with db.connect() as conn:
+            obs = fetch_case_observations(conn, case_id)
+            fusion = FusionResult(
+                phase="before", confidence=0.95, reasoning="agreement",
+                signals_used=2, agreement=True,
+            )
+            updated = _apply_fusion_result(conn, obs[0], fusion)
+        assert updated is False
+
+    def test_appends_reasoning_to_reasons_json(self, seed_case):
+        case_id = seed_case()
+        _seed_group_and_observations(case_id, [
+            {"image_path": "a.jpg", "phase": "unknown", "confidence": 0.25,
+             "reasons": ["phase_missing"]},
+        ])
+        with db.connect() as conn:
+            obs = fetch_case_observations(conn, case_id)
+            fusion = FusionResult(
+                phase="after", confidence=0.90, reasoning="agreement: vlm_single",
+                signals_used=1, agreement=True,
+            )
+            _apply_fusion_result(conn, obs[0], fusion)
+        with db.connect() as conn:
+            row = conn.execute(
+                "SELECT reasons_json FROM image_observations WHERE id = ?",
+                (obs[0].observation_id,),
+            ).fetchone()
+        reasons = json.loads(row["reasons_json"])
+        assert "phase_missing" in reasons
+        assert _SOURCE_TAG in reasons
+        assert "agreement: vlm_single" in reasons
+
+
+class TestRunEnhancedClassificationApply:
+    """Integration tests for apply mode."""
+
+    def test_apply_writes_to_db(self, seed_case):
+        case_id = seed_case()
+        _seed_group_and_observations(case_id, [
+            {"image_path": "术前/a.jpg", "phase": "unknown", "confidence": 0.25},
+            {"image_path": "术后/b.jpg", "phase": "unknown", "confidence": 0.25},
+        ])
+        with db.connect() as conn:
+            result = run_enhanced_classification(
+                conn, case_id, mode="apply", tiers=["path_rules"],
+            )
+        assert result["mode"] == "apply"
+        assert result["applied_count"] == 2
+        with db.connect() as conn:
+            rows = conn.execute(
+                "SELECT phase, source FROM image_observations WHERE case_id = ? ORDER BY id",
+                (case_id,),
+            ).fetchall()
+        assert rows[0]["phase"] == "before"
+        assert rows[0]["source"] == _SOURCE_TAG
+        assert rows[1]["phase"] == "after"
+        assert rows[1]["source"] == _SOURCE_TAG
+
+    def test_apply_no_change_for_unknown_fusion(self, seed_case):
+        case_id = seed_case()
+        _seed_group_and_observations(case_id, [
+            {"image_path": "photo123.jpg", "phase": "unknown", "confidence": 0.25},
+        ])
+        with db.connect() as conn:
+            result = run_enhanced_classification(
+                conn, case_id, mode="apply", tiers=["path_rules"],
+            )
+        assert result["applied_count"] == 0
+        with db.connect() as conn:
+            row = conn.execute(
+                "SELECT phase, source FROM image_observations WHERE case_id = ?",
+                (case_id,),
+            ).fetchone()
+        assert row["phase"] == "unknown"
+        assert row["source"] == "rules"
+
+    def test_live_no_apply_does_not_write(self, seed_case):
+        case_id = seed_case()
+        _seed_group_and_observations(case_id, [
+            {"image_path": "术前/a.jpg", "phase": "unknown", "confidence": 0.25},
+        ])
+        with db.connect() as conn:
+            result = run_enhanced_classification(
+                conn, case_id, mode="live-no-apply", tiers=["path_rules"],
+            )
+        assert result["applied_count"] == 0
+        with db.connect() as conn:
+            row = conn.execute(
+                "SELECT phase, source FROM image_observations WHERE case_id = ?",
+                (case_id,),
+            ).fetchone()
+        assert row["phase"] == "unknown"
+        assert row["source"] == "rules"
+
+    def test_applied_count_in_report(self, seed_case):
+        case_id = seed_case()
+        _seed_group_and_observations(case_id, [
+            {"image_path": "术前/a.jpg", "phase": "unknown", "confidence": 0.25},
+            {"image_path": "photo.jpg", "phase": "unknown", "confidence": 0.25},
+        ])
+        with db.connect() as conn:
+            result = run_enhanced_classification(
+                conn, case_id, mode="apply", tiers=["path_rules"],
+            )
+        assert result["applied_count"] == 1
+        assert result["summary"]["before"] == 1
+        assert result["summary"]["unknown_held"] == 1

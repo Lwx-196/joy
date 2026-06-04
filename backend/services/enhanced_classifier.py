@@ -5,22 +5,27 @@ and fuses their signals per image using phase_fusion.
 """
 from __future__ import annotations
 
+import json
 import logging
 import sqlite3
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from ..case_grouping import _phase_from_text
 from .exif_extractor import cluster_sessions, extract_exif, infer_temporal_phase
 from .pair_classifier import ImageCandidate, classify_pairs_batch, select_comparison_pairs
-from .phase_fusion import build_signals_from_components, fuse_phase_signals
+from .phase_fusion import FusionResult, build_signals_from_components, fuse_phase_signals
 from .vlm_provider import VLMProvider
 from .vlm_source_classifier import classify_batch
 
 logger = logging.getLogger(__name__)
 
 ALL_TIERS = frozenset({"path_rules", "exif", "vlm_single", "vlm_pair"})
+VALID_MODES = frozenset({"dry-run", "live-no-apply", "apply"})
+_MIN_APPLY_CONFIDENCE = 0.70
+_SOURCE_TAG = "enhanced_fusion"
 
 
 @dataclass(frozen=True)
@@ -196,6 +201,72 @@ def _run_vlm_pair_tier(
     return signals
 
 
+def _apply_fusion_result(
+    conn: sqlite3.Connection,
+    obs: ObservationRecord,
+    fusion: FusionResult,
+) -> bool:
+    """Write fusion result to image_observations. Returns True if row updated."""
+    if fusion.phase == "unknown" or fusion.confidence < _MIN_APPLY_CONFIDENCE:
+        return False
+    if fusion.phase == obs.phase and obs.source == _SOURCE_TAG:
+        return False
+
+    raw = conn.execute(
+        "SELECT reasons_json FROM image_observations WHERE id = ?",
+        (obs.observation_id,),
+    ).fetchone()
+    reasons = json.loads(raw["reasons_json"]) if raw else []
+    if not isinstance(reasons, list):
+        reasons = []
+    for tag in (_SOURCE_TAG, fusion.reasoning):
+        if tag and tag not in reasons:
+            reasons.append(tag)
+
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        """
+        UPDATE image_observations
+        SET phase = ?, confidence = ?, source = ?, reasons_json = ?, updated_at = ?
+        WHERE id = ?
+        """,
+        (
+            fusion.phase,
+            fusion.confidence,
+            _SOURCE_TAG,
+            json.dumps(reasons[:10], ensure_ascii=False),
+            now,
+            obs.observation_id,
+        ),
+    )
+    return True
+
+
+def _run_fail_closed_check(
+    results: list[dict[str, Any]],
+) -> tuple[bool, str]:
+    """Check for distribution collapse before applying. Returns (blocked, reason)."""
+    from . import vlm_calibration
+
+    records = [
+        {
+            "phase": r["fusion"]["phase"],
+            "confidence": float(r["fusion"]["confidence"]),
+        }
+        for r in results
+        if r["fusion"]["phase"] != "unknown"
+    ]
+    if not records:
+        return True, "insufficient_data: 0 resolved classifications"
+
+    calibration = vlm_calibration.detect_distribution_collapse(
+        records, dimensions=("phase",),
+    )
+    if calibration.status == "uncalibrated":
+        return True, f"distribution_collapse: {calibration.recommendation}"
+    return False, calibration.recommendation
+
+
 def run_enhanced_classification(
     conn: sqlite3.Connection,
     case_id: int,
@@ -219,6 +290,7 @@ def run_enhanced_classification(
             "image_count": 0,
             "results": [],
             "summary": {"total": 0, "before": 0, "after": 0, "intraop": 0, "unknown_held": 0},
+            "applied_count": 0,
         }
 
     path_signals = _run_path_rules_tier(observations) if "path_rules" in enabled else {}
@@ -235,6 +307,7 @@ def run_enhanced_classification(
     )
 
     results = []
+    fusions: list[tuple[ObservationRecord, FusionResult]] = []
     for obs in observations:
         p = path_signals.get(obs.image_path, {})
         e = exif_signals.get(obs.image_path, {})
@@ -252,6 +325,7 @@ def run_enhanced_classification(
             vlm_pair_reasoning=vp.get("reasoning", ""),
         )
         fusion = fuse_phase_signals(fused_signals)
+        fusions.append((obs, fusion))
         results.append({
             "image_path": obs.image_path,
             "observation_id": obs.observation_id,
@@ -273,12 +347,37 @@ def run_enhanced_classification(
             },
         })
 
+    # --- Fail-closed + apply ---
+    applied_count = 0
+    fail_closed = False
+    fail_closed_reason: str | None = None
+
+    if mode == "apply":
+        blocked, reason = _run_fail_closed_check(results)
+        if blocked:
+            fail_closed = True
+            fail_closed_reason = reason
+            mode = "live-no-apply"
+            logger.warning(
+                "enhanced_classifier fail-closed for case %d: %s", case_id, reason,
+            )
+
+    if mode == "apply":
+        for obs, fusion in fusions:
+            if _apply_fusion_result(conn, obs, fusion):
+                applied_count += 1
+        if applied_count:
+            logger.info(
+                "enhanced_classifier applied %d/%d for case %d",
+                applied_count, len(fusions), case_id,
+            )
+
     phase_counts: dict[str, int] = {}
     for r in results:
         ph = r["fusion"]["phase"]
         phase_counts[ph] = phase_counts.get(ph, 0) + 1
 
-    return {
+    report: dict[str, Any] = {
         "case_id": case_id,
         "mode": mode,
         "tiers_enabled": sorted(enabled),
@@ -291,4 +390,9 @@ def run_enhanced_classification(
             "intraop": phase_counts.get("intraop", 0),
             "unknown_held": phase_counts.get("unknown", 0),
         },
+        "applied_count": applied_count,
     }
+    if fail_closed:
+        report["fail_closed"] = True
+        report["fail_closed_reason"] = fail_closed_reason
+    return report
