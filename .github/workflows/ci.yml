@@ -32,6 +32,9 @@ jobs:
       - name: Install backend + dev deps
         run: pip install -r requirements-dev.lock
 
+      - name: Run ruff
+        run: ruff check
+
       - name: Run pytest
         run: pytest -v --cov=backend --cov-report=term-missing --cov-fail-under=70
 
