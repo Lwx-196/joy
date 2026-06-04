@@ -1867,7 +1867,6 @@ def test_k6_evaluate_window_unreadable_sidecar_emits_violation(
     """K-6 integration: when sidecar is unreadable during evaluate_window,
     the loop must emit a `paused_state_unreadable` violation rather than
     silently resetting the stop-loss clock to now."""
-    from backend.services import promotion_slo_monitor as psm
 
     sidecar = tmp_path / "paused_state.json"
     sidecar.write_text("{}", encoding="utf-8")

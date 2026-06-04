@@ -16,7 +16,6 @@ import json
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
 
 import pytest
 
@@ -25,7 +24,7 @@ from backend.scripts.compute_manifest_hashes import (
     BINDING_NAMES,
     compute_all_bindings,
 )
-from backend.services.delivery_gate import DeliverableItem, DeliveryGate
+from backend.services.delivery_gate import DeliveryGate
 from backend.services.simulation_delivery_gate import SimulationDeliveryGate
 
 

@@ -14,11 +14,9 @@ per-test patch transparently.
 from __future__ import annotations
 
 import os
-import sqlite3
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterator
 
 import pytest
 
@@ -44,7 +42,10 @@ import backend.db as _db  # noqa: E402
 _db.DB_PATH = _PLACEHOLDER_DB
 
 from backend.main import app  # noqa: E402  (must come after DB_PATH override)
+from backend.config import clear_settings_cache  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
+
+clear_settings_cache()
 
 
 # --- Fixtures -------------------------------------------------------------
@@ -59,6 +60,13 @@ def temp_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
     db.init_schema()
     return db_path
+
+
+@pytest.fixture(autouse=True)
+def _clear_settings_cache_between_tests():
+    clear_settings_cache()
+    yield
+    clear_settings_cache()
 
 
 @pytest.fixture(autouse=True)

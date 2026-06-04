@@ -1,7 +1,6 @@
 """Tests for backend.services.exif_extractor — EXIF timeline extraction."""
 from __future__ import annotations
 
-import io
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -10,7 +9,6 @@ from PIL import Image
 
 from backend.services.exif_extractor import (
     ExifMeta,
-    TemporalPhaseHint,
     TemporalSession,
     cluster_sessions,
     extract_exif,

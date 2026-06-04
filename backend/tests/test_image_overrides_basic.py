@@ -16,7 +16,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote
 
-import pytest
 
 
 def _write_case_files(abs_path: str, filenames: list[str]) -> None:

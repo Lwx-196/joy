@@ -5,7 +5,6 @@ import json
 from pathlib import Path
 from typing import Any
 
-import pytest
 
 
 def _write_tiny_png(path: Path) -> None:

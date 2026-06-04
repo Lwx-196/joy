@@ -4,6 +4,11 @@ __pycache__/
 *.pyc
 *.pyo
 
+# Local environment / secrets
+.env
+.env.*
+!.env.example
+
 # Node
 node_modules/
 

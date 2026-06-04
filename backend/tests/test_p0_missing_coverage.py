@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 import threading
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -541,7 +541,7 @@ def test_evaluate_pre_render_gate_accepts_empty_accepted_warnings_kwarg(
     temp_db, tmp_path: Path
 ) -> None:
     """evaluate_pre_render_gate(accepted_warnings=[]) 不应崩溃，也不应误丢 ticket。"""
-    from backend import db, render_queue
+    from backend import db
 
     case_dir = tmp_path / "case-gate-empty"
     case_dir.mkdir()

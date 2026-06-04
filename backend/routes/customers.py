@@ -2,13 +2,11 @@
 from __future__ import annotations
 
 import json
-from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
 
 from .. import audit, customer_resolver, db
 from ..models import (
-    CaseSummary,
     CustomerCreate,
     CustomerDetail,
     CustomerMerge,

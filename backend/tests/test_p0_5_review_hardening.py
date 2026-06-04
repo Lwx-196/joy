@@ -107,7 +107,6 @@ def test_empty_batch_records_marks_insufficient_data(temp_db, tmp_path: Path) ->
 
 def test_traceback_truncated_to_16kb_in_classifier_error_json(temp_db, tmp_path: Path) -> None:
     """H-2: 大 traceback (>16KB) → 写入 vlm_usage_log.error_json 前应被截断。"""
-    from backend import db
     from backend.services.vlm_source_classifier import (
         TRACEBACK_MAX_CHARS,
         _truncate_tb,
