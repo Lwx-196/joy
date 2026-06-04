@@ -1,0 +1,115 @@
+{
+  "1": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "{{input_image}}"
+    }
+  },
+  "2": {
+    "class_type": "LoadBackgroundRemovalModel",
+    "inputs": {
+      "bg_removal_name": "birefnet.safetensors"
+    }
+  },
+  "3": {
+    "class_type": "RemoveBackground",
+    "inputs": {
+      "image": ["1", 0],
+      "bg_removal_model": ["2", 0]
+    }
+  },
+  "4": {
+    "class_type": "GrowMask",
+    "inputs": {
+      "mask": ["3", 0],
+      "expand": 24,
+      "tapered_corners": true
+    }
+  },
+  "5": {
+    "class_type": "GrowMask",
+    "inputs": {
+      "mask": ["3", 0],
+      "expand": -4,
+      "tapered_corners": true
+    }
+  },
+  "6": {
+    "class_type": "MaskComposite",
+    "inputs": {
+      "destination": ["4", 0],
+      "source": ["5", 0],
+      "x": 0,
+      "y": 0,
+      "operation": "subtract"
+    }
+  },
+  "7": {
+    "class_type": "FeatherMask",
+    "inputs": {
+      "mask": ["6", 0],
+      "left": 12,
+      "top": 12,
+      "right": 12,
+      "bottom": 12
+    }
+  },
+  "8": {
+    "class_type": "CheckpointLoaderSimple",
+    "inputs": {
+      "ckpt_name": "sd-v1-5-inpainting.ckpt"
+    }
+  },
+  "9": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "text": "clean neutral studio background around the subject edge, remove halo, remove dirty matte edge, preserve the same person, preserve face, preserve hair shape, preserve clothing, photorealistic clinical portrait",
+      "clip": ["8", 1]
+    }
+  },
+  "10": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "text": "identity change, face change, skin smoothing, beauty retouch, different pose, different clothing, glow, halo, dirty edge, artifacts, blur, overexposed, painterly",
+      "clip": ["8", 1]
+    }
+  },
+  "11": {
+    "class_type": "VAEEncodeForInpaint",
+    "inputs": {
+      "pixels": ["1", 0],
+      "vae": ["8", 2],
+      "mask": ["7", 0],
+      "grow_mask_by": 4
+    }
+  },
+  "12": {
+    "class_type": "KSampler",
+    "inputs": {
+      "model": ["8", 0],
+      "seed": "{{seed}}",
+      "steps": "{{steps}}",
+      "cfg": "{{cfg}}",
+      "sampler_name": "dpmpp_2m",
+      "scheduler": "karras",
+      "positive": ["9", 0],
+      "negative": ["10", 0],
+      "latent_image": ["11", 0],
+      "denoise": "{{denoise}}"
+    }
+  },
+  "13": {
+    "class_type": "VAEDecode",
+    "inputs": {
+      "samples": ["12", 0],
+      "vae": ["8", 2]
+    }
+  },
+  "14": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "images": ["13", 0],
+      "filename_prefix": "{{filename_prefix}}"
+    }
+  }
+}

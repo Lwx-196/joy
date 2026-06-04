@@ -1,0 +1,13 @@
+# dev-spec 自检排除目录（一行一个目录名，按 basename 匹配）
+tasks
+scratch
+case-workbench-ai
+comfyui-workflows
+delivery
+figma-export
+test-results
+stress-results
+data
+logs
+memory
+docs

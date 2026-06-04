@@ -1,0 +1,70 @@
+{
+  "1": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "{{input_image}}"
+    }
+  },
+  "2": {
+    "class_type": "LoadImageMask",
+    "inputs": {
+      "image": "{{focus_mask}}",
+      "channel": "red"
+    }
+  },
+  "3": {
+    "class_type": "FeatherMask",
+    "inputs": {
+      "mask": [
+        "2",
+        0
+      ],
+      "left": 10,
+      "top": 10,
+      "right": 10,
+      "bottom": 10
+    }
+  },
+  "4": {
+    "class_type": "ImageSharpen",
+    "inputs": {
+      "image": [
+        "1",
+        0
+      ],
+      "sharpen_radius": 1,
+      "sigma": 0.7,
+      "alpha": 0.35
+    }
+  },
+  "5": {
+    "class_type": "ImageCompositeMasked",
+    "inputs": {
+      "source": [
+        "4",
+        0
+      ],
+      "destination": [
+        "1",
+        0
+      ],
+      "mask": [
+        "3",
+        0
+      ],
+      "x": 0,
+      "y": 0,
+      "resize_source": false
+    }
+  },
+  "6": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "images": [
+        "5",
+        0
+      ],
+      "filename_prefix": "{{filename_prefix}}"
+    }
+  }
+}

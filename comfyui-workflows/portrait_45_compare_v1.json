@@ -1,0 +1,114 @@
+{
+  "1": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "{{input_image}}"
+    }
+  },
+  "2": {
+    "class_type": "LoadImageMask",
+    "inputs": {
+      "image": "{{subject_mask}}",
+      "channel": "red"
+    }
+  },
+  "3": {
+    "class_type": "CheckpointLoaderSimple",
+    "inputs": {
+      "ckpt_name": "sd-v1-5-inpainting.ckpt"
+    }
+  },
+  "4": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "text": "45 degree clinical portrait, same person, consistent head angle, stable face size, natural shoulder and neck crop, realistic skin texture, preserve clothing and hair silhouette",
+      "clip": ["3", 1]
+    }
+  },
+  "5": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "text": "identity change, face shape drift, different person, different pose, front-facing view, side view, over-smoothed skin, halo, dirty edge, artifacts, painterly",
+      "clip": ["3", 1]
+    }
+  },
+  "6": {
+    "class_type": "InstantIDFaceAnalysis",
+    "inputs": {
+      "provider": "CoreML"
+    }
+  },
+  "7": {
+    "class_type": "FaceKeypointsPreprocessor",
+    "inputs": {
+      "faceanalysis": ["6", 0],
+      "image": ["1", 0]
+    }
+  },
+  "8": {
+    "class_type": "ControlNetLoader",
+    "inputs": {
+      "control_net_name": "control_v11p_sd15_openpose.pth"
+    }
+  },
+  "9": {
+    "class_type": "ControlNetApplyAdvanced",
+    "inputs": {
+      "positive": ["4", 0],
+      "negative": ["5", 0],
+      "control_net": ["8", 0],
+      "image": ["7", 0],
+      "strength": "{{control_strength}}",
+      "start_percent": 0.0,
+      "end_percent": "{{control_end}}"
+    }
+  },
+  "10": {
+    "class_type": "FeatherMask",
+    "inputs": {
+      "mask": ["2", 0],
+      "left": 8,
+      "top": 8,
+      "right": 8,
+      "bottom": 8
+    }
+  },
+  "11": {
+    "class_type": "VAEEncodeForInpaint",
+    "inputs": {
+      "pixels": ["1", 0],
+      "vae": ["3", 2],
+      "mask": ["10", 0],
+      "grow_mask_by": 2
+    }
+  },
+  "12": {
+    "class_type": "KSampler",
+    "inputs": {
+      "model": ["3", 0],
+      "seed": "{{seed}}",
+      "steps": "{{steps}}",
+      "cfg": "{{cfg}}",
+      "sampler_name": "dpmpp_2m",
+      "scheduler": "karras",
+      "positive": ["9", 0],
+      "negative": ["9", 1],
+      "latent_image": ["11", 0],
+      "denoise": "{{denoise}}"
+    }
+  },
+  "13": {
+    "class_type": "VAEDecode",
+    "inputs": {
+      "samples": ["12", 0],
+      "vae": ["3", 2]
+    }
+  },
+  "14": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "images": ["13", 0],
+      "filename_prefix": "{{filename_prefix}}"
+    }
+  }
+}
