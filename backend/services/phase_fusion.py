@@ -29,6 +29,7 @@ SOURCE_WEIGHTS: dict[str, float] = {
 _AGREEMENT_BOOST = 1.1
 _MAX_CONFIDENCE = 0.98
 _HELD_THRESHOLD = 0.70
+_WEAK_SIGNAL_THRESHOLD = 0.25
 
 
 @dataclass(frozen=True)
@@ -115,7 +116,9 @@ def fuse_phase_signals(signals: list[PhaseSignal]) -> FusionResult:
     winning_phase = max(phase_scores, key=lambda p: phase_scores[p])
 
     supporting = [s for s in directional if s.phase == winning_phase]
-    opposing = [s for s in directional if s.phase != winning_phase]
+    opposing_all = [s for s in directional if s.phase != winning_phase]
+    opposing = [s for s in opposing_all if s.confidence >= _WEAK_SIGNAL_THRESHOLD]
+    weak_opposing = [s for s in opposing_all if s.confidence < _WEAK_SIGNAL_THRESHOLD]
 
     all_agree = len(opposing) == 0
     conflict_sources = [s.source for s in opposing]
@@ -125,6 +128,9 @@ def fuse_phase_signals(signals: list[PhaseSignal]) -> FusionResult:
         fused_confidence = min(max_conf * _AGREEMENT_BOOST, _MAX_CONFIDENCE)
         parts = [f"{s.source}={s.phase}({s.confidence:.2f})" for s in supporting]
         reasoning = f"agreement: {', '.join(parts)}"
+        if weak_opposing:
+            weak_parts = [f"{s.source}={s.phase}({s.confidence:.2f})" for s in weak_opposing]
+            reasoning += f" (weak opposing ignored: {', '.join(weak_parts)})"
     else:
         max_supporting_conf = max(s.confidence for s in supporting)
         fused_confidence = max_supporting_conf * 0.6

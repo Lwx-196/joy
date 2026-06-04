@@ -325,6 +325,76 @@ class TestDecisionMatrix:
         assert result.phase == "unknown"
 
 
+class TestWeakSignalExemption:
+    """Weak signals (confidence < 0.25) do not trigger conflict penalty."""
+
+    def test_exif_015_does_not_conflict_with_vlm(self):
+        """EXIF at 0.15 + VLM single at 0.90 → agreement (EXIF too weak to conflict)."""
+        signals = [
+            PhaseSignal(source="exif_temporal", phase="before", confidence=0.15),
+            PhaseSignal(source="vlm_single", phase="after", confidence=0.90),
+        ]
+        result = fuse_phase_signals(signals)
+        assert result.phase == "after"
+        assert result.agreement is True
+        assert result.confidence == min(0.90 * 1.1, 0.98)
+        assert "weak opposing ignored" in result.reasoning
+
+    def test_exif_030_still_conflicts_with_vlm(self):
+        """EXIF at 0.30 is above weak threshold → still triggers conflict."""
+        signals = [
+            PhaseSignal(source="exif_temporal", phase="before", confidence=0.30),
+            PhaseSignal(source="vlm_single", phase="after", confidence=0.90),
+        ]
+        result = fuse_phase_signals(signals)
+        assert result.agreement is False
+        assert result.phase == "unknown"  # 0.90 * 0.6 = 0.54 < 0.70
+
+    def test_weak_exif_with_strong_vlm_pair_agreement(self):
+        """EXIF 0.15 + VLM single + VLM pair agree → full agreement boost."""
+        signals = [
+            PhaseSignal(source="exif_temporal", phase="before", confidence=0.15),
+            PhaseSignal(source="vlm_single", phase="after", confidence=0.88),
+            PhaseSignal(source="vlm_pair", phase="after", confidence=0.85),
+        ]
+        result = fuse_phase_signals(signals)
+        assert result.phase == "after"
+        assert result.agreement is True
+        assert result.confidence == pytest.approx(0.968, abs=0.001)
+
+    def test_weak_exif_alone_still_below_threshold(self):
+        """A weak signal alone does not reach held threshold."""
+        signals = [
+            PhaseSignal(source="exif_temporal", phase="before", confidence=0.15),
+        ]
+        result = fuse_phase_signals(signals)
+        assert result.phase == "unknown"
+        assert result.confidence < 0.70
+
+    def test_two_weak_opposing_both_exempted(self):
+        """Two weak opposing signals (both < 0.25) → both exempted."""
+        signals = [
+            PhaseSignal(source="path_rules", phase="before", confidence=0.20),
+            PhaseSignal(source="exif_temporal", phase="before", confidence=0.15),
+            PhaseSignal(source="vlm_single", phase="after", confidence=0.90),
+        ]
+        result = fuse_phase_signals(signals)
+        assert result.phase == "after"
+        assert result.agreement is True
+
+    def test_one_weak_one_strong_opposing(self):
+        """Weak EXIF exempted but strong path_rules still conflicts."""
+        signals = [
+            PhaseSignal(source="path_rules", phase="before", confidence=0.92),
+            PhaseSignal(source="exif_temporal", phase="before", confidence=0.15),
+            PhaseSignal(source="vlm_single", phase="after", confidence=0.90),
+        ]
+        result = fuse_phase_signals(signals)
+        assert result.agreement is False
+        assert "path_rules" in result.conflict_sources
+        assert "exif_temporal" not in result.conflict_sources
+
+
 class TestEdgeCases:
 
     def test_duplicate_source_both_counted(self):
