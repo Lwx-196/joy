@@ -2,10 +2,17 @@ import json
 import subprocess
 from pathlib import Path
 
+import pytest
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 GPT54_PROVIDER = Path("/Users/a1234/Desktop/飞书Claude/scripts/providers/gpt54.js")
 GEMINI_FLASH_PROVIDER = Path("/Users/a1234/Desktop/飞书Claude/scripts/providers/gemini-flash.js")
+
+pytestmark = pytest.mark.skipif(
+    not GPT54_PROVIDER.exists() or not GEMINI_FLASH_PROVIDER.exists(),
+    reason="飞书Claude provider JS not present (CI)",
+)
 
 
 def _run_node(script: str) -> dict:
