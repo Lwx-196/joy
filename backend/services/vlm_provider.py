@@ -151,6 +151,44 @@ def _gcloud_adc_token() -> str | None:
     return result.stdout.strip() or None
 
 
+class _GoogleAuthTokenProvider:
+    """In-process ADC token minting via google-auth (no gcloud subprocess).
+
+    Lazily resolves Application Default Credentials on first use, then lets the
+    library cache and auto-refresh the access token. This removes the fragile
+    per-request gcloud subprocess (spawn + 30s timeout + PATH/login coupling)
+    and keeps long judge batches from losing the token mid-run.
+    """
+
+    def __init__(
+        self,
+        scopes: tuple[str, ...] = ("https://www.googleapis.com/auth/cloud-platform",),
+    ) -> None:
+        self._scopes = list(scopes)
+        self._credentials: Any = None
+        self._transport: Any = None
+
+    def __call__(self) -> str | None:
+        try:
+            if self._credentials is None:
+                import google.auth
+                from google.auth.transport.requests import Request
+
+                self._credentials, _ = google.auth.default(scopes=self._scopes)
+                self._transport = Request()
+            if not self._credentials.valid:
+                self._credentials.refresh(self._transport)
+        except Exception:  # noqa: BLE001 - 任何凭证/刷新失败按缺 token 处理，交上层 fail-closed
+            return None
+        return self._credentials.token
+
+
+def _resolve_vertex_token_provider(env: dict[str, str]) -> TokenProvider:
+    if (env.get("CASE_WORKBENCH_VERTEX_TOKEN_MODE") or "").strip().lower() == "gcloud":
+        return _gcloud_adc_token
+    return _GoogleAuthTokenProvider()
+
+
 def _data_url(image: _PreparedImage) -> str:
     encoded = base64.b64encode(image.data).decode("ascii")
     return f"data:{image.mime};base64,{encoded}"
@@ -454,13 +492,13 @@ class VLMProvider:
         env: dict[str, str] | None = None,
         *,
         post_json: PostJson = _post_json,
-        token_provider: TokenProvider = _gcloud_adc_token,
+        token_provider: TokenProvider | None = None,
         sleep: Sleep = time.sleep,
         jitter: Jitter | None = None,
     ) -> None:
         self.env = dict(env or {})
         self._post_json = post_json
-        self._token_provider = token_provider
+        self._token_provider = token_provider or _resolve_vertex_token_provider(self.env)
         self._sleep = sleep
         self._jitter = jitter if jitter is not None else self._default_jitter
         self._rate_lock = threading.Lock()

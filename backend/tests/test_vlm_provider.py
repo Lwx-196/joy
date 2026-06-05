@@ -487,3 +487,77 @@ def test_call_vision_batch_passes_request_purpose(tmp_path: Path) -> None:
     assert len(responses) == 1
     assert len(captured) == 1
     assert "classifier-model" in captured[0]
+
+
+class _FakeCreds:
+    def __init__(self, token: str = "live-token") -> None:
+        self.valid = False
+        self.token = token
+
+    def refresh(self, request: object) -> None:  # noqa: ARG002 - 接口签名占位
+        self.valid = True
+
+
+def test_resolve_vertex_token_provider_defaults_to_in_process_google_auth() -> None:
+    from backend.services import vlm_provider
+
+    provider = vlm_provider._resolve_vertex_token_provider({})
+    assert isinstance(provider, vlm_provider._GoogleAuthTokenProvider)
+
+
+def test_resolve_vertex_token_provider_opts_out_to_gcloud_subprocess() -> None:
+    from backend.services import vlm_provider
+
+    provider = vlm_provider._resolve_vertex_token_provider(
+        {"CASE_WORKBENCH_VERTEX_TOKEN_MODE": "gcloud"}
+    )
+    assert provider is vlm_provider._gcloud_adc_token
+
+
+def test_google_auth_token_provider_is_lazy_and_caches(monkeypatch) -> None:
+    import google.auth
+
+    from backend.services import vlm_provider
+
+    calls = {"n": 0}
+
+    def fake_default(scopes=None):  # noqa: ANN001
+        calls["n"] += 1
+        return _FakeCreds(), "quota-proj"
+
+    monkeypatch.setattr(google.auth, "default", fake_default)
+
+    provider = vlm_provider._GoogleAuthTokenProvider()
+    assert calls["n"] == 0  # 懒加载：构造时不得触发 google.auth.default
+
+    assert provider() == "live-token"
+    assert provider() == "live-token"
+    assert calls["n"] == 1  # 凭证缓存复用，只解析一次
+
+
+def test_google_auth_token_provider_returns_none_on_failure(monkeypatch) -> None:
+    import google.auth
+
+    from backend.services import vlm_provider
+
+    def boom(scopes=None):  # noqa: ANN001
+        raise RuntimeError("no ADC")
+
+    monkeypatch.setattr(google.auth, "default", boom)
+
+    provider = vlm_provider._GoogleAuthTokenProvider()
+    assert provider() is None  # fail-closed，不抛
+
+
+def test_vlm_provider_construction_does_not_eagerly_resolve_google_auth(monkeypatch) -> None:
+    import google.auth
+
+    from backend.services.vlm_provider import VLMProvider
+
+    def boom(scopes=None):  # noqa: ANN001
+        raise AssertionError("google.auth.default 不得在构造期执行")
+
+    monkeypatch.setattr(google.auth, "default", boom)
+
+    # 不传 token_provider：默认走 in-process resolver，但必须懒——构造不触发 default()
+    VLMProvider(env={})
