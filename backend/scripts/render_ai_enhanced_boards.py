@@ -575,15 +575,27 @@ def main() -> None:
     parser.add_argument("--native-enhance", action="store_true",
                         help="owner 管线：渲染器原生 focus-scoped 局部增强"
                              "(gpt-image-2 忠实 + 姿态锁 + 稳定回退) → matte 纯黑底；替代 gemini bolt-on")
+    parser.add_argument("--enhance-model", default="gpt-image-2",
+                        help="原生增强模型（默认 gpt-image-2 忠实；gemini-3-pro-image-preview=gemini 基础款实验）")
+    parser.add_argument("--enhance-direction", default="heal", choices=["strict", "heal"],
+                        help="增强方向：heal(默认)=恢复预览定向 prompt（身份锁不变 + 往恢复良好理想化，"
+                             "4 案例验证一致安全）；strict=旧版忠实严格 prompt（只许极轻、偏保守）")
     args = parser.parse_args()
 
     if args.native_enhance:
         # 原生强化器是 node subprocess（继承 os.environ）：注入图像 creds + 顶掉写死的 gemini-4k 死模型。
-        for _env_fn in ("tuzi_image.local.env", "flashapi_image.local.env"):
+        _enhance_env_files = ["tuzi_image.local.env", "flashapi_image.local.env"]
+        if args.enhance_model.startswith("gemini"):
+            # gemini 走 relay 的 vertex 成员（6-05「Vertex 404」是 -4k 死模型 id 而非鉴权问题；
+            # 基础款 gemini-3-pro-image-preview 可达）。t54 ADC 若存在一并注入兜底。
+            _enhance_env_files.append("t54_vertex_adc.local.env")
+        for _env_fn in _enhance_env_files:
             _p = _find_env_file(_env_fn)
             if _p:
                 os.environ.update(_load_env_from_file(_p))
-        os.environ["CASE_LAYOUT_ENHANCE_MODEL"] = "gpt-image-2"
+        os.environ["CASE_LAYOUT_ENHANCE_MODEL"] = args.enhance_model
+        os.environ["CASE_LAYOUT_ENHANCE_DIRECTION"] = args.enhance_direction
+        print(f"  [native] enhance_model={args.enhance_model} direction={args.enhance_direction}")
 
     case_layout = _load_module("case_layout_board", SKILL_ROOT / "case_layout_board.py")
     _enable_manual_pairing(case_layout)  # 姿态门只警告不排除（人工配对逻辑，部位可比性标准）
@@ -656,7 +668,7 @@ def main() -> None:
             if args.native_enhance:
                 print(f"  [native] focus = {[f['area'] for f in (native_focus or [])]}")
                 if manifest.get("status") == "ok":
-                    manifest["enhance_model"] = "gpt-image-2"
+                    manifest["enhance_model"] = args.enhance_model
                     inspect_root = args.output_dir / ".native-enhance" / customer
                     try:
                         manifest = case_layout.apply_after_enhancements(
