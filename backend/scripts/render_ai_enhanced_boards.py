@@ -463,8 +463,8 @@ def _make_slot_transform(case_layout, providers, prompt: str, stats: dict, *,
                   ) -> tuple[Image.Image, Image.Image]:
         stats["total"] += 1
 
-        before_img = _composite_on_black(before_img, slot, case_layout)
-        after_img = _composite_on_black(after_img, slot, case_layout)
+        before_img = _rembg_composite_on_black(before_img)
+        after_img = _rembg_composite_on_black(after_img)
 
         # advisory only：覆盖率仅记录，绝不因"人偏小/大小不一致"跳过 AI（部位可比性标准）
         _log_cell_coverage(before_img, after_img, slot)
@@ -540,8 +540,41 @@ def _native_focus_targets(case_layout, prm, treatment: str):
     return case_layout.parse_focus_targets(tokens)
 
 
-# 背景暗像素地板阈值：max(RGB) < 此值 → 纯黑（灭 rembg 误留的暗背景缝；远低于最暗五官眉≈125）。
+# 背景暗像素地板阈值：max(RGB) < 此值 → 纯黑（灭 rembg 误留的暗背景缝）。
+# 仅在 eroded person mask 外生效——安全区内保留所有暗五官（瞳孔/虹膜/鼻孔/深色发根）。
 _BLACK_FLOOR = 50
+
+
+def _audit_eye_preservation(orig_arr, out_arr, kept_mask):
+    """对比输入/输出眼部区域亮度，检测瞳孔/虹膜是否被异常涂黑（仅 warning，不阻塞）。"""
+    import numpy as np
+
+    rows = np.where(kept_mask.any(axis=1))[0]
+    cols = np.where(kept_mask.any(axis=0))[0]
+    if len(rows) == 0 or len(cols) == 0:
+        return
+    y0, y1 = int(rows[0]), int(rows[-1])
+    x0, x1 = int(cols[0]), int(cols[-1])
+    h, w = y1 - y0, x1 - x0
+    if h < 40 or w < 40:
+        return
+    ey0 = y0 + int(h * 0.22)
+    ey1 = y0 + int(h * 0.45)
+    ex0 = x0 + int(w * 0.1)
+    ex1 = x0 + int(w * 0.9)
+    eye_mask = kept_mask[ey0:ey1, ex0:ex1]
+    if not eye_mask.any():
+        return
+    orig_eye = orig_arr[ey0:ey1, ex0:ex1].astype(np.float64)
+    out_eye = out_arr[ey0:ey1, ex0:ex1].astype(np.float64)
+    orig_mean = float(orig_eye[eye_mask].mean())
+    out_mean = float(out_eye[eye_mask].mean())
+    if orig_mean > 20 and out_mean < orig_mean * 0.6:
+        logger.warning(
+            "  [pupil-audit] 眼部区域亮度显著下降 (%.1f → %.1f, -%.0f%%)，"
+            "可能瞳孔/虹膜被误杀",
+            orig_mean, out_mean, (1 - out_mean / orig_mean) * 100,
+        )
 
 
 def _rembg_composite_on_black(pil_img: Image.Image) -> Image.Image:
@@ -551,6 +584,7 @@ def _rembg_composite_on_black(pil_img: Image.Image) -> Image.Image:
     且 MediaPipe 前景 mask 留脏边——污染人物。rembg 人像分割完整保人物（含肩/领自然过渡），
     边缘干净、无截断，对 studio 深底/灰底都稳。
     """
+    import cv2
     import numpy as np
     from rembg import remove
 
@@ -563,18 +597,20 @@ def _rembg_composite_on_black(pil_img: Image.Image) -> Image.Image:
     alpha = (m / 255.0) * kept
     arr = np.asarray(rgb, dtype=np.float64)
     out = np.clip(arr * alpha[..., None], 0, 255).astype(np.uint8)
-    # 背景纯黑兜底①：rembg 会把 studio 暗背景布误判前景(mask=255)，留下 ~8-17 的暗块与
-    # 纯黑(0)交界成「拼接缝」（2026-06-06 owner 揪出）。暗背景(≤17)与最暗五官(眉≈125)鸿沟
-    # 极大 → 全图暗像素地板：max(RGB)<_BLACK_FLOOR 的像素归 0，统一灭平背景，绝不伤五官/肤质。
-    out[out.max(axis=2) < _BLACK_FLOOR] = 0
+    # 背景纯黑兜底①：erode person mask 建「安全区」——安全区内（瞳孔/虹膜/鼻孔/深色发根）
+    # 保留所有暗像素，只在安全区外做地板清零灭 rembg 误留的暗背景缝。
+    erode_r = max(10, out.shape[0] // 60)
+    person_safe = cv2.erode(kept.astype(np.uint8),
+                            np.ones((erode_r, erode_r), np.uint8)) > 0
+    out[(out.max(axis=2) < _BLACK_FLOOR) & ~person_safe] = 0
     # 背景纯黑兜底②：背景布被光照到的「亮折边」>地板阈值会留成竖线残痕；地板清平暗背景后
     # 它成了被黑色隔开的孤立岛 → 取最大非黑连通域只留人物，灭折边残线（无 98% 守卫）。
-    import cv2
     nonblack = (out.max(axis=2) > 0).astype(np.uint8)
     num, labels, stats, _ = cv2.connectedComponentsWithStats(nonblack, connectivity=8)
     if num > 2:
         largest = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
         out[labels != largest] = 0
+    _audit_eye_preservation(arr, out, kept)
     return Image.fromarray(out)
 
 
