@@ -855,6 +855,8 @@ def main() -> None:
     parser.add_argument("--enhance-direction", default="heal", choices=["strict", "heal"],
                         help="增强方向：heal(默认)=恢复预览定向 prompt（身份锁不变 + 往恢复良好理想化，"
                              "4 案例验证一致安全）；strict=旧版忠实严格 prompt（只许极轻、偏保守）")
+    parser.add_argument("--scale", type=float, default=2.0,
+                        help="板输出分辨率倍率（默认 2.0 = 3840 宽 4K；1.0 = 1920 旧版）")
     parser.add_argument("--board-qa", action="store_true",
                         help="渲染后跑 D6 板级 VLM 质量门（白边/留白/标注缺陷 → held），需 Vertex ADC 凭证")
     parser.add_argument("--case-dir", type=Path, default=None,
@@ -1012,6 +1014,7 @@ def main() -> None:
             try:
                 render_mod.render_from_manifest(
                     manifest, out_path, slot_transform=transform_fn,
+                    scale=args.scale,
                 )
                 status = "OK" if stats["failed"] == 0 else "PARTIAL"
                 print(f"  ✅ {out_path} (增强 {stats['ok']}/{stats['total']})")
