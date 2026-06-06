@@ -356,25 +356,92 @@ def _fade_bottom_to_black(alpha, keep_frac: float = 0.72, black_frac: float = 0.
     return alpha * ramp[:, None]
 
 
-def _enable_manual_pairing(case_layout) -> None:
-    """让 AI-enhance lane 走人工配对逻辑：姿态门只警告不排除（绕过 auto 模式的姿态差排除）。
+def _log_manifest_pose_info(manifest: dict) -> None:
+    """从 manifest 提取并打印每个角度的姿态配对信息（含被拒绝的角度及原因）。"""
+    groups = manifest.get("groups", [])
+    for group in groups:
+        selected = group.get("selected_slots", {})
+        rejections = group.get("rejection_reasons", [])
+        for slot in ("front", "oblique", "side"):
+            if slot in selected:
+                pd = selected[slot].get("pose_delta", {})
+                logger.info("  [pose] %s: yaw=%.1f pitch=%.1f weighted=%.1f → PASS",
+                            slot, pd.get("yaw", 0), pd.get("pitch", 0), pd.get("weighted", 0))
+            else:
+                pose_rej = [r for r in rejections
+                            if r.get("slot") == slot and r.get("reason") == "pose_delta_exceeded"]
+                if pose_rej:
+                    logger.warning("  [pose] %s: 姿态差超阈值 → 已排除 (%s)", slot, pose_rej[0].get("detail", ""))
+                else:
+                    no_cand = [r for r in rejections if r.get("slot") == slot]
+                    if no_cand:
+                        logger.info("  [pose] %s: 排除 (%s)", slot, no_cand[0].get("reason", "unknown"))
 
-    对应 skill 里 `manual_pair` 分支的行为（case_layout_board.py:2019 姿态差大也保留该角度），
-    也对应 owner 用 organize/pick 工具人工配对的工作流。单一明确的术前/术后对，姿态差超阈值
-    也保留，交看板人工复核——一致性标准 = 治疗部位可比性（6-04），不是头部姿态严格一致。
-    `CASE_AIENHANCE_POSE_GATE=strict` 可恢复严格 auto 排除。
+
+def _hybrid_pose_revalidate(manifest: dict, case_layout) -> dict:
+    """用 pose_backend hybrid 模式二次校验 manifest 中选中的配对，侧脸比 FaceMesh 更准。
+
+    超阈值的 slot 从 manifest 中移除（降级 template）。fail-open：pose_backend 不可用时跳过。
     """
-    if os.environ.get("CASE_AIENHANCE_POSE_GATE", "strict").lower() == "strict":
-        return
-    orig = case_layout.pose_delta_within_threshold
+    try:
+        from backend.services.pose_backend import pose_backend_mode, FaceMeshPoseBackend
+        mode = pose_backend_mode()
+        if mode == "facemesh":
+            return manifest
+        logger.info("  [pose-hybrid] 二次校验 mode=%s", mode)
+    except ImportError:
+        return manifest
 
-    def _manual_pass(slot, pose_delta):
-        if not orig(slot, pose_delta):
-            logger.info("  [pose] %s 姿态差超阈值(weighted=%.1f) → manual-pair 放行，交看板复核",
-                        slot, float(pose_delta.get("weighted", -1)))
-        return True
+    try:
+        if mode == "hybrid":
+            from backend.services.pose_backend import HybridPoseBackend
+            backend = HybridPoseBackend()
+        elif mode == "sixdrep":
+            from backend.services.pose_backend import SixDRepNetBackend
+            backend = SixDRepNetBackend()
+        else:
+            return manifest
+    except Exception as exc:
+        logger.warning("  [pose-hybrid] backend 初始化失败(%s) → 跳过二次校验", exc)
+        return manifest
 
-    case_layout.pose_delta_within_threshold = _manual_pass
+    from PIL import Image
+    groups = manifest.get("groups", [])
+    for group in groups:
+        selected = group.get("selected_slots", {})
+        to_remove = []
+        for slot, info in selected.items():
+            before_path = info.get("before", {}).get("path")
+            after_path = info.get("after", {}).get("path")
+            if not before_path or not after_path:
+                continue
+            try:
+                before_pose = backend.estimate(Image.open(before_path))
+                after_pose = backend.estimate(Image.open(after_path))
+                if before_pose.yaw is None or after_pose.yaw is None:
+                    continue
+                delta = case_layout.compute_pose_delta(
+                    {"yaw": before_pose.yaw, "pitch": before_pose.pitch or 0, "roll": before_pose.roll or 0},
+                    {"yaw": after_pose.yaw, "pitch": after_pose.pitch or 0, "roll": after_pose.roll or 0},
+                )
+                if not case_layout.pose_delta_within_threshold(slot, delta):
+                    logger.warning("  [pose-hybrid] %s: 二次校验不通过 (yaw=%.1f weighted=%.1f) → 移除",
+                                   slot, delta["yaw"], delta["weighted"])
+                    to_remove.append(slot)
+                else:
+                    logger.info("  [pose-hybrid] %s: 二次校验 PASS (yaw=%.1f weighted=%.1f)",
+                                slot, delta["yaw"], delta["weighted"])
+            except Exception as exc:
+                logger.warning("  [pose-hybrid] %s: 估计失败(%s) → 保留原判", slot, exc)
+        for slot in to_remove:
+            del selected[slot]
+            group.setdefault("rejection_reasons", []).append({
+                "group_name": group.get("group_name", ""),
+                "slot": slot, "phase": None,
+                "reason": "hybrid_pose_revalidation",
+                "detail": f"{slot} hybrid pose 二次校验姿态差超阈值",
+            })
+    return manifest
 
 
 def _apply_treatment_lock(after_img: Image.Image, enhanced_img: Image.Image,
@@ -699,10 +766,10 @@ def main() -> None:
         sys.exit(1)
 
     board_qa = None
-    if args.board_qa:
-        _qa_env_p = _find_env_file("t54_vertex_adc.local.env")
-        if _qa_env_p:
-            os.environ.update(_load_env_from_file(_qa_env_p))
+    _qa_env_p = _find_env_file("t54_vertex_adc.local.env")
+    if _qa_env_p:
+        os.environ.update(_load_env_from_file(_qa_env_p))
+    if args.board_qa or _qa_env_p:
         try:
             from backend.services.board_delivery_qa import BoardDeliveryQA
             from backend.services.vlm_provider import VLMProvider
@@ -712,7 +779,8 @@ def main() -> None:
                                      str(Path(__file__).resolve().parent.parent.parent / "case-workbench.db"))
             qa_conn = sqlite3.connect(db_path)
             board_qa = BoardDeliveryQA(vlm, qa_conn, purpose="judge")
-            logger.info("[board-qa] D6 VLM 质量门已就绪 (db=%s)", db_path)
+            logger.info("[board-qa] D6 VLM 质量门已就绪 (db=%s%s)",
+                        db_path, "" if args.board_qa else "，凭证自动发现")
         except Exception as exc:
             logger.warning("[board-qa] 初始化失败(%s) → 禁用板级 QA", exc)
 
@@ -768,6 +836,9 @@ def main() -> None:
                     "status": "MANIFEST_FAILED", "error": str(exc)[:200],
                 })
                 continue
+
+            _log_manifest_pose_info(manifest)
+            manifest = _hybrid_pose_revalidate(manifest, case_layout)
 
             stats = {"total": 0, "ok": 0, "failed": 0, "skipped": 0, "locked": 0}
             if args.native_enhance:
