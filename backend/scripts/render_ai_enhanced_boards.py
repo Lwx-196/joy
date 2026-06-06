@@ -510,6 +510,41 @@ def _fidelity_check(raw_img: Image.Image, enhanced_img: Image.Image,
         return True
 
 
+def _classical_fallback(after_img: Image.Image, focus_targets: list[str],
+                        slot: str, stats: dict) -> Image.Image | None:
+    """AI 增强失败或保真度拒绝时，尝试零 AI 古典锐化增强（clarity preset）。
+
+    成功返回增强后的 PIL Image；失败返回 None（调用方继续用未增强原图）。
+    K-1 契约：classical_enhance 本身失败安全——返回原路径不抛异常。
+    """
+    try:
+        from backend.services.classical_enhance import unsharp_focal_enhance
+    except ImportError:
+        logger.info("  [classical] %s: classical_enhance 不可用，跳过 fallback", slot)
+        return None
+
+    try:
+        with tempfile.TemporaryDirectory(prefix="classical-fb-") as td:
+            tdp = Path(td)
+            src_p = tdp / "after_for_classical.png"
+            after_img.save(src_p, format="PNG")
+            out_p = unsharp_focal_enhance(
+                src_p, focus_targets=focus_targets,
+                output_dir=tdp / "classical_out", preset="clarity",
+            )
+            if out_p == src_p:
+                logger.info("  [classical] %s: classical 返回原图（无增强效果）", slot)
+                return None
+            result = Image.open(out_p).convert("RGB")
+            result.load()
+        logger.info("  [classical] %s: classical clarity fallback 成功", slot)
+        stats["classical_fallback"] = stats.get("classical_fallback", 0) + 1
+        return result
+    except Exception as exc:
+        logger.warning("  [classical] %s: classical fallback 失败(%s)", slot, exc)
+        return None
+
+
 def _make_slot_transform(case_layout, providers, prompt: str, stats: dict, *,
                          dry_run: bool = False, use_cache: bool = True,
                          focus_targets: list[str] | None = None,
@@ -570,6 +605,9 @@ def _make_slot_transform(case_layout, providers, prompt: str, stats: dict, *,
 
             fidelity_ok = _fidelity_check(after_img, enhanced_img, slot, stats)
             if not fidelity_ok:
+                classical = _classical_fallback(after_img, focus_targets, slot, stats)
+                if classical is not None:
+                    return before_img, classical
                 return before_img, after_img
 
             stats["ok"] += 1
@@ -581,6 +619,9 @@ def _make_slot_transform(case_layout, providers, prompt: str, stats: dict, *,
             elapsed = time.time() - t0
             logger.error("  [AI] %s: FAILED (%.1fs): %s", slot, elapsed, exc)
             stats["failed"] += 1
+            classical = _classical_fallback(after_img, focus_targets, slot, stats)
+            if classical is not None:
+                return before_img, classical
             return before_img, after_img
 
     return transform
@@ -601,10 +642,24 @@ _REGION_EFFECT = {
 
 
 def _native_focus_targets(case_layout, prm, treatment: str):
-    """从治疗名推导 native 强化器 focus_targets（parse_focus_targets 格式）。"""
+    """从治疗名推导 native 强化器 focus_targets（parse_focus_targets 格式）。
+
+    用 atlas 增强：
+    - 区域解析走 prm.parse_procedures（内部已用 atlas.extract_regions）
+    - 每个区域附加 atlas 元数据（optimal_views / effect_signal / zone）供下游角度过滤
+    """
+    from backend.services import facial_region_atlas as atlas
+
     regions = prm.parse_procedures(treatment).get("all_regions", [])
     tokens = [f"{r}:{_REGION_EFFECT.get(r, r + '区域改善、过渡自然')}" for r in regions]
-    return case_layout.parse_focus_targets(tokens)
+    targets = case_layout.parse_focus_targets(tokens)
+    for t in targets:
+        key = atlas.resolve_region_key(t.get("area", ""))
+        if key:
+            t["optimal_views"] = atlas.region_views(key)
+            t["effect_signal"] = atlas.region_effect(key)
+            t["zone"] = atlas.region_zone(key)
+    return targets
 
 
 # 背景暗像素地板阈值：max(RGB) < 此值 → 纯黑（灭 rembg 误留的暗背景缝）。
