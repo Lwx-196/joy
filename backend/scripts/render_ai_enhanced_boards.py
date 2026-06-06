@@ -385,7 +385,7 @@ def _hybrid_pose_revalidate(manifest: dict, case_layout) -> dict:
     超阈值的 slot 从 manifest 中移除（降级 template）。fail-open：pose_backend 不可用时跳过。
     """
     try:
-        from backend.services.pose_backend import pose_backend_mode, FaceMeshPoseBackend
+        from backend.services.pose_backend import pose_backend_mode
         mode = pose_backend_mode()
         if mode == "facemesh":
             return manifest
