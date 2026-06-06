@@ -152,6 +152,7 @@ class BoardDeliveryQA:
         self._timeout = float(timeout)
         self._purpose = purpose
         if conn is not None:
+            conn.row_factory = sqlite3.Row
             conn.execute(_CREATE_TABLE)
             conn.commit()
 

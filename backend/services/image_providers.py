@@ -30,9 +30,14 @@ class ImageProvider:
     model: str
     api_format: str = "images_edit"
     timeout_ms: int = DEFAULT_TIMEOUT_MS
+    project: str = ""   # vertex_generate_content 专用
+    location: str = ""  # vertex_generate_content 专用
 
     @property
     def ready(self) -> bool:
+        if self.api_format == "vertex_generate_content":
+            # Vertex 走 ADC（gcloud token），不需要 base_url/api_key
+            return bool(self.project and self.location and self.model)
         return bool(self.base_url and self.api_key and self.model)
 
 
@@ -83,6 +88,16 @@ def build_registry(env: dict[str, str]) -> dict[str, ImageProvider]:
             names.add(k[len("PANEL_IMG_"):-len("_BASE_URL")])
     for upper in names:
         reg[upper.lower()] = _seed_from_prefix(env, upper.lower(), f"PANEL_IMG_{upper}")
+    # Vertex ADC 出图（gemini image via generateContent）——通道宕机时的可靠兜底。
+    vertex_project = (env.get("CASE_WORKBENCH_VERTEX_PROJECT") or env.get("VLM_PROJECT") or "").strip()
+    if vertex_project:
+        vertex_location = (env.get("CASE_WORKBENCH_VERTEX_LOCATION") or env.get("VLM_LOCATION") or "global").strip()
+        vertex_model = (env.get("CASE_WORKBENCH_VERTEX_IMAGE_MODEL") or "gemini-3-pro-image-preview").strip()
+        reg["vertex"] = ImageProvider(
+            name="vertex", base_url="", api_key="", model=vertex_model,
+            api_format="vertex_generate_content",
+            project=vertex_project, location=vertex_location,
+        )
     return reg
 
 
@@ -98,16 +113,120 @@ def resolve_chain(env: dict[str, str], explicit: list[str] | None = None) -> lis
     return chain
 
 
+_ADC_TOKEN_CACHE: dict[str, object] = {}
+_ADC_TOKEN_TTL_S = 2400.0  # 40 分钟（ADC token 有效期 ~1h，留余量）
+
+
+def _adc_token(*, force_refresh: bool = False) -> str:
+    """In-process ADC access token via google-auth（不打印）。进程内缓存 40min + 瞬时失败重试 3 次。
+
+    取代 gcloud 子进程（spawn + 30s 超时 + 偶发刷新失败 + 并发锁竞争）：用 google-auth 在进程内
+    解析 ADC 凭证一次并缓存，token 由库内 refresh 签发。契约不变（force_refresh / 缓存 / 抛错）。
+    """
+    import time
+
+    cached = _ADC_TOKEN_CACHE.get("token")
+    if cached and not force_refresh and (time.monotonic() - float(_ADC_TOKEN_CACHE.get("ts", 0.0))) < _ADC_TOKEN_TTL_S:
+        return str(cached)
+
+    last_err: Exception | None = None
+    for _attempt in (1, 2, 3):
+        try:
+            import google.auth
+            from google.auth.transport.requests import Request
+
+            creds = _ADC_TOKEN_CACHE.get("creds")
+            if creds is None:
+                creds, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
+                _ADC_TOKEN_CACHE["creds"] = creds
+            creds.refresh(Request())
+            token = creds.token
+            if token:
+                _ADC_TOKEN_CACHE["token"] = token
+                _ADC_TOKEN_CACHE["ts"] = time.monotonic()
+                return str(token)
+            last_err = RuntimeError("google-auth 返回空 token")
+        except Exception as exc:  # noqa: BLE001 — 凭证/刷新瞬时失败，丢弃缓存凭证重试再换
+            last_err = exc
+            _ADC_TOKEN_CACHE.pop("creds", None)
+        time.sleep(1.5)
+    raise RuntimeError(f"vertex: 无法获取 ADC token（重试 3 次后）: {last_err}")
+
+
+def vertex_generate_content(provider: ImageProvider, image_bytes: bytes, prompt: str,
+                            *, mime: str = "image/png") -> bytes:
+    """Vertex ADC gemini 出图（img2img via generateContent）。返回生成图字节，失败抛异常。
+
+    aiplatform 端实测 ~1/3 概率瞬时掉线（SSL EOF / RemoteDisconnected）→ 内置退避
+    重试 4 次（2/4/8s），把单次 ~67% 成功率拉到 ~99%。401 刷 token、5xx/429 退避重试、
+    4xx 直接抛（真错误如 model 不存在）。
+    """
+    import base64
+    import time
+
+    import requests
+
+    token = _adc_token()
+    host = ("aiplatform.googleapis.com" if provider.location == "global"
+            else f"{provider.location}-aiplatform.googleapis.com")
+    url = (f"https://{host}/v1beta1/projects/{provider.project}/locations/{provider.location}"
+           f"/publishers/google/models/{provider.model}:generateContent")
+    payload = {
+        "contents": [{"role": "user", "parts": [
+            {"inlineData": {"mimeType": mime, "data": base64.b64encode(image_bytes).decode("ascii")}},
+            {"text": prompt},
+        ]}],
+        "generationConfig": {"responseModalities": ["TEXT", "IMAGE"]},
+    }
+    timeout_s = max(provider.timeout_ms, 180_000) / 1000.0
+    last_err: Exception | None = None
+    for attempt in range(1, 5):
+        session = requests.Session()
+        session.trust_env = False
+        try:
+            r = session.post(url, headers={"Authorization": f"Bearer {token}"},
+                             json=payload, timeout=timeout_s)
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout,
+                requests.exceptions.SSLError) as exc:  # 瞬时掉线 → 退避重试
+            last_err = exc
+            time.sleep(min(2 ** attempt, 10))
+            continue
+        if r.status_code == 401:  # token 过期 → 刷新（不计退避）
+            token = _adc_token(force_refresh=True)
+            last_err = RuntimeError("401 token expired")
+            continue
+        if r.status_code in (408, 429, 500, 502, 503, 504):  # 瞬时服务端 → 退避重试
+            last_err = RuntimeError(f"HTTP {r.status_code}: {r.text[:160]}")
+            time.sleep(min(2 ** attempt, 10))
+            continue
+        if r.status_code != 200:
+            raise RuntimeError(f"{provider.name} generateContent HTTP {r.status_code}: {r.text[:300]}")
+        data = r.json()
+        for cand in data.get("candidates", []):
+            for part in (cand.get("content", {}).get("parts") or []):
+                inline = part.get("inlineData") or part.get("inline_data")
+                if inline and inline.get("data"):
+                    return base64.b64decode(inline["data"])
+        last_err = RuntimeError(f"无 image part（偶发 text-only）: {str(data)[:160]}")
+        time.sleep(2)
+    raise RuntimeError(f"{provider.name} generateContent 重试 4 次仍失败: {last_err}")
+
+
 def images_edit(provider: ImageProvider, image_bytes: bytes, prompt: str,
                 *, mime: str = "image/jpeg") -> bytes:
-    """单次 OpenAI 兼容 images/edits 调用，返回生成图字节。失败抛异常。"""
+    """单次生图调用，返回生成图字节。失败抛异常。按 api_format 分派。"""
+    if provider.api_format == "vertex_generate_content":
+        return vertex_generate_content(provider, image_bytes, prompt, mime=mime)
+
     import requests
 
     files = {"image": ("input.jpg", image_bytes, mime)}
     data = {"prompt": prompt, "model": provider.model, "n": "1"}
     # img2img 生图慢（gpt-image-2 实测 ~70-120s）→ 给 ≥180s，盖过 .env 里偏小的 chat 超时
     timeout_s = max(provider.timeout_ms, 180_000) / 1000.0
-    r = requests.post(
+    session = requests.Session()
+    session.trust_env = False
+    r = session.post(
         f"{provider.base_url}/images/edits",
         headers={"Authorization": f"Bearer {provider.api_key}"},
         files=files, data=data, timeout=timeout_s,
@@ -119,7 +238,7 @@ def images_edit(provider: ImageProvider, image_bytes: bytes, prompt: str,
         import base64
         return base64.b64decode(item["b64_json"])
     if item.get("url"):
-        dl = requests.get(item["url"], timeout=60)
+        dl = session.get(item["url"], timeout=60)
         dl.raise_for_status()
         return dl.content
     raise RuntimeError(f"{provider.name} returned neither b64_json nor url")
@@ -142,5 +261,5 @@ def generate_with_fallback(providers: list[ImageProvider], image_bytes: bytes, p
 
 __all__ = [
     "ImageProvider", "load_env_file", "build_registry", "resolve_chain",
-    "images_edit", "generate_with_fallback", "DEFAULT_ENV_FILE",
+    "images_edit", "vertex_generate_content", "generate_with_fallback", "DEFAULT_ENV_FILE",
 ]

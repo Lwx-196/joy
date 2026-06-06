@@ -27,7 +27,8 @@ except ImportError:
 OPENAI_PROVIDERS = {"openai", "openai_responses", "openai-compatible", "openai_compatible", "flashapi"}
 GEMINI_PROVIDERS = {"gemini", "gemini_generate_content"}
 VERTEX_PROVIDERS = {"vertex", "vertex-ai", "vertex_generate_content_adc", "google-vertex"}
-VALID_PROVIDERS = OPENAI_PROVIDERS | GEMINI_PROVIDERS | VERTEX_PROVIDERS
+OLLAMA_PROVIDERS = {"ollama", "local"}
+VALID_PROVIDERS = OPENAI_PROVIDERS | GEMINI_PROVIDERS | VERTEX_PROVIDERS | OLLAMA_PROVIDERS
 TRANSIENT_STATUS_CODES = {429, 500, 502, 503, 504}
 
 PostJson = Callable[[str, dict[str, str], dict[str, Any], float], dict[str, Any]]
@@ -509,8 +510,27 @@ class VLMProvider:
             return ProviderConfig(provider="", model=selected_model, status="blocked_missing_vlm_provider_config")
         if selected_provider not in VALID_PROVIDERS:
             return ProviderConfig(provider=selected_provider, model=selected_model, status="blocked_unsupported_vlm_provider")
+        if selected_provider in OLLAMA_PROVIDERS and not selected_model:
+            selected_model = (
+                env.get("OLLAMA_MODEL") or env.get("VLM_OLLAMA_MODEL") or "qwen2.5vl:latest"
+            ).strip()
         if not selected_model:
             return ProviderConfig(provider=selected_provider, status="blocked_missing_vlm_model_config")
+
+        if selected_provider in OLLAMA_PROVIDERS:
+            resolved_model = selected_model
+            resolved_endpoint = selected_endpoint or (
+                env.get("OLLAMA_ENDPOINT") or env.get("VLM_OLLAMA_ENDPOINT") or "http://localhost:11434"
+            ).strip().rstrip("/")
+            resolved_endpoint = f"{resolved_endpoint}/v1/chat/completions"
+            return ProviderConfig(
+                provider="ollama",
+                model=resolved_model,
+                endpoint=resolved_endpoint,
+                ready=True,
+                status="ready",
+                api_key="ollama",
+            )
 
         if selected_provider in VERTEX_PROVIDERS:
             project = (
@@ -732,6 +752,8 @@ class VLMProvider:
             return {"Content-Type": "application/json", "Authorization": f"Bearer {token}"}
         if config.provider == "gemini_generate_content":
             return {"Content-Type": "application/json", "x-goog-api-key": str(config.api_key)}
+        if config.provider == "ollama":
+            return {"Content-Type": "application/json"}
         return {"Content-Type": "application/json", "Authorization": f"Bearer {config.api_key}"}
 
     def _payload(self, config: ProviderConfig, prompt: str, images: list[_PreparedImage]) -> dict[str, Any]:
@@ -743,7 +765,7 @@ class VLMProvider:
             parts = [{"text": prompt}]
             parts.extend({"inline_data": _inline_data(image)} for image in images)
             return {"contents": [{"role": "user", "parts": parts}], "generationConfig": {"temperature": 0, "responseMimeType": "application/json"}}
-        if config.provider == "openai_chat_completions":
+        if config.provider in ("openai_chat_completions", "ollama"):
             content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
             content.extend({"type": "image_url", "image_url": {"url": _data_url(image)}} for image in images)
             return {
