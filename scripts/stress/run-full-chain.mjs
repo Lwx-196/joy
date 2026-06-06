@@ -259,7 +259,14 @@ async function phaseRender() {
   const batch = await fetchJson(`${backendUrl}/api/cases/render/batch`, {
     method: "POST",
     body: JSON.stringify({ case_ids: enqueueIds, brand: "fumei", template: "tri-compare", semantic_judge: "auto" }),
-  }, { metricName: "render.enqueue" });
+  }, { metricName: "render.enqueue", allowFailure: true });
+  if (!batch || batch.detail?.reason === "pre_render_gate_blocked") {
+    const blocked = batch?.detail?.invalid || [];
+    failures.push({ phase: "render.enqueue", status: 409, body: `pre_render_gate_blocked: ${blocked.length} cases blocked (warning, not fatal)`, severity: "warning" });
+    renderBatchResult = { batch_id: null, total: 0, counts: {}, jobs: [], gate_blocked: blocked };
+    await fs.writeFile(path.join(resultRoot, "render-batch.json"), JSON.stringify(renderBatchResult, null, 2));
+    return;
+  }
   if (!batch.batch_id) return;
   const deadline = Date.now() + timeoutMs;
   let latest = null;

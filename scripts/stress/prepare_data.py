@@ -29,13 +29,16 @@ def _select_case_ids(conn: sqlite3.Connection, requested: str | None, limit: int
         ids.append(126)
     for row in conn.execute(
         """
-        SELECT id
-        FROM cases
-        WHERE trashed_at IS NULL
-          AND id != 126
-        ORDER BY
-          CASE WHEN source_count IS NULL OR source_count = 0 THEN 1 ELSE 0 END,
-          id ASC
+        SELECT c.id
+        FROM cases c
+        WHERE c.trashed_at IS NULL
+          AND c.id != 126
+          AND COALESCE(c.source_count, 0) >= 4
+          AND NOT EXISTS (
+            SELECT 1 FROM review_tickets rt
+            WHERE rt.case_id = c.id AND rt.status = 'open' AND rt.blocks_render = 1
+          )
+        ORDER BY c.source_count DESC, c.id ASC
         LIMIT ?
         """,
         (max(0, limit - len(ids)),),
