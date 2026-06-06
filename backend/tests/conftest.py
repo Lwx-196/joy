@@ -147,6 +147,32 @@ def no_job_pool(monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.fixture
+def sync_job_pool(monkeypatch: pytest.MonkeyPatch):
+    """Run enqueued background jobs synchronously inline (inverse of no_job_pool).
+
+    The async simulate-after endpoint creates a 'queued' job then hands the heavy
+    work to the shared pool, returning immediately. Tests that need to assert the
+    *completed* state (final status / audit / output_refs in the DB) use this to
+    run `_run_simulation_background` inline so the job reaches its terminal state
+    deterministically before assertions. The adapter is still mocked per-test.
+    """
+    from backend import _job_pool
+
+    def _sync_submit(fn, *args, **kwargs):
+        # Mimic ThreadPoolExecutor.submit: a worker exception is captured by the
+        # Future, never propagated to the submit() caller (the endpoint). The
+        # worker itself marks the job 'failed' on error.
+        try:
+            fn(*args, **kwargs)
+        except Exception:  # noqa: BLE001 — faithful pool semantics
+            pass
+        return None
+
+    monkeypatch.setattr(_job_pool, "submit", _sync_submit)
+    return None
+
+
+@pytest.fixture
 def insert_revision(temp_db: Path):
     """Factory: inserts a case_revisions row directly (for audit tests).
 

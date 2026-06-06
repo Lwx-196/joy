@@ -13,10 +13,12 @@ import {
   type SimulationJob,
 } from "../api";
 import {
+  useAutoFocus,
   useCaseSimulationJobs,
   usePrepareManualRenderSources,
   usePreviewManualRender,
   useReviewSimulationJob,
+  useRetrySimulationJob,
   useRenderCase,
   usePsImageModelOptions,
   useSimulateCaseAfter,
@@ -168,9 +170,39 @@ function simulationStatusText(status: string): string {
   if (status === "done") return "完成";
   if (status === "done_with_issues") return "有问题";
   if (status === "failed") return "失败";
+  if (status === "queued") return "排队中";
   if (status === "running") return "生成中";
   if (status === "blocked") return "阻塞";
   return status;
+}
+
+const SIMULATION_PROGRESS_STAGE_TEXT: Record<string, string> = {
+  queued: "排队等待",
+  running: "执行中",
+  preparing_inputs: "准备输入",
+  direct_image_edit: "图片生成中",
+  downloading: "下载结果",
+  auditing: "审计中",
+};
+
+function isActiveSimulationJob(job: SimulationJob): boolean {
+  return job.status === "queued" || job.status === "running";
+}
+
+function simulationProgressStageText(job: SimulationJob): string {
+  const progress = job.audit.progress;
+  const stage =
+    progress && typeof progress === "object" && typeof (progress as Record<string, unknown>).stage === "string"
+      ? ((progress as Record<string, unknown>).stage as string).trim()
+      : "";
+  const key = stage || job.status;
+  return SIMULATION_PROGRESS_STAGE_TEXT[key] ?? key;
+}
+
+function simulationElapsedSeconds(job: SimulationJob, nowMs: number): number | null {
+  const createdAtMs = Date.parse(job.created_at);
+  if (!Number.isFinite(createdAtMs)) return null;
+  return Math.max(0, Math.floor((nowMs - createdAtMs) / 1000));
 }
 
 function reviewText(job: SimulationJob): string {
@@ -277,6 +309,7 @@ export function ManualRenderPicker({ caseId, allImages, brand, seedRequest }: Pr
   const simulationsQ = useCaseSimulationJobs(caseId, 6);
   const modelOptionsQ = usePsImageModelOptions();
   const reviewMut = useReviewSimulationJob();
+  const retryMut = useRetrySimulationJob();
   const previewUrlsRef = useRef<Set<string>>(new Set());
   const lastSeedNonceRef = useRef<number | null>(null);
   const [slotsByView, setSlotsByView] = useState<SlotsByView>(() => emptySlotsByView());
@@ -289,9 +322,57 @@ export function ManualRenderPicker({ caseId, allImages, brand, seedRequest }: Pr
   const [selectedRenderViews, setSelectedRenderViews] = useState<ManualRenderView[]>(() => VIEWS);
   const [dragOver, setDragOver] = useState<SlotKind | null>(null);
   const [focusText, setFocusText] = useState("");
+  const [autoFocusApplied, setAutoFocusApplied] = useState(false);
+  const [autoFocusMethod, setAutoFocusMethod] = useState<string | null>(null);
   const [modelName, setModelName] = useState("");
+  const [usePlanner, setUsePlanner] = useState(false);
+  // 第三条出图选项：术后 AI 增强板（heal 方向固定 + 模型 gemini 主力 / gpt 备选）
+  const [aiEnhanceBoard, setAiEnhanceBoard] = useState(false);
+  const [aiEnhanceModel, setAiEnhanceModel] = useState("gemini-3-pro-image-preview");
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [elapsedSec, setElapsedSec] = useState(0);
+  const [simulationNowMs, setSimulationNowMs] = useState(() => Date.now());
+
+  const autoFocusQ = useAutoFocus(caseId);
+
+  useEffect(() => {
+    if (!simulateMut.isPending) {
+      setElapsedSec(0);
+      return;
+    }
+    const id = setInterval(() => setElapsedSec((s) => s + 1), 1000);
+    return () => clearInterval(id);
+  }, [simulateMut.isPending]);
+
+  useEffect(() => {
+    const id = window.setInterval(() => setSimulationNowMs(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, []);
+
+  // Auto-focus: pre-populate focus targets and regions from backend detection
+  useEffect(() => {
+    if (autoFocusApplied || !autoFocusQ.data) return;
+    const { focus_targets, focus_regions, detection_method } = autoFocusQ.data;
+    if (detection_method === "fallback" || focus_targets.length === 0) return;
+    // Only auto-fill if user hasn't manually entered anything
+    if (focusText.trim()) return;
+    setFocusText(focus_targets.join("，"));
+    if (focus_regions.length > 0) {
+      setFocusRegionsByView((prev) => ({
+        ...prev,
+        front: focus_regions.map((r) => ({
+          x: r.x,
+          y: r.y,
+          width: r.width,
+          height: r.height,
+          label: r.label ?? null,
+        })),
+      }));
+    }
+    setAutoFocusMethod(detection_method);
+    setAutoFocusApplied(true);
+  }, [autoFocusQ.data, autoFocusApplied, focusText]);
 
   const imageOptions = useMemo(() => [...allImages].sort(), [allImages]);
   const imageNameSet = useMemo(() => new Set(imageOptions), [imageOptions]);
@@ -714,7 +795,14 @@ export function ManualRenderPicker({ caseId, allImages, brand, seedRequest }: Pr
       if (shouldRender) {
         await renderMut.mutateAsync({
           caseId,
-          payload: { brand, template: renderTemplate, semantic_judge: "off" },
+          payload: {
+            brand,
+            template: renderTemplate,
+            semantic_judge: "off",
+            ...(aiEnhanceBoard
+              ? { options: { enhance_direction: "heal", enhance_model: aiEnhanceModel } }
+              : {}),
+          },
         });
         setMessage(t("manualRender.enqueued", { files: createdFiles.join(" / ") }));
       } else {
@@ -786,7 +874,7 @@ export function ManualRenderPicker({ caseId, allImages, brand, seedRequest }: Pr
         ...region,
         label: region.label || focusTargets[index] || focusTargets.join("；") || null,
       }));
-      const result = await simulateMut.mutateAsync({
+      const mutation = simulateMut.mutateAsync({
         caseId,
         payload: {
           ...simulationInputs,
@@ -795,13 +883,18 @@ export function ManualRenderPicker({ caseId, allImages, brand, seedRequest }: Pr
           ai_generation_authorized: true,
           provider: "ps_model_router",
           model_name: selectedModelName.trim(),
+          use_planner: usePlanner,
           note: "由案例详情页人工整理与出图面板创建",
         },
       });
+      const timeout = new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("等待超时（180s），请在历史记录中查看结果")), 180_000),
+      );
+      const result = await Promise.race([mutation, timeout]);
       if (result.status === "failed") {
         setError(result.error_message || t("manualRender.simFailed"));
       } else {
-        setMessage(t("manualRender.simDone", { id: result.simulation_job_id, status: result.status }));
+        setMessage(`#${result.simulation_job_id} 已提交，后台生成中`);
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -819,6 +912,16 @@ export function ManualRenderPicker({ caseId, allImages, brand, seedRequest }: Pr
         payload: { verdict, reviewer, note },
       });
       setMessage(t("manualRender.reviewDone"));
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const retrySimulation = async (job: SimulationJob) => {
+    try {
+      const result = await retryMut.mutateAsync({ caseId, jobId: job.id });
+      setMessage(`#${result.simulation_job_id} 已重新提交，后台生成中`);
       setError(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -962,6 +1065,14 @@ export function ManualRenderPicker({ caseId, allImages, brand, seedRequest }: Pr
       style={{ borderColor: "var(--cyan-200)", boxShadow: "0 0 0 3px rgba(8,145,178,.04)" }}
       data-testid="manual-render-picker"
     >
+      <style>
+        {`
+          @keyframes pulse {
+            0%, 100% { background-color: var(--panel-2); }
+            50% { background-color: var(--panel-3, #e8e8e8); }
+          }
+        `}
+      </style>
       <div
         className="card-h"
         style={{ background: "var(--cyan-50)", borderBottom: "1px solid var(--cyan-200)" }}
@@ -1161,6 +1272,35 @@ export function ManualRenderPicker({ caseId, allImages, brand, seedRequest }: Pr
                 })}
           </div>
         )}
+        <div
+          style={{ display: "flex", gap: 10, justifyContent: "flex-end", alignItems: "center", flexWrap: "wrap" }}
+          data-testid="ai-enhance-board-controls"
+        >
+          <label
+            style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11.5, color: "var(--ink-2)", cursor: "pointer" }}
+            title={t("manualRender.aiEnhanceBoardHint")}
+          >
+            <input
+              type="checkbox"
+              checked={aiEnhanceBoard}
+              onChange={(e) => setAiEnhanceBoard(e.target.checked)}
+              data-testid="ai-enhance-board-toggle"
+            />
+            {t("manualRender.aiEnhanceBoard")}
+          </label>
+          {aiEnhanceBoard && (
+            <select
+              className="input sm"
+              style={{ fontSize: 11.5, maxWidth: 220 }}
+              value={aiEnhanceModel}
+              onChange={(e) => setAiEnhanceModel(e.target.value)}
+              data-testid="ai-enhance-board-model"
+            >
+              <option value="gemini-3-pro-image-preview">gemini（画质·主力）</option>
+              <option value="gpt-image-2">gpt-image-2（忠实·零vertex）</option>
+            </select>
+          )}
+        </div>
         <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", alignItems: "center" }}>
           <button
             type="button"
@@ -1200,10 +1340,21 @@ export function ManualRenderPicker({ caseId, allImages, brand, seedRequest }: Pr
           <input
             value={focusText}
             disabled={busy}
-            onChange={(e) => setFocusText(e.target.value)}
+            onChange={(e) => {
+              setFocusText(e.target.value);
+              setAutoFocusApplied(true);
+            }}
             placeholder={t("manualRender.focusPlaceholder")}
             style={{ fontSize: 12 }}
           />
+          {autoFocusMethod && (
+            <div style={{ fontSize: 11, color: "var(--green-ink)", marginTop: 2 }}>
+              {autoFocusMethod === "metadata" && "从案例目录自动识别治疗部位"}
+              {autoFocusMethod === "cv" && "从术前术后对比自动检测变化区域"}
+              {autoFocusMethod === "metadata+cv" && "目录识别 + 术前术后对比双重检测"}
+              {" "}(可手动修改)
+            </div>
+          )}
           <div
             className="manual-sim-hint"
             style={{ color: simulationInputProblem ? "var(--amber-ink)" : undefined }}
@@ -1233,6 +1384,15 @@ export function ManualRenderPicker({ caseId, allImages, brand, seedRequest }: Pr
               </option>
             ))}
           </select>
+          <label style={{ fontSize: 11.5, display: "flex", alignItems: "center", gap: 4 }}>
+            <input
+              type="checkbox"
+              checked={usePlanner}
+              onChange={(e) => setUsePlanner(e.target.checked)}
+              disabled={busy}
+            />
+            复杂指令规划（启用 gpt-5.4 planner，增加 10-30s）
+          </label>
           <div style={{ display: "flex", justifyContent: "flex-end" }}>
             <button
               type="button"
@@ -1242,7 +1402,7 @@ export function ManualRenderPicker({ caseId, allImages, brand, seedRequest }: Pr
               title={simulationInputProblem ?? t("manualRender.simTitle")}
             >
               <Ico name="scan" size={11} />
-              {simulateMut.isPending ? t("manualRender.simWorking") : t("manualRender.simButton")}
+              {simulateMut.isPending ? `${t("manualRender.simWorking")} (${elapsedSec}s)` : t("manualRender.simButton")}
             </button>
           </div>
         </div>
@@ -1261,6 +1421,9 @@ export function ManualRenderPicker({ caseId, allImages, brand, seedRequest }: Pr
               const imageFile = simulationFile(job, "ai_after_simulation");
               const diff = simulationDifference(job);
               const decisionReasons = simulationDecisionReasons(job);
+              const isActiveJob = isActiveSimulationJob(job);
+              const progressStage = isActiveJob ? simulationProgressStageText(job) : "";
+              const elapsedSeconds = isActiveJob ? simulationElapsedSeconds(job, simulationNowMs) : null;
               const reviewTone =
                 job.review_status === "approved"
                   ? "var(--ok)"
@@ -1284,15 +1447,21 @@ export function ManualRenderPicker({ caseId, allImages, brand, seedRequest }: Pr
                     style={{
                       width: 82,
                       aspectRatio: "1 / 1",
-                      background: "var(--panel-2)",
+                      backgroundColor: "var(--panel-2)",
                       border: "1px solid var(--line)",
                       borderRadius: 6,
                       overflow: "hidden",
                       display: "grid",
                       placeItems: "center",
+                      animation: isActiveJob ? "pulse 1.2s ease-in-out infinite" : undefined,
                     }}
                   >
-                    {imageFile ? (
+                    {isActiveJob ? (
+                      <span style={{ display: "grid", justifyItems: "center", gap: 4, fontSize: 10.5, color: "var(--ink-3)" }}>
+                        <Ico name="image" size={18} />
+                        {progressStage}
+                      </span>
+                    ) : imageFile ? (
                       <SimulationThumb
                         href={simulationJobFileUrl(caseId, job.id, "ai_after_simulation")}
                         src={simulationJobFileUrl(caseId, job.id, "ai_after_simulation")}
@@ -1311,6 +1480,8 @@ export function ManualRenderPicker({ caseId, allImages, brand, seedRequest }: Pr
                         #{job.id}
                       </span>
                       <span className="badge">{simulationStatusText(job.status)}</span>
+                      {isActiveJob && <span className="badge">{progressStage}</span>}
+                      {elapsedSeconds !== null && <span className="badge">已耗时 {elapsedSeconds}s</span>}
                       <span className="badge" style={{ color: reviewTone }}>
                         {reviewText(job)}
                       </span>
@@ -1374,6 +1545,18 @@ export function ManualRenderPicker({ caseId, allImages, brand, seedRequest }: Pr
                           disabled={reviewMut.isPending || job.status === "running"}
                         >
                           {t("manualRender.reviewReject")}
+                        </button>
+                      </div>
+                    )}
+                    {job.status === "failed" && (
+                      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                        <button
+                          type="button"
+                          className="btn sm"
+                          onClick={() => retrySimulation(job)}
+                          disabled={retryMut.isPending}
+                        >
+                          重试
                         </button>
                       </div>
                     )}

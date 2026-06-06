@@ -6,7 +6,7 @@ import json
 from backend import db
 
 
-def test_simulate_after_accepts_t90_allowed_comfyui_candidate(client, seed_case, monkeypatch, tmp_path):
+def test_simulate_after_accepts_t90_allowed_comfyui_candidate(client, seed_case, monkeypatch, tmp_path, sync_job_pool):
     from backend import ai_generation_adapter
 
     case_dir = tmp_path / "case-t91-comfyui"
@@ -56,7 +56,7 @@ def test_simulate_after_accepts_t90_allowed_comfyui_candidate(client, seed_case,
     body = resp.json()
     assert body["provider"] == "comfyui_local"
     assert body["model_name"] == "local_region_enhance_v1@conservative"
-    assert body["audit"]["workflow_profile_name"] == "local_region_enhance_v1@conservative"
+    # async：audit 完整内容由 worker 跑后落 DB（见下方 audit_json 断言）
     assert captured["provider"] == "comfyui_local"
     assert captured["model_name"] == "local_region_enhance_v1@conservative"
 
@@ -66,6 +66,7 @@ def test_simulate_after_accepts_t90_allowed_comfyui_candidate(client, seed_case,
     assert sim["status"] == "done_with_issues"
     assert json.loads(sim["model_plan_json"])["provider"] == "comfyui_local"
     assert json.loads(sim["audit_json"])["provider"] == "comfyui_local"
+    assert json.loads(sim["audit_json"])["workflow_profile_name"] == "local_region_enhance_v1@conservative"
     assert ai["provider"] == "comfyui_local"
     assert ai["model_name"] == "local_region_enhance_v1@conservative"
 

@@ -958,6 +958,7 @@ export interface SimulateAfterPayload {
   provider?: "ps_model_router";
   model_name?: string | null;
   note?: string | null;
+  use_planner?: boolean;
 }
 
 export interface SimulateAfterResponse {
@@ -1353,6 +1354,34 @@ export const simulateCaseAfter = (caseId: number, payload: SimulateAfterPayload)
     .post<SimulateAfterResponse>(`/api/cases/${caseId}/simulate-after`, payload)
     .then((r) => r.data);
 
+export const retrySimulationJob = (caseId: number, jobId: number) =>
+  api
+    .post<SimulateAfterResponse>(`/api/cases/${caseId}/simulation-jobs/${jobId}/retry`)
+    .then((r) => r.data);
+
+export interface AutoFocusResult {
+  case_id: number;
+  focus_targets: string[];
+  focus_regions: FocusRegion[];
+  detection_method: string;
+  confidence: number;
+  detail: Record<string, unknown>;
+}
+
+export const fetchAutoFocus = (
+  caseId: number,
+  afterImagePath?: string | null,
+  beforeImagePath?: string | null,
+) =>
+  api
+    .get<AutoFocusResult>(`/api/cases/${caseId}/auto-focus`, {
+      params: {
+        after_image_path: afterImagePath || undefined,
+        before_image_path: beforeImagePath || undefined,
+      },
+    })
+    .then((r) => r.data);
+
 export const fetchPsImageModelOptions = () =>
   api
     .get<PsImageModelOptionsResponse>("/api/cases/ps-image-model-options")
@@ -1690,6 +1719,11 @@ export interface EnqueueRenderPayload {
   brand?: string;
   template?: string;
   semantic_judge?: "off" | "auto";
+  /** 第三条出图选项：术后 AI 增强板（heal/gemini）。设了 enhance_direction 即走增强链路。 */
+  options?: {
+    enhance_direction?: string;
+    enhance_model?: string;
+  };
 }
 
 export const enqueueRender = (id: number, payload: EnqueueRenderPayload = {}) =>

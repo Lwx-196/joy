@@ -175,6 +175,8 @@
     "activePairMissing": "Choose pre-op and post-op photos for this view",
     "saveOnly": "Save paired views",
     "saveAndRender": "Save & render",
+    "aiEnhanceBoard": "AI-enhanced board",
+    "aiEnhanceBoardHint": "Render with post-op local AI enhancement (heal direction, identity-locked), triptych",
     "saving": "Saving…",
     "working": "Working…",
     "missing": "Choose or upload one pre-op and one post-op photo",

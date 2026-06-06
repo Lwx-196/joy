@@ -52,7 +52,7 @@ def _seed_run_after(monkeypatch, *, raises: Exception | None = None):
 
 
 def test_simulate_after_failure_writes_structured_audit_failure_block(
-    client, seed_case, monkeypatch, tmp_path: Path
+    client, seed_case, monkeypatch, tmp_path: Path, sync_job_pool
 ) -> None:
     """P0.1: simulate-after provider 抛异常 → simulation_jobs.audit_json.failure 含 7 必填 key。"""
     from backend import db
@@ -110,7 +110,7 @@ def test_simulate_after_failure_writes_structured_audit_failure_block(
 
 
 def test_simulate_after_success_writes_explicit_failure_null(
-    client, seed_case, monkeypatch, tmp_path: Path
+    client, seed_case, monkeypatch, tmp_path: Path, sync_job_pool
 ) -> None:
     """P0.1: 成功路径 audit_json.failure 显式为 null，避免 missing-key 歧义。"""
     from backend import db

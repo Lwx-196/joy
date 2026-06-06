@@ -84,6 +84,8 @@ import {
   restoreCaseImage,
   rescanCase,
   rescanCaseGroups,
+  retrySimulationJob,
+  fetchAutoFocus,
   retryUpgradeJob,
   reviewCaseImage,
   reviewRenderQuality,
@@ -211,6 +213,8 @@ export const QK = {
   // Stage 1 (post-Phase-3): per-case audit log for the "近期变更" drawer.
   caseRevisions: (caseId: number) => ["cases", caseId, "revisions"] as const,
   simulationJobsForCase: (caseId: number) => ["cases", caseId, "simulation-jobs"] as const,
+  autoFocus: (caseId: number, afterPath?: string | null, beforePath?: string | null) =>
+    ["cases", caseId, "auto-focus", afterPath ?? "", beforePath ?? ""] as const,
   simulationQualityQueue: (params?: { status?: SimulationQualityQueueStatus; recommendation?: string | null; limit?: number }) =>
     params && Object.keys(params).length > 0
       ? (["simulation", "quality-queue", params] as const)
@@ -770,8 +774,8 @@ export function useSimulateCaseAfter() {
     mutationFn: (vars: { caseId: number; payload: SimulateAfterPayload }) =>
       simulateCaseAfter(vars.caseId, vars.payload),
     onSuccess: (_data, vars) => {
-      qc.invalidateQueries({ queryKey: QK.caseDetail(vars.caseId) });
-      qc.invalidateQueries({ queryKey: QK.simulationJobsForCase(vars.caseId) });
+      qc.refetchQueries({ queryKey: QK.caseDetail(vars.caseId) });
+      qc.refetchQueries({ queryKey: QK.simulationJobsForCase(vars.caseId) });
       qc.invalidateQueries({ queryKey: ["simulation", "quality-queue"] });
     },
   });
@@ -790,7 +794,38 @@ export function useCaseSimulationJobs(caseId: number | null | undefined, limit =
     queryKey: caseId ? QK.simulationJobsForCase(caseId) : ["cases", "_simulation_jobs_disabled"],
     queryFn: () => fetchCaseSimulationJobs(caseId as number, limit),
     enabled: !!caseId,
-    staleTime: 5_000,
+    staleTime: 2_000,
+    refetchInterval: (query) => {
+      const jobs = query.state.data as SimulationJob[] | undefined;
+      if (!jobs) return false;
+      const hasActive = jobs.some((j) => j.status === "queued" || j.status === "running");
+      return hasActive ? 2_000 : false;
+    },
+  });
+}
+
+export function useRetrySimulationJob() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (vars: { caseId: number; jobId: number }) =>
+      retrySimulationJob(vars.caseId, vars.jobId),
+    onSuccess: (_data, vars) => {
+      qc.refetchQueries({ queryKey: QK.simulationJobsForCase(vars.caseId) });
+      qc.invalidateQueries({ queryKey: ["simulation", "quality-queue"] });
+    },
+  });
+}
+
+export function useAutoFocus(
+  caseId: number | null | undefined,
+  afterImagePath?: string | null,
+  beforeImagePath?: string | null,
+) {
+  return useQuery({
+    queryKey: caseId ? QK.autoFocus(caseId, afterImagePath, beforeImagePath) : ["auto-focus-disabled"],
+    queryFn: () => fetchAutoFocus(caseId!, afterImagePath, beforeImagePath),
+    enabled: !!caseId,
+    staleTime: 60_000,
   });
 }
 
