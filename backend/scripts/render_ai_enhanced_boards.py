@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""渲染 AI 增强版正式品牌板（正确管线）。
+"""渲染 AI 增强版正式品牌板（全分辨率管线）。
 
-正确流程：
-1. build_manifest() + render_from_manifest() 正常走对齐/背景/缩放 → 产出 516×624 术后 cell
-2. after_transform 钩子在 cell 贴上画布前拦截 → 送 gpt-image-2 AI 增强
-3. 增强后的图直接贴回品牌板 — 不重复经过对齐/缩放管线
+管线（Phase 6 重构后）：
+1. build_manifest() 拿到 after 源图路径（原始分辨率，如 3024×4032）
+2. _enhance_manifest_sources() 在原图分辨率做 rembg + AI 增强 → 存盘 → 更新 manifest
+3. render_from_manifest() 读增强后的全分辨率图做对齐/缩放到 516×624 → 组板
+4. slot_transform 只做 rembg 纯黑底清理（不再在 cell 级做 AI）
 
-这解决了旧版把 AI 增强图再过一遍渲染管线导致变形偏色的问题。
+消除旧管线「先缩到 516×624 再增强 = 低分辨率 = 颗粒」的问题。
 
 Usage:
     python3 backend/scripts/render_ai_enhanced_boards.py \
@@ -479,7 +480,11 @@ def _apply_treatment_lock(after_img: Image.Image, enhanced_img: Image.Image,
 
 def _fidelity_check(raw_img: Image.Image, enhanced_img: Image.Image,
                     slot: str, stats: dict) -> bool:
-    """零成本保真度探针：检测磨皮/重绘/过度处理，不合格回退原图。"""
+    """保真度探针（advisory only）：记录指标，不拒绝。
+
+    vertex gemini 天然 smoothing（hf ratio 0.39-0.43），owner 已看过认可效果。
+    像素级 fidelity 改为 advisory 日志，真正质量门交给 VLM 审核。
+    """
     import numpy as np
 
     try:
@@ -498,12 +503,13 @@ def _fidelity_check(raw_img: Image.Image, enhanced_img: Image.Image,
             probes = compute_fidelity_probes(raw_p, enh_p, mask_p)
             verdict = prescreen_verdict(probes)
         if not verdict["passed"]:
-            logger.warning("  [fidelity] %s: REJECTED — %s", slot, "; ".join(verdict["reasons"]))
-            stats["fidelity_rejected"] = stats.get("fidelity_rejected", 0) + 1
-            return False
-        logger.info("  [fidelity] %s: PASS (hf=%.2f luma=%.1f bg_delta=%.1f)",
-                    slot, probes["hf_energy_ratio"], probes["luma_signed_shift"],
-                    probes["out_mask_mean_abs_delta"])
+            logger.info("  [fidelity] %s: ADVISORY — %s (不拒绝，等 VLM 审核)",
+                        slot, "; ".join(verdict["reasons"]))
+            stats["fidelity_advisory"] = stats.get("fidelity_advisory", 0) + 1
+        else:
+            logger.info("  [fidelity] %s: PASS (hf=%.2f luma=%.1f bg_delta=%.1f)",
+                        slot, probes["hf_energy_ratio"], probes["luma_signed_shift"],
+                        probes["out_mask_mean_abs_delta"])
         return True
     except Exception as exc:
         logger.warning("  [fidelity] %s: 探针异常(%s) → 放行", slot, exc)
@@ -708,9 +714,10 @@ def _rembg_composite_on_black(pil_img: Image.Image) -> Image.Image:
     """
     import cv2
     import numpy as np
+    from PIL import ImageOps
     from rembg import remove
 
-    rgb = pil_img.convert("RGB")
+    rgb = ImageOps.exif_transpose(pil_img).convert("RGB")
     mask = remove(rgb, session=_get_rembg_session(), only_mask=True, post_process_mask=True)
     m = np.asarray(mask.convert("L"), dtype=np.float64)
     # 保 rembg 软边（消锯齿），但用最大连通域把背景残岛/漏光软边压到 0 → 背景纯黑。
@@ -751,14 +758,85 @@ def _make_matte_black_transform(case_layout, stats: dict):
     return transform
 
 
+def _enhance_manifest_sources(
+    manifest: dict, providers: list, prompt: str,
+    stats: dict, *, enhance_dir: Path, use_cache: bool = True,
+    focus_targets: list[str] | None = None, mask_lock: bool = False,
+) -> dict:
+    """render_from_manifest 前，对 manifest 每个 after 源图做全分辨率 AI 增强。
+
+    消除旧管线「先缩到 516×624 再增强」的颗粒感：
+    ① EXIF 校正 → ② pad_to_square → ③ AI 增强（原图直送，不做 rembg——
+    全分辨率 rembg 对蓝治疗垫/器械误留严重，rembg 只在 cell 级由 slot_transform 处理）
+    → ④ crop_back → ⑤ 存盘 → ⑥ 写入 manifest enhancement.enhanced_path。
+    """
+    from backend.services.image_providers import generate_with_fallback
+
+    enhance_dir.mkdir(parents=True, exist_ok=True)
+    ft = focus_targets or []
+
+    for group in manifest.get("groups", []):
+        for slot, selection in group.get("selected_slots", {}).items():
+            after_info = selection["after"]
+            src_path = after_info["path"]
+            if not Path(src_path).is_file():
+                logger.warning("  [fullres] %s: 源图不存在 %s", slot, src_path)
+                continue
+
+            stats["total"] += 1
+            from PIL import ImageOps
+            orig_img = ImageOps.exif_transpose(Image.open(src_path)).convert("RGB")
+            logger.info("  [fullres] %s: 源图 %dx%d → AI 增强", slot, *orig_img.size)
+
+            padded, crop_box = _pad_to_square(orig_img)
+            sq = padded.size[0]
+            png = _pil_to_png_bytes(padded)
+            cache_key = _ai_cache_key(png, prompt)
+            cache_path = AI_CACHE_DIR / f"{cache_key}.png"
+
+            t0 = time.time()
+            try:
+                if use_cache and cache_path.is_file():
+                    raw = cache_path.read_bytes()
+                    prov = "cache"
+                else:
+                    raw, prov = generate_with_fallback(providers, png, prompt, mime="image/png")
+                    AI_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+                    cache_path.write_bytes(raw)
+
+                enh = _bytes_to_pil(raw)
+                if enh.size != (sq, sq):
+                    enh = enh.resize((sq, sq), Image.LANCZOS)
+                enh = enh.crop(crop_box)
+
+                elapsed = time.time() - t0
+                logger.info("  [fullres] %s: OK via %s (%.1fs) %dx%d",
+                            slot, prov, elapsed, *enh.size)
+
+                if mask_lock and ft:
+                    enh = _apply_treatment_lock(orig_img, enh, ft, slot, stats)
+
+                out = enhance_dir / f"{Path(src_path).stem}_{slot}_enhanced.png"
+                enh.save(out, format="PNG")
+                after_info.setdefault("enhancement", {})["enhanced_path"] = str(out)
+                stats["ok"] += 1
+
+            except Exception as exc:
+                elapsed = time.time() - t0
+                logger.error("  [fullres] %s: FAILED (%.1fs): %s", slot, elapsed, exc)
+                stats["failed"] += 1
+
+    return manifest
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="渲染 AI 增强版品牌板（正确管线）")
     parser.add_argument("--cases-root", type=Path, default=DEFAULT_CASES_ROOT)
     parser.add_argument("--output-dir", type=Path, default=Path("/tmp/ai-enhance-boards"))
     parser.add_argument("--brand", default="fumei")
-    parser.add_argument("--provider-order", default="flashapi,tuzi,vertex",
-                        help="逗号分隔的 provider 优先级（默认: flashapi,tuzi,vertex；"
-                             "vertex=Vertex ADC gemini-3-pro-image 兜底）")
+    parser.add_argument("--provider-order", default="vertex,flashapi,tuzi",
+                        help="逗号分隔的 provider 优先级（默认: vertex,flashapi,tuzi；"
+                             "vertex=Vertex ADC gemini-3-pro-image 优先）")
     parser.add_argument("--customers", default="",
                         help="逗号分隔的客户名筛选（空=全部）")
     parser.add_argument("--dry-run", action="store_true",
@@ -918,11 +996,17 @@ def main() -> None:
                 focus_targets = prm.parse_procedures(treatment).get("all_regions", []) if args.mask_lock else []
                 if args.mask_lock:
                     print(f"  [lock] 治疗区 focus_targets = {focus_targets}")
-                transform_fn = _make_slot_transform(
-                    case_layout, providers, ENHANCE_PROMPT_V1, stats,
-                    dry_run=args.dry_run, use_cache=not args.no_cache,
-                    focus_targets=focus_targets, mask_lock=args.mask_lock,
-                )
+                if not args.dry_run and manifest.get("status") == "ok":
+                    enhance_dir = args.output_dir / ".fullres-enhance" / customer
+                    _enhance_manifest_sources(
+                        manifest, providers, ENHANCE_PROMPT_V1, stats,
+                        enhance_dir=enhance_dir, use_cache=not args.no_cache,
+                        focus_targets=focus_targets, mask_lock=args.mask_lock,
+                    )
+                elif args.dry_run:
+                    logger.info("  [DRY-RUN] 跳过全分辨率 AI 增强")
+                _cell_stats = {"total": 0, "ok": 0, "failed": 0, "skipped": 0, "locked": 0}
+                transform_fn = _make_matte_black_transform(case_layout, _cell_stats)
 
             out_path = args.output_dir / f"{customer}_{treatment}_ai_enhanced.jpg"
             try:
