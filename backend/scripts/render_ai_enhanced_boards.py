@@ -581,6 +581,9 @@ def main() -> None:
     parser.add_argument("--enhance-direction", default="heal", choices=["strict", "heal"],
                         help="增强方向：heal(默认)=恢复预览定向 prompt（身份锁不变 + 往恢复良好理想化，"
                              "4 案例验证一致安全）；strict=旧版忠实严格 prompt（只许极轻、偏保守）")
+    parser.add_argument("--case-dir", type=Path, default=None,
+                        help="单案例入口（server 集成用）：直接渲染指定的治疗目录，绕过 --cases-root 遍历。"
+                             "成功后 stdout 打印 'AI_BOARD_RESULT: <board.jpg>' 供父进程解析")
     args = parser.parse_args()
 
     if args.native_enhance:
@@ -623,12 +626,19 @@ def main() -> None:
     brand = case_layout.resolve_brand(args.brand)
     customer_filter = set(x.strip() for x in args.customers.split(",") if x.strip()) if args.customers else None
 
-    cases_root = args.cases_root
-    case_dirs = sorted([
-        d for d in cases_root.iterdir()
-        if d.is_dir() and not d.name.startswith(".")
-        and (customer_filter is None or d.name in customer_filter)
-    ])
+    single_treatment_name = None
+    if args.case_dir is not None:
+        # 单案例入口（server 集成）：--case-dir 是治疗目录，customer = 其父目录名，只渲染这一个
+        case_dir_p = args.case_dir.resolve()
+        case_dirs = [case_dir_p.parent]
+        single_treatment_name = case_dir_p.name
+    else:
+        cases_root = args.cases_root
+        case_dirs = sorted([
+            d for d in cases_root.iterdir()
+            if d.is_dir() and not d.name.startswith(".")
+            and (customer_filter is None or d.name in customer_filter)
+        ])
 
     logger.info("共 %d 个案例目录%s", len(case_dirs),
                 f"（筛选: {customer_filter}）" if customer_filter else "")
@@ -640,6 +650,7 @@ def main() -> None:
         treatments = sorted([
             t for t in case_dir.iterdir()
             if t.is_dir() and not t.name.startswith(".")
+            and (single_treatment_name is None or t.name == single_treatment_name)
         ])
 
         if not treatments:
@@ -668,7 +679,9 @@ def main() -> None:
             stats = {"total": 0, "ok": 0, "failed": 0, "skipped": 0, "locked": 0}
             if args.native_enhance:
                 print(f"  [native] focus = {[f['area'] for f in (native_focus or [])]}")
-                if manifest.get("status") == "ok":
+                if args.dry_run:
+                    print("  [native] --dry-run：跳过 AI 增强，只出标准板（验证管线/路径/creds）")
+                elif manifest.get("status") == "ok":
                     manifest["enhance_model"] = args.enhance_model
                     inspect_root = args.output_dir / ".native-enhance" / customer
                     try:
@@ -699,6 +712,9 @@ def main() -> None:
                 )
                 status = "OK" if stats["failed"] == 0 else "PARTIAL"
                 print(f"  ✅ {out_path} (增强 {stats['ok']}/{stats['total']})")
+                if args.case_dir is not None:
+                    # 单案例入口：machine-parseable 标记供 server 父进程解析 board 路径
+                    print(f"AI_BOARD_RESULT: {out_path}")
                 results.append({
                     "customer": customer, "treatment": treatment,
                     "status": status, "board": str(out_path), **stats,

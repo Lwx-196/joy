@@ -154,6 +154,12 @@ def _parse_case_meta(raw: str | None) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
+def _parse_job_options(raw_meta: str | None) -> dict[str, Any]:
+    """从 render job 的 meta_json 取 enqueue 时存的 options（含 AI 增强板 enhance_direction/model）。"""
+    options = _parse_case_meta(raw_meta).get("options")
+    return options if isinstance(options, dict) else {}
+
+
 def _case_source_info(raw_meta: str | None, abs_path: str | None = None) -> tuple[int, list[str]]:
     meta = _parse_case_meta(raw_meta)
     raw_files = [str(item) for item in (meta.get("image_files") or []) if item]
@@ -2096,6 +2102,10 @@ class RenderQueue:
             template = row["template"]
             semantic_judge = row["semantic_judge"]
             case_id = row["case_id"]
+            # 第三条出图选项：术后 AI 增强板（heal/gemini）。options 经 job meta_json 携带。
+            _job_options = _parse_job_options(row["meta_json"] if "meta_json" in row.keys() else None)
+            ai_enhance_direction = str(_job_options.get("enhance_direction") or "").strip()
+            ai_enhance_model = str(_job_options.get("enhance_model") or "").strip()
             batch_id = row["batch_id"]
             customer_raw = row["case_customer_raw"]
             case_date, case_project = scanner.extract_case_date_project(Path(case_dir), scanner.DEFAULT_ROOTS)
@@ -2338,17 +2348,28 @@ class RenderQueue:
 
         # 2. Run the heavy subprocess.
         try:
-            result = render_executor.run_render(
-                render_case_dir,
-                brand=brand,
-                template=template,
-                semantic_judge=semantic_judge,
-                manual_overrides=manual_overrides,
-                selection_plan=render_selection_plan,
-                customer_name=customer_raw,
-                date=case_date,
-                project=case_project,
-            )
+            if ai_enhance_direction:
+                # 第三条出图选项：术后 AI 增强板（heal/gemini）→ 独立 CLI 子进程，
+                # 出增强三联板并放标准 final-board 位置，前端零改即可像普通板展示。
+                result = render_executor.run_ai_enhanced_render(
+                    render_case_dir,
+                    brand=brand,
+                    template=template,
+                    enhance_direction=ai_enhance_direction,
+                    enhance_model=ai_enhance_model or "gemini-3-pro-image-preview",
+                )
+            else:
+                result = render_executor.run_render(
+                    render_case_dir,
+                    brand=brand,
+                    template=template,
+                    semantic_judge=semantic_judge,
+                    manual_overrides=manual_overrides,
+                    selection_plan=render_selection_plan,
+                    customer_name=customer_raw,
+                    date=case_date,
+                    project=case_project,
+                )
         except FileNotFoundError as e:
             self._mark_failed(job_id, f"missing: {e}")
             return

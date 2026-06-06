@@ -23,6 +23,8 @@ import os
 import signal
 import shutil
 import subprocess
+import sys
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -36,6 +38,10 @@ RENDER_SCRIPT = SKILL_ROOT / "scripts" / "render_brand_clean.py"
 SKILL_PYTHON = os.environ.get("CASE_LAYOUT_SKILL_PYTHON") or shutil.which("python3") or "/usr/bin/python3"
 
 DEFAULT_RENDER_TIMEOUT_SEC = int(os.environ.get("CASE_WORKBENCH_RENDER_TIMEOUT_SEC", "240"))
+# AI 增强板出图慢（3 角度 gemini@~85s + planner + matte）→ 单独大超时。
+DEFAULT_AI_ENHANCE_TIMEOUT_SEC = int(os.environ.get("CASE_WORKBENCH_AI_ENHANCE_TIMEOUT_SEC", "900"))
+# AI 增强板 CLI（自带 build_manifest + apply_after_enhancements + matte 纯黑底）。
+AI_ENHANCE_SCRIPT = Path(__file__).resolve().parent / "scripts" / "render_ai_enhanced_boards.py"
 DEFAULT_SEMANTIC_SCREEN_TIMEOUT_SEC = "3"
 DEFAULT_SEMANTIC_PAIR_REVIEW_TIMEOUT_SEC = "8"
 DEFAULT_SEMANTIC_FINAL_QA_TIMEOUT_SEC = "8"
@@ -1870,3 +1876,97 @@ def run_manual_render_preview(
         raise RuntimeError(
             f"manual preview output not valid JSON: {e}; first 500 chars: {out[:500]}"
         )
+
+
+def _ai_enhance_cli_python() -> str:
+    """选 spawn AI 增强 CLI 的解释器。
+
+    CLI 需 rembg/cv2/mediapipe + 能 import backend.services；SKILL_PYTHON(系统 python3)
+    没这些。优先仓库 .venv，env CASE_WORKBENCH_AI_ENHANCE_PYTHON 可覆盖，最后退 sys.executable。
+    """
+    override = os.environ.get("CASE_WORKBENCH_AI_ENHANCE_PYTHON")
+    if override:
+        return override
+    venv_py = Path(__file__).resolve().parent.parent / ".venv" / "bin" / "python"
+    if venv_py.exists():
+        return str(venv_py)
+    return sys.executable
+
+
+def _parse_ai_board_result(stdout: str) -> str | None:
+    """从 CLI stdout 解析 'AI_BOARD_RESULT: <path>' 标记。"""
+    for line in stdout.splitlines():
+        line = line.strip()
+        if line.startswith("AI_BOARD_RESULT:"):
+            return line.split("AI_BOARD_RESULT:", 1)[1].strip()
+    return None
+
+
+def run_ai_enhanced_render(
+    case_dir: Path | str,
+    brand: str = "fumei",
+    template: str = "tri-compare",
+    enhance_direction: str = "heal",
+    enhance_model: str = "gemini-3-pro-image-preview",
+    timeout: int = DEFAULT_AI_ENHANCE_TIMEOUT_SEC,
+) -> dict[str, Any]:
+    """术后 AI 增强板：spawn `render_ai_enhanced_boards.py --case-dir`（仿 run_render 子进程隔离），
+    把增强板放到标准 `final-board.jpg` 位置，前端零改即可像普通板轮询+展示。
+
+    CLI 自带链路：build_manifest(focus) → apply_after_enhancements(原生 gemini/gpt 局部增强)
+    → matte 纯黑底 → render_from_manifest，并自加载 tuzi/flash/t54 creds。
+
+    v1 仅 tri-compare（CLI build_manifest 固定三联）；manifest_path=None（旧板经 .history 仍可恢复）。
+
+    Returns: run_render 同形 dict（output_path / manifest_path / status / case_mode / enhance ...）。
+    Raises:
+        FileNotFoundError: case_dir 或 CLI 脚本缺失。
+        RuntimeError: 子进程失败 / 未产出 board。
+        subprocess.TimeoutExpired: 超时。
+    """
+    case_dir = Path(case_dir).resolve()
+    if not case_dir.exists() or not case_dir.is_dir():
+        raise FileNotFoundError(f"case_dir not a directory: {case_dir}")
+    if not AI_ENHANCE_SCRIPT.exists():
+        raise FileNotFoundError(f"AI enhance CLI missing at {AI_ENHANCE_SCRIPT}")
+
+    out_root = stress.render_output_root(case_dir, brand, template)
+    _archive_existing_final_board(out_root)
+
+    with tempfile.TemporaryDirectory(prefix="ai-enhance-board-") as tmp:
+        proc = _run_render_subprocess(
+            [
+                _ai_enhance_cli_python(),
+                str(AI_ENHANCE_SCRIPT),
+                "--case-dir", str(case_dir),
+                "--brand", brand,
+                "--native-enhance",
+                "--enhance-direction", enhance_direction,
+                "--enhance-model", enhance_model,
+                "--output-dir", tmp,
+                "--no-cache",
+            ],
+            timeout,
+        )
+        if proc.returncode != 0:
+            stderr = _summarize_subprocess_error(proc.stderr, proc.stdout)
+            raise RuntimeError(f"ai-enhance subprocess exit={proc.returncode}: {stderr}")
+        board_path = _parse_ai_board_result(proc.stdout)
+        if not board_path or not Path(board_path).exists():
+            tail = (proc.stdout or "")[-500:]
+            raise RuntimeError(f"ai-enhance produced no board; stdout tail: {tail}")
+        final_path = out_root / "final-board.jpg"
+        final_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(board_path, final_path)
+
+    return {
+        "output_path": str(final_path),
+        "manifest_path": None,
+        "status": "done",
+        "case_mode": "ai_enhanced_board",
+        "enhance": {"direction": enhance_direction, "model": enhance_model},
+        "blocking_issue_count": 0,
+        "warning_count": 0,
+        "effective_templates": {},
+        "manual_overrides_applied": [],
+    }
