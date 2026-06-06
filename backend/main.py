@@ -1,6 +1,10 @@
 """FastAPI entrypoint for case-workbench Phase 1."""
 from __future__ import annotations
 
+import subprocess
+import sys
+from pathlib import Path
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -8,6 +12,40 @@ from . import db, render_quality
 from .render_queue import RENDER_QUEUE
 from .routes import audit, best_pair, case_groups, cases, classification, customers, evaluations, image_workbench, issues, jobs, render, review_tickets, scan, stress, upgrade
 from .upgrade_queue import UPGRADE_QUEUE
+
+
+def _startup_banner() -> None:
+    cwd = Path.cwd()
+    db_path = db.DB_PATH
+    branch = "unknown"
+    commit = "unknown"
+    try:
+        branch = subprocess.check_output(
+            ["git", "branch", "--show-current"], cwd=cwd, stderr=subprocess.DEVNULL, text=True,
+        ).strip() or "DETACHED"
+        commit = subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"], cwd=cwd, stderr=subprocess.DEVNULL, text=True,
+        ).strip()
+    except Exception:
+        pass
+    port = "unknown"
+    for i, arg in enumerate(sys.argv):
+        if arg == "--port" and i + 1 < len(sys.argv):
+            port = sys.argv[i + 1]
+            break
+    print(
+        f"\n{'=' * 60}\n"
+        f"  case-workbench starting\n"
+        f"  cwd:    {cwd}\n"
+        f"  branch: {branch} @ {commit}\n"
+        f"  DB:     {db_path}\n"
+        f"  port:   {port}\n"
+        f"{'=' * 60}\n",
+        flush=True,
+    )
+
+
+_startup_banner()
 
 app = FastAPI(title="case-workbench", version="0.1.0")
 
