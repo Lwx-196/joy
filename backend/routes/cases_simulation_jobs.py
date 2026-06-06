@@ -198,6 +198,39 @@ def _run_simulation_background(
             )
 
 
+@router.get("/{case_id}/auto-focus")
+def auto_focus_for_case(
+    case_id: int,
+    after_image_path: str | None = Query(None),
+    before_image_path: str | None = Query(None),
+) -> dict[str, Any]:
+    """Pre-compute auto-detected focus targets and regions for a case.
+
+    Frontend calls this when images are selected to pre-populate the focus UI.
+    Three-tier cascade: metadata (directory name) → CV diff → fallback.
+    """
+    from ..services.auto_focus_detector import auto_detect_focus
+
+    with db.connect() as conn:
+        row = conn.execute("SELECT abs_path FROM cases WHERE id = ?", (case_id,)).fetchone()
+    if not row:
+        raise HTTPException(404, "case not found")
+
+    result = auto_detect_focus(
+        abs_path=row["abs_path"],
+        after_path=after_image_path,
+        before_path=before_image_path,
+    )
+    return {
+        "case_id": case_id,
+        "focus_targets": result.focus_targets,
+        "focus_regions": result.focus_regions,
+        "detection_method": result.detection_method,
+        "confidence": result.confidence,
+        "detail": result.detail,
+    }
+
+
 @router.post("/{case_id}/simulate-after", response_model=SimulateAfterResponse)
 def simulate_case_after(case_id: int, payload: SimulateAfterRequest) -> SimulateAfterResponse:
     focus_targets = [x.strip() for x in payload.focus_targets if x.strip()]
@@ -210,6 +243,8 @@ def simulate_case_after(case_id: int, payload: SimulateAfterRequest) -> Simulate
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%f")
     with db.connect() as conn:
         case_dir = _case_dir_for_update(conn, case_id)
+        abs_path = conn.execute("SELECT abs_path FROM cases WHERE id = ?", (case_id,)).fetchone()
+        abs_path = abs_path["abs_path"] if abs_path else None
         after_path = _resolve_simulation_image_input(
             case_dir,
             path=payload.after_image_path,
@@ -227,6 +262,21 @@ def simulate_case_after(case_id: int, payload: SimulateAfterRequest) -> Simulate
             stamp=stamp,
             required=False,
         )
+
+        # --- Auto-detection: fill focus when operator provides none ---
+        detection_method = "manual"
+        if not focus_targets and not focus_regions:
+            from ..services.auto_focus_detector import auto_detect_focus
+
+            auto = auto_detect_focus(
+                abs_path=abs_path,
+                after_path=str(after_path),
+                before_path=str(before_path) if before_path else None,
+            )
+            focus_targets = auto.focus_targets
+            focus_regions = auto.focus_regions
+            detection_method = auto.detection_method
+
         style_reference_paths = [
             _resolve_style_reference_path(p) for p in payload.style_reference_paths
         ]
@@ -250,7 +300,7 @@ def simulate_case_after(case_id: int, payload: SimulateAfterRequest) -> Simulate
             input_refs=input_refs,
             provider=provider,
             model_name=payload.model_name,
-            note=payload.note,
+            note=payload.note if detection_method == "manual" else f"[auto:{detection_method}] {payload.note or ''}".strip(),
             status="queued",
         )
         ai_run_id = _insert_ai_run(

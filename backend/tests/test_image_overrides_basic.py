@@ -1131,7 +1131,7 @@ def test_supplement_candidates_find_safe_cross_case_image_and_copy_requires_revi
     assert "补图待确认 1 张" in render_preflight["render_error"]
 
 
-def test_simulate_after_authorization_required_focus_regions_optional(client, seed_case, monkeypatch, tmp_path):
+def test_simulate_after_authorization_required_focus_regions_optional(client, seed_case, monkeypatch, tmp_path, sync_job_pool):
     from backend import ai_generation_adapter
 
     case_dir = tmp_path / "case-sim-required"
@@ -1275,7 +1275,7 @@ def test_ai_adapter_difference_heatmap_scores_regions(tmp_path):
     assert metrics["heatmap_kind"] == "difference_heatmap"
 
 
-def test_simulate_after_accepts_uploaded_after_without_before_reference(client, seed_case, monkeypatch, tmp_path):
+def test_simulate_after_accepts_uploaded_after_without_before_reference(client, seed_case, monkeypatch, tmp_path, sync_job_pool):
     from backend import ai_generation_adapter, db
 
     case_dir = tmp_path / "case-sim-upload"
@@ -1310,7 +1310,7 @@ def test_simulate_after_accepts_uploaded_after_without_before_reference(client, 
 
     assert resp.status_code == 200, resp.text
     body = resp.json()
-    assert body["status"] == "done"
+    assert body["status"] == "queued"  # async：即时入队，完成态在下方 DB 断言
     assert body["input_refs"][0]["role"] == "after_source"
     assert ".case-workbench-simulation-inputs" in body["input_refs"][0]["case_relative_path"]
     assert captured["before_image_path"] is None
@@ -1323,7 +1323,7 @@ def test_simulate_after_accepts_uploaded_after_without_before_reference(client, 
     assert json.loads(sim["audit_json"])["input_refs"][0]["role"] == "after_source"
 
 
-def test_simulate_after_uses_ps_adapter_and_audits(client, seed_case, monkeypatch, tmp_path):
+def test_simulate_after_uses_ps_adapter_and_audits(client, seed_case, monkeypatch, tmp_path, sync_job_pool):
     from backend import ai_generation_adapter, db
 
     case_dir = tmp_path / "case-sim"
@@ -1364,10 +1364,9 @@ def test_simulate_after_uses_ps_adapter_and_audits(client, seed_case, monkeypatc
     )
     assert resp.status_code == 200, resp.text
     body = resp.json()
-    assert body["status"] == "done"
+    assert body["status"] == "queued"  # async：output_refs/最终态见下方 DB 断言
     assert body["provider"] == "ps_model_router"
     assert body["focus_regions"][0]["label"] == "下颌线"
-    assert body["output_refs"][0]["kind"] == "ai_after_simulation"
     assert captured["model_name"] == "gpt-image-2-vip"
     assert captured["focus_regions"][0]["x"] == 0.2
     assert captured["after_image_path"] == case_dir / "术后-正面.jpg"
@@ -1384,7 +1383,7 @@ def test_simulate_after_uses_ps_adapter_and_audits(client, seed_case, monkeypatc
     assert json.loads(ai["input_summary_json"])["focus_regions"][0]["width"] == 0.4
 
 
-def test_simulate_after_records_failed_ps_adapter(client, seed_case, monkeypatch, tmp_path):
+def test_simulate_after_records_failed_ps_adapter(client, seed_case, monkeypatch, tmp_path, sync_job_pool):
     from backend import ai_generation_adapter, db
 
     case_dir = tmp_path / "case-sim-fail"
@@ -1408,8 +1407,7 @@ def test_simulate_after_records_failed_ps_adapter(client, seed_case, monkeypatch
         },
     )
     assert resp.status_code == 200, resp.text
-    assert resp.json()["status"] == "failed"
-    assert "ps router exploded" in resp.json()["error_message"]
+    assert resp.json()["status"] == "queued"  # async：失败态在 worker 跑后写 DB（下方断言）
 
     with db.connect() as conn:
         sim = conn.execute("SELECT status, error_message, output_refs_json FROM simulation_jobs").fetchone()
