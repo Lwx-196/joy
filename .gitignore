@@ -74,3 +74,8 @@ delivery/*/
 
 # Allowlist fixture DB (override case-workbench.db ignore)
 !tests/fixtures/case-workbench.test.db
+
+# POC / scratch experiments (single-image enhance & alignment explorations;
+# owner local scratch, not feature code — keep out of git history)
+/poc_*.py
+/backend/scripts/ai_enhance_batch.py
