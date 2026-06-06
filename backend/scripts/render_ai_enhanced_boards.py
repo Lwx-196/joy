@@ -575,8 +575,9 @@ def main() -> None:
     parser.add_argument("--native-enhance", action="store_true",
                         help="owner 管线：渲染器原生 focus-scoped 局部增强"
                              "(gpt-image-2 忠实 + 姿态锁 + 稳定回退) → matte 纯黑底；替代 gemini bolt-on")
-    parser.add_argument("--enhance-model", default="gpt-image-2",
-                        help="原生增强模型（默认 gpt-image-2 忠实；gemini-3-pro-image-preview=gemini 基础款实验）")
+    parser.add_argument("--enhance-model", default="gemini-3-pro-image-preview",
+                        help="原生增强模型（默认 gemini-3-pro-image-preview 主力，需 t54 vertex ADC 在线，"
+                             "4 案例验证；gpt-image-2=忠实零 vertex 依赖备选，gemini 失败时单角度退未增强原图）")
     parser.add_argument("--enhance-direction", default="heal", choices=["strict", "heal"],
                         help="增强方向：heal(默认)=恢复预览定向 prompt（身份锁不变 + 往恢复良好理想化，"
                              "4 案例验证一致安全）；strict=旧版忠实严格 prompt（只许极轻、偏保守）")
