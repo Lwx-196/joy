@@ -13,6 +13,7 @@ import {
   type SimulationJob,
 } from "../api";
 import {
+  useAutoFocus,
   useCaseSimulationJobs,
   usePrepareManualRenderSources,
   usePreviewManualRender,
@@ -321,12 +322,19 @@ export function ManualRenderPicker({ caseId, allImages, brand, seedRequest }: Pr
   const [selectedRenderViews, setSelectedRenderViews] = useState<ManualRenderView[]>(() => VIEWS);
   const [dragOver, setDragOver] = useState<SlotKind | null>(null);
   const [focusText, setFocusText] = useState("");
+  const [autoFocusApplied, setAutoFocusApplied] = useState(false);
+  const [autoFocusMethod, setAutoFocusMethod] = useState<string | null>(null);
   const [modelName, setModelName] = useState("");
   const [usePlanner, setUsePlanner] = useState(false);
+  // 第三条出图选项：术后 AI 增强板（heal 方向固定 + 模型 gemini 主力 / gpt 备选）
+  const [aiEnhanceBoard, setAiEnhanceBoard] = useState(false);
+  const [aiEnhanceModel, setAiEnhanceModel] = useState("gemini-3-pro-image-preview");
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [elapsedSec, setElapsedSec] = useState(0);
   const [simulationNowMs, setSimulationNowMs] = useState(() => Date.now());
+
+  const autoFocusQ = useAutoFocus(caseId);
 
   useEffect(() => {
     if (!simulateMut.isPending) {
@@ -341,6 +349,30 @@ export function ManualRenderPicker({ caseId, allImages, brand, seedRequest }: Pr
     const id = window.setInterval(() => setSimulationNowMs(Date.now()), 1000);
     return () => window.clearInterval(id);
   }, []);
+
+  // Auto-focus: pre-populate focus targets and regions from backend detection
+  useEffect(() => {
+    if (autoFocusApplied || !autoFocusQ.data) return;
+    const { focus_targets, focus_regions, detection_method } = autoFocusQ.data;
+    if (detection_method === "fallback" || focus_targets.length === 0) return;
+    // Only auto-fill if user hasn't manually entered anything
+    if (focusText.trim()) return;
+    setFocusText(focus_targets.join("，"));
+    if (focus_regions.length > 0) {
+      setFocusRegionsByView((prev) => ({
+        ...prev,
+        front: focus_regions.map((r) => ({
+          x: r.x,
+          y: r.y,
+          width: r.width,
+          height: r.height,
+          label: r.label ?? null,
+        })),
+      }));
+    }
+    setAutoFocusMethod(detection_method);
+    setAutoFocusApplied(true);
+  }, [autoFocusQ.data, autoFocusApplied, focusText]);
 
   const imageOptions = useMemo(() => [...allImages].sort(), [allImages]);
   const imageNameSet = useMemo(() => new Set(imageOptions), [imageOptions]);
@@ -763,7 +795,14 @@ export function ManualRenderPicker({ caseId, allImages, brand, seedRequest }: Pr
       if (shouldRender) {
         await renderMut.mutateAsync({
           caseId,
-          payload: { brand, template: renderTemplate, semantic_judge: "off" },
+          payload: {
+            brand,
+            template: renderTemplate,
+            semantic_judge: "off",
+            ...(aiEnhanceBoard
+              ? { options: { enhance_direction: "heal", enhance_model: aiEnhanceModel } }
+              : {}),
+          },
         });
         setMessage(t("manualRender.enqueued", { files: createdFiles.join(" / ") }));
       } else {
@@ -1233,6 +1272,35 @@ export function ManualRenderPicker({ caseId, allImages, brand, seedRequest }: Pr
                 })}
           </div>
         )}
+        <div
+          style={{ display: "flex", gap: 10, justifyContent: "flex-end", alignItems: "center", flexWrap: "wrap" }}
+          data-testid="ai-enhance-board-controls"
+        >
+          <label
+            style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11.5, color: "var(--ink-2)", cursor: "pointer" }}
+            title={t("manualRender.aiEnhanceBoardHint")}
+          >
+            <input
+              type="checkbox"
+              checked={aiEnhanceBoard}
+              onChange={(e) => setAiEnhanceBoard(e.target.checked)}
+              data-testid="ai-enhance-board-toggle"
+            />
+            {t("manualRender.aiEnhanceBoard")}
+          </label>
+          {aiEnhanceBoard && (
+            <select
+              className="input sm"
+              style={{ fontSize: 11.5, maxWidth: 220 }}
+              value={aiEnhanceModel}
+              onChange={(e) => setAiEnhanceModel(e.target.value)}
+              data-testid="ai-enhance-board-model"
+            >
+              <option value="gemini-3-pro-image-preview">gemini（画质·主力）</option>
+              <option value="gpt-image-2">gpt-image-2（忠实·零vertex）</option>
+            </select>
+          )}
+        </div>
         <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", alignItems: "center" }}>
           <button
             type="button"
@@ -1272,10 +1340,21 @@ export function ManualRenderPicker({ caseId, allImages, brand, seedRequest }: Pr
           <input
             value={focusText}
             disabled={busy}
-            onChange={(e) => setFocusText(e.target.value)}
+            onChange={(e) => {
+              setFocusText(e.target.value);
+              setAutoFocusApplied(true);
+            }}
             placeholder={t("manualRender.focusPlaceholder")}
             style={{ fontSize: 12 }}
           />
+          {autoFocusMethod && (
+            <div style={{ fontSize: 11, color: "var(--green-ink)", marginTop: 2 }}>
+              {autoFocusMethod === "metadata" && "从案例目录自动识别治疗部位"}
+              {autoFocusMethod === "cv" && "从术前术后对比自动检测变化区域"}
+              {autoFocusMethod === "metadata+cv" && "目录识别 + 术前术后对比双重检测"}
+              {" "}(可手动修改)
+            </div>
+          )}
           <div
             className="manual-sim-hint"
             style={{ color: simulationInputProblem ? "var(--amber-ink)" : undefined }}

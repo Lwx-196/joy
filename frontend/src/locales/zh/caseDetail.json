@@ -175,6 +175,8 @@
     "activePairMissing": "请选择当前角度的术前、术后照片",
     "saveOnly": "保存已配角度",
     "saveAndRender": "保存并出图",
+    "aiEnhanceBoard": "术后AI增强板",
+    "aiEnhanceBoardHint": "勾选后出图走术后局部AI增强（heal方向·身份锁），三联板",
     "saving": "保存中…",
     "working": "处理中…",
     "missing": "请选择或上传术前、术后各一张照片",

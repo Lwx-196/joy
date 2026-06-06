@@ -85,6 +85,7 @@ import {
   rescanCase,
   rescanCaseGroups,
   retrySimulationJob,
+  fetchAutoFocus,
   retryUpgradeJob,
   reviewCaseImage,
   reviewRenderQuality,
@@ -212,6 +213,8 @@ export const QK = {
   // Stage 1 (post-Phase-3): per-case audit log for the "近期变更" drawer.
   caseRevisions: (caseId: number) => ["cases", caseId, "revisions"] as const,
   simulationJobsForCase: (caseId: number) => ["cases", caseId, "simulation-jobs"] as const,
+  autoFocus: (caseId: number, afterPath?: string | null, beforePath?: string | null) =>
+    ["cases", caseId, "auto-focus", afterPath ?? "", beforePath ?? ""] as const,
   simulationQualityQueue: (params?: { status?: SimulationQualityQueueStatus; recommendation?: string | null; limit?: number }) =>
     params && Object.keys(params).length > 0
       ? (["simulation", "quality-queue", params] as const)
@@ -810,6 +813,19 @@ export function useRetrySimulationJob() {
       qc.refetchQueries({ queryKey: QK.simulationJobsForCase(vars.caseId) });
       qc.invalidateQueries({ queryKey: ["simulation", "quality-queue"] });
     },
+  });
+}
+
+export function useAutoFocus(
+  caseId: number | null | undefined,
+  afterImagePath?: string | null,
+  beforeImagePath?: string | null,
+) {
+  return useQuery({
+    queryKey: caseId ? QK.autoFocus(caseId, afterImagePath, beforeImagePath) : ["auto-focus-disabled"],
+    queryFn: () => fetchAutoFocus(caseId!, afterImagePath, beforeImagePath),
+    enabled: !!caseId,
+    staleTime: 60_000,
   });
 }
 
