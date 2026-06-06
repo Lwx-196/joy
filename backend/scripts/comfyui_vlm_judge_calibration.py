@@ -75,6 +75,25 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _count_hard_veto(accepted: list[dict[str, Any]]) -> int:
+    return sum(1 for item in accepted if item.get("hard_veto_reason"))
+
+
+def _count_consensus_disagreement(accepted: list[dict[str, Any]]) -> int:
+    return sum(
+        1 for item in accepted
+        if (item.get("pro_winner_role") and item.get("flash_winner_role"))
+        and item["pro_winner_role"] != item["flash_winner_role"]
+    )
+
+
+def _count_below_cutoff(accepted: list[dict[str, Any]], *, cutoff: float) -> int:
+    return sum(
+        1 for item in accepted
+        if isinstance(item.get("confidence"), (int, float)) and item["confidence"] < cutoff
+    )
+
+
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -484,6 +503,9 @@ def evaluate_vlm_calibration(
         "judge_baseline_count": sum(1 for item in accepted if item["judge_winner_role"] == "baseline"),
         "false_candidate_promotion_count": false_candidate_promotion_count,
         "false_baseline_rejection_count": false_baseline_rejection_count,
+        "hard_veto_count": _count_hard_veto(accepted),
+        "consensus_disagreement_count": _count_consensus_disagreement(accepted),
+        "confidence_below_cutoff_count": _count_below_cutoff(accepted, cutoff=0.85),
         "candidate_promotion_guardrail": candidate_guardrail,
         "accepted_judgments": accepted,
         "rejected_judgments": rejected,
