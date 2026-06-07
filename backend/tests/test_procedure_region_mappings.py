@@ -323,3 +323,63 @@ def test_compose_from_explicit_pairs():
         [(prm.PROJECT_HA_FILLER, "唇"), (prm.PROJECT_HA_FILLER, "下巴")]
     )
     assert "唇" in prompt and "下巴" in prompt
+
+
+# --- 即刻效果分类（has_immediate_visible_effect）---
+
+def test_immediate_effect_constants_complete():
+    assert prm.IMMEDIATE_EFFECT_PROJECTS & prm.NO_IMMEDIATE_EFFECT_PROJECTS == frozenset()
+    assert prm.IMMEDIATE_EFFECT_PROJECTS | prm.NO_IMMEDIATE_EFFECT_PROJECTS <= prm.PROJECT_TYPES
+
+
+def test_pure_botox_no_immediate_effect():
+    has, reason = prm.has_immediate_visible_effect("2025.10.29衡力20抬头、川字")
+    assert not has
+    assert "botulinum_toxin" in reason
+
+
+def test_pure_biostimulator_no_immediate_effect():
+    has, reason = prm.has_immediate_visible_effect("2025.03.15塑妍萃法令纹")
+    assert not has
+    assert "biostimulator" in reason
+
+
+def test_mixed_botox_ha_has_effect():
+    has, _ = prm.has_immediate_visible_effect("2025.10.29衡力20抬头、川字、海魅1.0ml注射唇、下巴")
+    assert has
+
+
+def test_pure_filler_has_effect():
+    has, _ = prm.has_immediate_visible_effect("2025.06.01海魅泪沟")
+    assert has
+
+
+def test_unknown_brand_fail_open():
+    has, _ = prm.has_immediate_visible_effect("2025.01.01某不知名剂注射唇")
+    assert has
+
+
+def test_empty_case_name_fail_open():
+    has, _ = prm.has_immediate_visible_effect("")
+    assert has
+
+
+def test_unknown_segments_with_botox_fail_open():
+    # 丰颜/质颜 是乔雅登子品牌(HA)但未单独注册 → needs_human_review → fail-open 不误删
+    has, _ = prm.has_immediate_visible_effect(
+        "2025.12.26丰颜2支注射隆鼻，苹果肌、质颜1支注射鼻基底、衡力50U川字鱼尾抬头纹"
+    )
+    assert has
+
+
+def test_neck_wrinkle_no_photo_value():
+    # 颈纹无论用什么产品（嗨体HA/滚针），即刻照无正向对比价值
+    has, reason = prm.has_immediate_visible_effect("2025.12.10颈纹（嗨体1.5+2.5）+滚针")
+    assert not has
+    assert "region_no_photo_value" in reason
+
+
+def test_neck_wrinkle_with_other_regions_kept():
+    # 颈纹 + 其他有效部位（泪沟）→ 保留
+    has, _ = prm.has_immediate_visible_effect("2025.12.10嗨体颈纹+泪沟")
+    assert has

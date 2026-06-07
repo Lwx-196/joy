@@ -531,6 +531,16 @@ def _build_case_payload(cand: CandidateCaseDir) -> dict[str, Any]:
     """Compute the inferred fields for one case directory.
     Pulled out of scan() so /api/cases/{id}/rescan can reuse it."""
     category, tier, blocking = infer_category(cand.abs_path, cand.image_files)
+    from .services.procedure_region_mappings import has_immediate_visible_effect
+    case_name = cand.abs_path.name
+    has_effect, reason = has_immediate_visible_effect(case_name)
+    if not has_effect:
+        blocking.append({
+            "code": "no_immediate_visible_effect",
+            "files": [],
+            "severity": "warn",
+            "detail": reason,
+        })
     labeled_count = sum(
         1 for name in cand.image_files if any(tok in name for tok in LABELED_TOKENS)
     )

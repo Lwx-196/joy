@@ -47,6 +47,21 @@ PROJECT_TYPES: frozenset[str] = frozenset(
     }
 )
 
+# --- 即刻效果分类（用于剔除无即刻术后视觉变化的案例）---
+IMMEDIATE_EFFECT_PROJECTS: frozenset[str] = frozenset({
+    PROJECT_HA_FILLER, PROJECT_COLLAGEN_FILLER, PROJECT_CAHA,
+    PROJECT_PCL, PROJECT_PMMA,
+})
+NO_IMMEDIATE_EFFECT_PROJECTS: frozenset[str] = frozenset({
+    PROJECT_BOTOX, PROJECT_BIOSTIMULATOR,
+})
+
+# 部位级排除：无论用什么产品，即刻术后照都无正向对比价值的部位。
+# 颈纹：嗨体等注射后红肿反而使纹路更明显，即刻照不如术前。
+NO_IMMEDIATE_PHOTO_VALUE_REGIONS: frozenset[str] = frozenset({
+    "颈纹",
+})
+
 # === 面部填充剂完整 taxonomy（2026-06-02 自上而下权威普查，避免被动漏类）===
 # 权威源：consultingroom / theplasticsfella / 知乎医美再生材料综述 / NMPA。按「即刻体积 /
 # 生物刺激 / 可降解性」分。✅=已建模 · 📝=已知暂不建模（0 库案例，原因在右）。
@@ -772,11 +787,56 @@ def compose_effect_prompt(
     return "\n".join(lines)
 
 
+def has_immediate_visible_effect(case_name: str) -> tuple[bool, str]:
+    """判断案例是否有即刻可见效果。
+
+    返回 (has_effect, reason)。
+    fail-open：未知品牌 / 无法解析 / 有未识别段 → 返回 (True, "") 不误删。
+
+    两层检查：
+    1. 部位级：全部部位都在 NO_IMMEDIATE_PHOTO_VALUE_REGIONS → 无对比价值
+    2. 项目级：全部术式都在 NO_IMMEDIATE_EFFECT_PROJECTS → 无即刻效果
+    """
+    raw = (case_name or "").strip()
+    if not raw:
+        return (True, "")
+
+    # 部位级检查：从案例名直接提取部位关键词
+    for region in NO_IMMEDIATE_PHOTO_VALUE_REGIONS:
+        if region in raw:
+            all_regions = atlas.extract_regions(raw)
+            non_excluded = [r for r in all_regions if r not in NO_IMMEDIATE_PHOTO_VALUE_REGIONS]
+            if not non_excluded:
+                return (False, f"region_no_photo_value: {region}")
+
+    parsed = parse_procedures(raw)
+    if not parsed["procedures"]:
+        return (True, "")
+    if parsed["needs_human_review"]:
+        return (True, "")
+    projects_found: set[str] = set()
+    brands_found: list[str] = []
+    for proc in parsed["procedures"]:
+        project = proc.get("project")
+        if project:
+            projects_found.add(project)
+            brands_found.append(proc["brand"])
+    if not projects_found:
+        return (True, "")
+    if projects_found & IMMEDIATE_EFFECT_PROJECTS:
+        return (True, "")
+    if projects_found <= NO_IMMEDIATE_EFFECT_PROJECTS:
+        return (False, f"pure {'|'.join(sorted(projects_found))}: {','.join(brands_found)}")
+    return (True, "")
+
+
 __all__ = [
     "PROJECT_HA_FILLER", "PROJECT_BOTOX", "PROJECT_BIOSTIMULATOR",
     "PROJECT_COLLAGEN_FILLER", "PROJECT_CAHA", "PROJECT_PMMA", "PROJECT_PCL", "PROJECT_TYPES",
+    "IMMEDIATE_EFFECT_PROJECTS", "NO_IMMEDIATE_EFFECT_PROJECTS",
     "STRENGTH_SUBTLE", "STRENGTH_NATURAL", "STRENGTH_STRONG", "STRENGTHS",
     "BRAND_TO_PROJECT", "EFFECT_ROWS", "IDENTITY_LOCKS",
     "resolve_brand", "effect_row", "parse_procedures",
     "build_effect_prompt_fragment", "compose_effect_prompt",
+    "has_immediate_visible_effect",
 ]
