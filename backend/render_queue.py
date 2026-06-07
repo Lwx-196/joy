@@ -2259,8 +2259,13 @@ class RenderQueue:
             semantic_judge = row["semantic_judge"]
             case_id = row["case_id"]
             # 术后 AI 增强板（heal/gemini）。options 经 job meta_json 携带。
+            # 执行时兜底：render_mode=ai 但入队时未存 enhance_direction（旧代码入队的 job），
+            # 补上默认值，确保不会静默退化成纯排版。
             _job_options = _parse_job_options(row["meta_json"] if "meta_json" in row.keys() else None)
+            render_mode = row["render_mode"] if "render_mode" in row.keys() else "ai"
             ai_enhance_direction = str(_job_options.get("enhance_direction") or "").strip()
+            if not ai_enhance_direction and render_mode == "ai":
+                ai_enhance_direction = "heal"
             ai_enhance_model = str(_job_options.get("enhance_model") or "").strip()
             batch_id = row["batch_id"]
             customer_raw = row["case_customer_raw"]
