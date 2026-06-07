@@ -18,7 +18,7 @@ from .vlm_usage import record_vlm_usage
 
 CLASSIFICATION_PROMPT = """You are a medical-aesthetic clinical photography analyst.
 Classify exactly one source image. Return strict JSON only:
-{"phase":"before|after|healing|uncertain","view":"front|45deg|side|back","body_part":"face|body","confidence":0.0,"reasoning":"short visual evidence","visual_cues":[]}
+{"phase":"before|after|healing|uncertain","view":"front|45deg|side|back","body_part":"face|body","confidence":0.0,"reasoning":"short visual evidence","visual_cues":[],"is_composite":false}
 
 ## Phase Classification — Visual Cue Checklist
 
@@ -48,7 +48,12 @@ Classify exactly one source image. Return strict JSON only:
 **When uncertain**:
 - Final healed result may look identical to pre-treatment with better proportions — use "uncertain" if no clear post-treatment visual cues
 - Phone screenshots with UI chrome (status bar, navigation) → flag in reasoning
-- Collage/composite images with multiple photos → flag in reasoning
+- Collage/composite images with multiple photos → set is_composite=true
+
+## Composite Detection
+- is_composite: true if the image contains multiple photos stitched together (before/after side-by-side, annotated comparison boards, multi-panel collages)
+- Also true if the image has visible annotation lines, arrows, text overlays marking treatment areas, or comparison labels
+- A single photo with a simple watermark/logo is NOT composite
 
 ## View Classification
 - front: full frontal face, both ears potentially visible
@@ -108,6 +113,7 @@ class ClassificationResult:
     usage_raw: dict[str, Any] = field(default_factory=dict)
     raw: dict[str, Any] = field(default_factory=dict)
     visual_cues: list[str] = field(default_factory=list)
+    is_composite: bool = False
 
 
 def _now() -> str:
@@ -226,6 +232,7 @@ def _parse_result(image_path: Path, response: VLMResponse) -> ClassificationResu
     if not isinstance(visual_cues, list):
         visual_cues = []
     visual_cues = [str(c) for c in visual_cues if c][:10]  # cap at 10 cues
+    is_composite = bool(parsed.get("is_composite"))
     return ClassificationResult(
         image_path=image_path,
         phase=phase,
@@ -241,6 +248,7 @@ def _parse_result(image_path: Path, response: VLMResponse) -> ClassificationResu
         usage_raw=response.usage_raw,
         raw=parsed,
         visual_cues=visual_cues,
+        is_composite=is_composite,
     )
 
 
@@ -432,11 +440,21 @@ def apply_classification_result(
     for reason in ("vlm_classifier", result.reasoning):
         if reason and reason not in reasons:
             reasons.append(reason)
+    quality = _json_loads(
+        conn.execute("SELECT quality_json FROM image_observations WHERE id = ?", (item.observation_id,)).fetchone()["quality_json"],
+        {},
+    )
+    if not isinstance(quality, dict):
+        quality = {}
+    if result.is_composite:
+        quality["is_composite"] = True
+    elif "is_composite" in quality:
+        quality["is_composite"] = False
     conn.execute(
         """
         UPDATE image_observations
         SET phase = ?, body_part = ?, view = ?, confidence = ?, source = ?,
-            reasons_json = ?, updated_at = ?
+            reasons_json = ?, quality_json = ?, updated_at = ?
         WHERE id = ?
         """,
         (
@@ -446,6 +464,7 @@ def apply_classification_result(
             result.confidence,
             "vlm_classifier",
             json.dumps(reasons[:8], ensure_ascii=False),
+            json.dumps(quality, ensure_ascii=False),
             _now(),
             item.observation_id,
         ),

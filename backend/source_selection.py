@@ -22,6 +22,36 @@ LOW_COMPARISON_VALUE_SCORE = 55
 SOURCE_GROUP_SELECTION_META_KEY = "source_group_selection"
 SLOTS = {"front", "oblique", "side"}
 
+TREATMENT_VIEW_BOOST: dict[str, dict[str, int]] = {
+    "rhinoplasty": {"side": 12, "oblique": 8, "front": 0},
+    "tear_trough": {"front": 10, "oblique": 6, "side": 0},
+    "lip": {"front": 10, "oblique": 4, "side": 0},
+    "cheek": {"oblique": 10, "front": 6, "side": 4},
+    "chin": {"side": 10, "oblique": 8, "front": 4},
+    "forehead": {"front": 8, "oblique": 4, "side": 0},
+    "shoulder": {"front": 6, "oblique": 6, "back": 6},
+}
+
+_TREATMENT_KEYWORDS: list[tuple[str, list[str]]] = [
+    ("rhinoplasty", ["隆鼻", "鼻整形", "鼻部", "rhinoplasty", "nose"]),
+    ("tear_trough", ["泪沟", "tear_trough", "tear trough"]),
+    ("lip", ["丰唇", "唇部", "lip"]),
+    ("cheek", ["面颊", "苹果肌", "颊部", "cheek"]),
+    ("chin", ["下巴", "下颌", "chin"]),
+    ("forehead", ["额头", "丰额", "forehead"]),
+    ("shoulder", ["瘦肩", "肩部", "shoulder"]),
+]
+
+
+def detect_treatment_type(case_path: str) -> str | None:
+    """Extract treatment type from case folder name."""
+    lowered = str(case_path or "").lower()
+    for treatment, keywords in _TREATMENT_KEYWORDS:
+        for kw in keywords:
+            if kw.lower() in lowered:
+                return treatment
+    return None
+
 
 def float_value(value: Any) -> float | None:
     try:
@@ -1135,7 +1165,7 @@ def apply_render_feedback(candidate: dict[str, Any], feedback: dict[str, Any] | 
         candidate["risk_level"] = "review"
 
 
-def candidate_quality(image: dict[str, Any], source_role: str) -> dict[str, Any]:
+def candidate_quality(image: dict[str, Any], source_role: str, *, treatment_type: str | None = None) -> dict[str, Any]:
     score = 50
     reasons: list[str] = []
     warnings: list[dict[str, str]] = []
@@ -1208,6 +1238,13 @@ def candidate_quality(image: dict[str, Any], source_role: str) -> dict[str, Any]
         if inferred:
             image["direction"] = inferred
             image["direction_source"] = "filename_fallback"
+    if treatment_type and view:
+        boost_map = TREATMENT_VIEW_BOOST.get(treatment_type)
+        if boost_map:
+            boost = boost_map.get(view, 0)
+            if boost > 0:
+                score += boost
+                reasons.append(f"治疗项目({treatment_type})偏好视角")
     severity_rank = {"block": 2, "review": 1, "info": 0}
     max_severity = max((severity_rank.get(str(item.get("severity")), 0) for item in warnings), default=0)
     risk_level = "block" if max_severity >= 2 else "review" if max_severity == 1 else "ok"

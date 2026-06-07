@@ -539,3 +539,63 @@ def test_render_selection_context_uses_vlm_classifier_observations(temp_db: Path
     assert front["before"]["classification_source"] == "vlm_classifier"
     assert front["after"]["filename"] == "after.png"
     assert front["after"]["classification_source"] == "vlm_classifier"
+
+
+def test_is_composite_field_parsed_and_stored(tmp_path: Path) -> None:
+    from backend.services.vlm_source_classifier import classify_image
+
+    image = tmp_path / "composite.png"
+    _write_tiny_png(image)
+    provider = FakeProvider(parsed={
+        "phase": "after",
+        "view": "front",
+        "body_part": "face",
+        "confidence": 0.92,
+        "reasoning": "composite image with annotations",
+        "is_composite": True,
+    })
+    result = classify_image(image, provider)
+    assert result.is_composite is True
+
+
+def test_is_composite_false_by_default(tmp_path: Path) -> None:
+    from backend.services.vlm_source_classifier import classify_image
+
+    image = tmp_path / "single.png"
+    _write_tiny_png(image)
+    provider = FakeProvider()
+    result = classify_image(image, provider)
+    assert result.is_composite is False
+
+
+def test_apply_stores_is_composite_in_quality_json(temp_db: Path, tmp_path: Path) -> None:
+    from backend import db
+    from backend.services.vlm_source_classifier import (
+        ClassificationResult,
+        apply_classification_result,
+        fetch_classification_queue,
+    )
+
+    _write_tiny_png(tmp_path / "comp.png")
+    with db.connect() as conn:
+        obs_id = _seed_observation(conn, root_path=str(tmp_path), image_path="comp.png")
+        queue = fetch_classification_queue(conn, case_id=126, max_items=10)
+        assert len(queue) >= 1
+        item = [q for q in queue if q.observation_id == obs_id][0]
+        result = ClassificationResult(
+            image_path=tmp_path / "comp.png",
+            phase="after",
+            view="front",
+            body_part="face",
+            confidence=0.93,
+            is_composite=True,
+        )
+        updated = apply_classification_result(conn, item, result)
+        assert updated
+        row = conn.execute(
+            "SELECT quality_json FROM image_observations WHERE id = ?",
+            (obs_id,),
+        ).fetchone()
+        import json
+        quality = json.loads(row["quality_json"])
+        assert quality.get("is_composite") is True
