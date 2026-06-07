@@ -73,6 +73,21 @@ VALID_PHASES = {"before", "intraop", "after", "unknown"}
 VALID_VIEWS = {"front", "oblique", "side", "back"}
 VALID_BODY_PARTS = {"face", "body", "unknown"}
 
+COMPOSITE_DETECTION_PROMPT = """Is this image a composite, collage, or comparison image?
+
+Return ONLY strict JSON: {"is_composite": true or false, "reason": "short explanation"}
+
+Composite means:
+- Multiple photos stitched together (before/after side-by-side or stacked)
+- Annotated comparison with text labels like 术前/术后, before/after
+- Multi-panel collage with visible borders between photos
+- Images with annotation lines, arrows, or comparison markers
+
+NOT composite:
+- Single photo with watermark or logo
+- Single photo with minor text overlay (clinic name)
+"""
+
 # P0.5 (review H-2): cap traceback size to avoid multi-MB blobs landing in DB rows.
 TRACEBACK_MAX_CHARS = 16384
 
@@ -332,6 +347,32 @@ def classify_batch_with_retry(
         for idx, retry_result in zip(retry_indices, retry_results):
             results[idx] = retry_result
     return results
+
+
+def detect_composite_batch(
+    image_paths: list[Path],
+    provider: VLMProvider,
+    *,
+    concurrency: int = 2,
+    timeout: float = 60.0,
+) -> dict[Path, bool]:
+    """Focused composite detection using a short prompt. Returns {path: is_composite}."""
+    if not image_paths:
+        return {}
+    requests = [
+        VLMRequest(prompt=COMPOSITE_DETECTION_PROMPT, images=[p], timeout=timeout, purpose="composite_detect")
+        for p in image_paths
+    ]
+    responses = provider.call_vision_batch(requests, concurrency=concurrency, return_exceptions=True)
+    out: dict[Path, bool] = {}
+    for path, resp in zip(image_paths, responses):
+        if isinstance(resp, BaseException):
+            logger.warning("composite detection failed for %s: %s", path.name, resp)
+            out[path] = False
+            continue
+        parsed = resp.parsed if isinstance(resp.parsed, dict) else {}
+        out[path] = bool(parsed.get("is_composite"))
+    return out
 
 
 def _has_manual_override(conn: sqlite3.Connection, case_id: int | None, image_path: str) -> bool:
@@ -692,9 +733,40 @@ def run_classification(
             classified += 1
         else:
             skipped += 1
+    # --- Second pass: focused composite detection ---
+    # The general classification prompt is too long for small VLMs (e.g. qwen2.5vl)
+    # to reliably detect composites. Run a short, focused prompt on images that
+    # weren't already marked is_composite by the main pass.
+    composite_updated = 0
+    if resolved_mode == "apply":
+        needs_composite_check: list[tuple[ClassificationQueueItem, Path]] = []
+        for item, result in zip(queue, results):
+            if isinstance(result, BaseException) or result.is_composite:
+                continue
+            needs_composite_check.append((item, item.image_abs_path))
+        if needs_composite_check:
+            check_paths = [p for _, p in needs_composite_check]
+            composite_map = detect_composite_batch(check_paths, provider, concurrency=concurrency, timeout=timeout)
+            for item, path in needs_composite_check:
+                if composite_map.get(path):
+                    quality = _json_loads(
+                        conn.execute("SELECT quality_json FROM image_observations WHERE id = ?", (item.observation_id,)).fetchone()["quality_json"],
+                        {},
+                    )
+                    if not isinstance(quality, dict):
+                        quality = {}
+                    quality["is_composite"] = True
+                    conn.execute(
+                        "UPDATE image_observations SET quality_json = ?, updated_at = ? WHERE id = ?",
+                        (json.dumps(quality, ensure_ascii=False), _now(), item.observation_id),
+                    )
+                    composite_updated += 1
+                    logger.info("composite detected (2nd pass): obs %d / %s", item.observation_id, path.name)
+
     report["classified_count"] = classified
     report["skipped_count"] = skipped
     report["error_count"] = len(errors)
+    report["composite_detected_count"] = composite_updated
     if errors:
         report["errors"] = errors
     if resolved_mode == "live-no-apply":
