@@ -2,14 +2,18 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import traceback as _traceback
+import urllib.error
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from .vlm_provider import VLMProvider, VLMRequest, VLMRequestError, VLMResponse
+
+logger = logging.getLogger(__name__)
 from .vlm_usage import record_vlm_usage
 
 CLASSIFICATION_PROMPT = """You are a medical-aesthetic clinical photography analyst.
@@ -275,6 +279,53 @@ def classify_batch(
     return results
 
 
+_RETRYABLE_EXCEPTION_TYPES = (
+    TimeoutError,
+    ConnectionError,
+    urllib.error.URLError,
+    VLMRequestError,
+)
+
+
+def _is_retryable(exc: BaseException) -> bool:
+    if isinstance(exc, VLMRequestError) and exc.status_code is not None:
+        return exc.status_code in {429, 500, 502, 503, 504}
+    return isinstance(exc, _RETRYABLE_EXCEPTION_TYPES)
+
+
+def classify_batch_with_retry(
+    image_paths: list[Path],
+    provider: VLMProvider,
+    *,
+    concurrency: int = 3,
+    timeout: float = 30.0,
+    max_retries: int = 2,
+) -> list[ClassificationResult | BaseException]:
+    """Wraps classify_batch with per-item retry for transient/timeout errors."""
+    results = classify_batch(
+        image_paths, provider,
+        concurrency=concurrency, timeout=timeout, return_exceptions=True,
+    )
+    for retry_round in range(max_retries):
+        retry_indices = [
+            i for i, r in enumerate(results)
+            if isinstance(r, BaseException) and _is_retryable(r)
+        ]
+        if not retry_indices:
+            break
+        retry_paths = [image_paths[i] for i in retry_indices]
+        logger.info(
+            "classify_batch retry round %d: %d items", retry_round + 1, len(retry_paths),
+        )
+        retry_results = classify_batch(
+            retry_paths, provider,
+            concurrency=concurrency, timeout=timeout, return_exceptions=True,
+        )
+        for idx, retry_result in zip(retry_indices, retry_results):
+            results[idx] = retry_result
+    return results
+
+
 def _has_manual_override(conn: sqlite3.Connection, case_id: int | None, image_path: str) -> bool:
     if case_id is None:
         return False
@@ -443,6 +494,7 @@ def run_classification(
     mode: str | None = None,
     concurrency: int = 3,
     timeout: float = 30.0,
+    max_retries: int = 2,
 ) -> dict[str, Any]:
     if case_id is None and not all_low_confidence:
         raise ValueError("case_id is required unless all_low_confidence is true")
@@ -482,12 +534,12 @@ def run_classification(
         return report
     paths = [item.image_abs_path for item in queue]
     try:
-        results = classify_batch(
+        results = classify_batch_with_retry(
             paths,
             provider,
             concurrency=concurrency,
             timeout=timeout,
-            return_exceptions=True,
+            max_retries=max_retries,
         )
     except (VLMRequestError, ValueError, OSError) as exc:
         report["run_status"] = "blocked_vlm_classification_failed"
