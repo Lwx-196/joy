@@ -512,7 +512,7 @@ class VLMProvider:
             return ProviderConfig(provider=selected_provider, model=selected_model, status="blocked_unsupported_vlm_provider")
         if selected_provider in OLLAMA_PROVIDERS and not selected_model:
             selected_model = (
-                env.get("OLLAMA_MODEL") or env.get("VLM_OLLAMA_MODEL") or "qwen2.5vl:latest"
+                env.get("OLLAMA_MODEL") or env.get("VLM_OLLAMA_MODEL") or "gemma4:12b"
             ).strip()
         if not selected_model:
             return ProviderConfig(provider=selected_provider, status="blocked_missing_vlm_model_config")
@@ -768,12 +768,15 @@ class VLMProvider:
         if config.provider in ("openai_chat_completions", "ollama"):
             content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
             content.extend({"type": "image_url", "image_url": {"url": _data_url(image)}} for image in images)
-            return {
+            result = {
                 "model": config.model,
                 "messages": [{"role": "user", "content": content}],
                 "max_tokens": 800,
                 "stream": False,
             }
+            if config.provider == "ollama":
+                result["think"] = False
+            return result
         content: list[dict[str, Any]] = [{"type": "input_text", "text": prompt}]
         content.extend({"type": "input_image", "image_url": _data_url(image)} for image in images)
         return {
