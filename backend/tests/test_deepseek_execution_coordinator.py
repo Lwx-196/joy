@@ -126,12 +126,18 @@ def test_evidence_bundle_computes_current_state_for_live_status_and_candidate30(
 
 
 def test_coordination_missing_key_fails_closed_without_advisory(tmp_path: Path) -> None:
+    from unittest.mock import patch
+    from backend.config import AppSettings, clear_settings_cache
     from backend.scripts.deepseek_execution_coordinator import run_coordination
 
     report_path = tmp_path / "gate.json"
     report_path.write_text(json.dumps({"production_ready": False}), encoding="utf-8")
 
-    report = run_coordination(report_paths=[report_path], env={})
+    empty_settings = AppSettings(_env_file=None)  # type: ignore[call-arg]
+    clear_settings_cache()
+    with patch("backend.services.deepseek_client.get_settings", return_value=empty_settings):
+        report = run_coordination(report_paths=[report_path], env={})
+    clear_settings_cache()
 
     assert report["run_status"] == "blocked_missing_deepseek_api_key"
     assert report["deepseek_api"]["ready"] is False
