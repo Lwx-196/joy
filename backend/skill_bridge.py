@@ -34,7 +34,12 @@ SKILL_SCRIPT = SKILL_ROOT / "scripts" / "case_layout_board.py"
 # The skill needs cv2/mediapipe/numpy/pillow. Those are installed in the system
 # Python 3.12, not in case-workbench's venv. We spawn a subprocess so case-
 # workbench doesn't have to pull ~500MB of CV deps into its venv.
-SKILL_PYTHON = os.environ.get("CASE_LAYOUT_SKILL_PYTHON") or shutil.which("python3") or "/usr/bin/python3"
+SKILL_PYTHON = (
+    os.environ.get("CASE_LAYOUT_SKILL_PYTHON")
+    or shutil.which("python3.12")
+    or shutil.which("python3")
+    or "/usr/bin/python3"
+)
 
 
 def _build_skill_runner() -> str:

@@ -35,7 +35,12 @@ from . import stress
 SKILL_ROOT = Path.home() / "Desktop" / "飞书Claude" / "skills" / "case-layout-board"
 SKILL_SCRIPT = SKILL_ROOT / "scripts" / "case_layout_board.py"
 RENDER_SCRIPT = SKILL_ROOT / "scripts" / "render_brand_clean.py"
-SKILL_PYTHON = os.environ.get("CASE_LAYOUT_SKILL_PYTHON") or shutil.which("python3") or "/usr/bin/python3"
+SKILL_PYTHON = (
+    os.environ.get("CASE_LAYOUT_SKILL_PYTHON")
+    or shutil.which("python3.12")
+    or shutil.which("python3")
+    or "/usr/bin/python3"
+)
 
 DEFAULT_RENDER_TIMEOUT_SEC = int(os.environ.get("CASE_WORKBENCH_RENDER_TIMEOUT_SEC", "240"))
 # AI 增强板出图慢（3 角度 gemini@~85s + planner + matte）→ 单独大超时。
