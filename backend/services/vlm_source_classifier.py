@@ -134,15 +134,19 @@ def _float_0_1(value: Any, *, field_name: str) -> float:
 
 def _normalize_phase(value: Any) -> str:
     raw = str(value or "").strip().lower()
+    if "|" in raw:
+        raw = raw.split("|")[0].strip()
     mapping = {
         "pre": "before",
         "preop": "before",
         "pre-op": "before",
+        "pre-treatment": "before",
         "before": "before",
         "术前": "before",
         "post": "after",
         "postop": "after",
         "post-op": "after",
+        "post-treatment": "after",
         "after": "after",
         "术后": "after",
         "healing": "after",
@@ -163,6 +167,8 @@ def _normalize_phase(value: Any) -> str:
 
 def _normalize_view(value: Any) -> str:
     raw = str(value or "").strip().lower()
+    if "|" in raw:
+        raw = raw.split("|")[0].strip()
     mapping = {
         "frontal": "front",
         "front": "front",
@@ -188,12 +194,16 @@ def _normalize_view(value: Any) -> str:
 
 def _normalize_body_part(value: Any) -> str:
     raw = str(value or "").strip().lower()
+    if "|" in raw:
+        raw = raw.split("|")[0].strip()
     mapping = {
         "face": "face",
         "facial": "face",
         "面部": "face",
         "body": "body",
         "身体": "body",
+        "neck": "body",
+        "shoulder": "body",
         "unknown": "unknown",
     }
     body_part = mapping.get(raw, raw or "unknown")

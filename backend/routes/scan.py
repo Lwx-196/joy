@@ -2,7 +2,11 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
+from typing import Any
+
 from fastapi import APIRouter
+from pydantic import BaseModel, Field
 
 from .. import db, scanner
 from ..models import ScanResult
@@ -10,12 +14,21 @@ from ..models import ScanResult
 router = APIRouter(prefix="/api", tags=["scan"])
 
 
+class ScanRequest(BaseModel):
+    mode: str = "incremental"
+    roots: list[str] | None = Field(default=None, description="Extra root paths to scan (appended to DEFAULT_ROOTS)")
+
+
 @router.post("/scan", response_model=ScanResult)
-def trigger_scan(mode: str = "incremental") -> ScanResult:
+def trigger_scan(body: ScanRequest | None = None) -> ScanResult:
+    mode = body.mode if body else "incremental"
     if mode not in {"full", "incremental"}:
         mode = "incremental"
+    roots = list(scanner.DEFAULT_ROOTS)
+    if body and body.roots:
+        roots.extend(Path(r) for r in body.roots)
     with db.connect() as conn:
-        result = scanner.scan(conn, mode=mode)
+        result = scanner.scan(conn, roots=roots, mode=mode)
     return ScanResult(**result)
 
 
