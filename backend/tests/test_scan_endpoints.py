@@ -21,7 +21,7 @@ def test_scan_post_no_roots_records_zero_cases(
     client, monkeypatch: pytest.MonkeyPatch
 ):
     monkeypatch.setattr("backend.scanner.DEFAULT_ROOTS", [])
-    resp = client.post("/api/scan", params={"mode": "full"})
+    resp = client.post("/api/scan", json={"mode": "full"})
     assert resp.status_code == 200
     body = resp.json()
     assert body["new_count"] == 0
@@ -34,7 +34,7 @@ def test_scan_invalid_mode_falls_back_to_incremental(
 ):
     """Unknown modes silently coerce to 'incremental' (route shim)."""
     monkeypatch.setattr("backend.scanner.DEFAULT_ROOTS", [])
-    resp = client.post("/api/scan", params={"mode": "garbage"})
+    resp = client.post("/api/scan", json={"mode": "garbage"})
     assert resp.status_code == 200
 
     latest = client.get("/api/scan/latest").json()
@@ -45,8 +45,8 @@ def test_scan_latest_returns_most_recent(
     client, monkeypatch: pytest.MonkeyPatch
 ):
     monkeypatch.setattr("backend.scanner.DEFAULT_ROOTS", [])
-    client.post("/api/scan", params={"mode": "incremental"})
-    client.post("/api/scan", params={"mode": "full"})
+    client.post("/api/scan", json={"mode": "incremental"})
+    client.post("/api/scan", json={"mode": "full"})
     latest = client.get("/api/scan/latest").json()["scan"]
     assert latest["mode"] == "full"
     assert latest["case_count"] == 0
@@ -62,7 +62,7 @@ def test_scan_full_picks_up_synthetic_case_dir(
     (case_dir / "术后1.jpg").write_bytes(b"fakejpg")
 
     monkeypatch.setattr("backend.scanner.DEFAULT_ROOTS", [tmp_path])
-    resp = client.post("/api/scan", params={"mode": "full"})
+    resp = client.post("/api/scan", json={"mode": "full"})
     assert resp.status_code == 200
     assert resp.json()["new_count"] == 1
 
