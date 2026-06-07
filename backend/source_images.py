@@ -34,7 +34,7 @@ GENERATED_FILE_RE = re.compile(
     r"三联图|双联图|单行文案|文案|"
     r"居中logo|logo|"
     r"海报|朋友圈|封面|poster|banner|"
-    r"拼图|对比图|comparison|compare|"
+    r"拼图|对比|comparison|compare|"
     r"排版|成品|定稿|优化显眼"
     r")",
     re.IGNORECASE,
