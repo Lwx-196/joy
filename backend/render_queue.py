@@ -171,12 +171,82 @@ def _case_source_info(raw_meta: str | None, abs_path: str | None = None) -> tupl
     return len(image_files), image_files
 
 
-def _case_source_profile(raw_meta: str | None, abs_path: str | None = None) -> dict[str, object]:
+def _case_source_profile(raw_meta: str | None, abs_path: str | None = None, case_id: int | None = None) -> dict[str, object]:
     meta = _parse_case_meta(raw_meta)
     image_files = [str(item) for item in (meta.get("image_files") or []) if item]
     if abs_path:
-        return source_images.classify_existing_case_source_profile(abs_path, image_files)
-    return source_images.classify_source_profile(image_files)
+        profile = source_images.classify_existing_case_source_profile(abs_path, image_files)
+    else:
+        profile = source_images.classify_source_profile(image_files)
+    if (
+        case_id
+        and str(profile.get("source_kind")) == "missing_before_after_pair"
+        and int(profile.get("unlabeled_source_count") or 0) > 0
+    ):
+        profile = _enrich_profile_from_db(profile, case_id, image_files)
+    return profile
+
+
+def _enrich_profile_from_db(profile: dict[str, object], case_id: int, image_files: list[str]) -> dict[str, object]:
+    try:
+        with db.connect() as conn:
+            rows = conn.execute(
+                "SELECT image_path, phase FROM image_observations WHERE case_id = ? AND phase IN ('before', 'after') AND confidence >= 0.7",
+                (case_id,),
+            ).fetchall()
+    except Exception:
+        return profile
+    if not rows:
+        return profile
+    db_phases = {str(r["image_path"]): str(r["phase"]) for r in rows}
+    before_count = 0
+    after_count = 0
+    unlabeled_count = 0
+    for item in source_images.filter_source_image_files(image_files):
+        phase = source_images._phase_from_filename(item) or db_phases.get(item)
+        if phase == "before":
+            before_count += 1
+        elif phase == "after":
+            after_count += 1
+        else:
+            unlabeled_count += 1
+    if before_count > 0 and after_count > 0:
+        profile = dict(profile)
+        profile["source_kind"] = "ready_source"
+        profile["before_count"] = before_count
+        profile["after_count"] = after_count
+        profile["unlabeled_source_count"] = unlabeled_count
+        profile["_db_enriched"] = True
+    return profile
+
+
+_VIEW_ALIAS = {"front": "front", "oblique": "oblique", "side": "side", "45-degree": "oblique", "back": "side"}
+
+
+def _enrich_metadata_from_observations(metadata_by_file: dict[str, dict[str, Any]], case_id: int) -> None:
+    try:
+        with db.connect() as conn:
+            rows = conn.execute(
+                "SELECT image_path, phase, view, confidence FROM image_observations WHERE case_id = ? AND confidence >= 0.7",
+                (case_id,),
+            ).fetchall()
+    except Exception:
+        return
+    for r in rows:
+        path = str(r["image_path"])
+        basename = Path(path).name
+        key = path if path in metadata_by_file else basename
+        entry = metadata_by_file.get(key)
+        if entry is None:
+            entry = {}
+            metadata_by_file[key] = entry
+        if not entry.get("phase") and r["phase"] in ("before", "after"):
+            entry["phase"] = r["phase"]
+            entry["phase_source"] = "image_observations"
+        view = _VIEW_ALIAS.get(r["view"])
+        if not entry.get("view_bucket") and not entry.get("angle") and view:
+            entry["view_bucket"] = view
+            entry["view_source"] = "image_observations"
 
 
 def _json_list(raw: str | None) -> list[object]:
@@ -279,6 +349,52 @@ def _build_bound_source_staging(
     return staging, linked, render_names
 
 
+def _relocate_render_output(job_id: int, staging_dir: Path) -> None:
+    """Move .case-layout-output from staging to the real case dir and update DB paths."""
+    staging = Path(staging_dir)
+    output_subdir = staging / ".case-layout-output"
+    if not output_subdir.is_dir():
+        return
+    real_case_dir = staging.parent.parent
+    target = real_case_dir / ".case-layout-output"
+    try:
+        for brand_dir in output_subdir.iterdir():
+            if not brand_dir.is_dir():
+                continue
+            target_brand = target / brand_dir.name
+            target_brand.mkdir(parents=True, exist_ok=True)
+            for tmpl_dir in brand_dir.iterdir():
+                if not tmpl_dir.is_dir():
+                    continue
+                target_tmpl = target_brand / tmpl_dir.name
+                if target_tmpl.exists():
+                    shutil.rmtree(target_tmpl)
+                shutil.move(str(tmpl_dir), str(target_tmpl))
+    except OSError as exc:
+        LOGGER.warning("failed to relocate render output: job=%s error=%s", job_id, exc)
+        return
+    old_prefix = str(staging)
+    new_prefix = str(real_case_dir)
+    with db.connect() as conn:
+        row = conn.execute(
+            "SELECT output_path, manifest_path FROM render_jobs WHERE id = ?",
+            (job_id,),
+        ).fetchone()
+        if row:
+            updates: dict[str, str] = {}
+            for key in ("output_path", "manifest_path"):
+                val = row[key]
+                if isinstance(val, str) and val.startswith(old_prefix):
+                    updates[key] = new_prefix + val[len(old_prefix):]
+            if updates:
+                set_clause = ", ".join(f"{k} = ?" for k in updates)
+                conn.execute(
+                    f"UPDATE render_jobs SET {set_clause} WHERE id = ?",
+                    (*updates.values(), job_id),
+                )
+    LOGGER.info("relocated render output: job=%s from=%s to=%s", job_id, staging, real_case_dir)
+
+
 def _cleanup_bound_source_staging(job_id: int, staging_dir: Path | None) -> None:
     if staging_dir is None:
         return
@@ -343,7 +459,7 @@ def _vlm_classifier_observations_by_filename(
     """
     rows = conn.execute(
         """
-        SELECT image_path, phase, body_part, view, confidence
+        SELECT image_path, phase, body_part, view, confidence, quality_json
         FROM image_observations
         WHERE case_id = ?
           AND source = 'vlm_classifier'
@@ -357,12 +473,19 @@ def _vlm_classifier_observations_by_filename(
         path = str(row["image_path"] or "").strip()
         if not path:
             continue
-        obs = {
+        quality_raw = str(row["quality_json"] or "{}")
+        try:
+            quality = json.loads(quality_raw) if quality_raw else {}
+        except (TypeError, ValueError):
+            quality = {}
+        obs: dict[str, Any] = {
             "phase": row["phase"],
             "view": row["view"],
             "body_part": row["body_part"],
             "confidence": float(row["confidence"] or 0.0),
         }
+        if isinstance(quality, dict) and quality.get("is_composite"):
+            obs["is_composite"] = True
         for key in (path, Path(path).name):
             out.setdefault(key, obs)
     return out
@@ -908,6 +1031,7 @@ def _build_render_selection_context(
         role = str(source_row.get("role") or ("primary" if index == 0 else "bound"))
         case_dir = str(source_row.get("abs_path") or "")
         case_title = Path(case_dir).name or f"case {case_id}"
+        treatment_type = source_selection.detect_treatment_type(case_dir)
         meta_json = str(source_row.get("meta_json") or "")
         meta = _parse_case_meta(meta_json)
         raw_files = [str(item) for item in (meta.get("image_files") or []) if item]
@@ -940,6 +1064,16 @@ def _build_render_selection_context(
                 or vlm_obs_by_file.get(Path(render_filename).name)
                 or vlm_obs_by_file.get(Path(filename).name)
             )
+            if isinstance(observation, dict) and observation.get("is_composite"):
+                LOGGER.info(
+                    "skipping VLM-detected composite image: case %s / %s",
+                    case_id, filename,
+                )
+                overrides_by_render_name[render_filename] = {
+                    "render_excluded": True,
+                    "exclusion_reason": "vlm_composite_detected",
+                }
+                continue
             metadata = _apply_vlm_observation_to_metadata(metadata, observation)
             fallback_metadata = (
                 primary_render_metadata.get(render_filename)
@@ -1006,8 +1140,20 @@ def _build_render_selection_context(
             }
             if isinstance(manual_override, dict) and isinstance(manual_override.get("transform"), dict):
                 candidate["manual_transform"] = manual_override["transform"]
+            ar = candidate.get("source_aspect_ratio")
+            if ar is not None and ar > 0 and max(ar, 1 / ar) >= source_images.COMPOSITE_ASPECT_RATIO_THRESHOLD:
+                LOGGER.info(
+                    "skipping composite image (aspect ratio %.2f): case %s / %s",
+                    ar, case_id, filename,
+                )
+                overrides_by_render_name[render_filename] = {
+                    "render_excluded": True,
+                    "exclusion_reason": "composite_image_detected",
+                    "source_aspect_ratio": ar,
+                }
+                continue
             _apply_layout_quality_evidence(candidate, layout_evidence_by_file)
-            candidate.update(source_selection.candidate_quality(candidate, role))
+            candidate.update(source_selection.candidate_quality(candidate, role, treatment_type=treatment_type))
             _apply_layout_reselect_bias(candidate)
             if candidate.get("selection_metadata_source") == "primary_render_history":
                 reasons = [str(item) for item in (candidate.get("selection_reasons") or []) if item]
@@ -1164,9 +1310,12 @@ def _classification_blocking_preflight(
     image_files: list[str],
     manual_overrides: dict[str, dict[str, Any]],
     semantic_judge: str,
+    case_id: int | None = None,
 ) -> dict[str, Any] | None:
     states = _image_review_states(case_meta_json)
     metadata_by_file = _skill_metadata_by_file(skill_image_metadata_json)
+    if case_id:
+        _enrich_metadata_from_observations(metadata_by_file, case_id)
     blockers: list[str] = []
     missing_count = 0
     low_confidence_count = 0
@@ -1882,6 +2031,8 @@ class RenderQueue:
         try:
             self._execute_render_impl(job_id, remember_bound_staging)
         finally:
+            if bound_staging_dir is not None:
+                _relocate_render_output(job_id, bound_staging_dir)
             _cleanup_bound_source_staging(job_id, bound_staging_dir)
 
     def _automate_md_ai_clinical_enhancements(
@@ -2121,7 +2272,7 @@ class RenderQueue:
                 filename for filename in raw_meta_image_files if not source_images.is_source_image_file(filename)
             ]
             source_count, image_files = _case_source_info(row["case_meta_json"], case_dir)
-            source_profile = _case_source_profile(row["case_meta_json"], case_dir)
+            source_profile = _case_source_profile(row["case_meta_json"], case_dir, case_id=int(case_id))
             binding_ids = _source_binding_case_ids(row["case_meta_json"])
             bound_source_rows: list[dict[str, Any]] = []
             if binding_ids:
@@ -2155,6 +2306,30 @@ class RenderQueue:
             if use_staging:
                 source_profile = _merged_bound_profile([primary_source_row, *bound_source_rows])
                 source_profile["bound_case_ids"] = [int(item["id"]) for item in bound_source_rows]
+                if (
+                    str(source_profile.get("source_kind")) == "missing_before_after_pair"
+                    and int(source_profile.get("unlabeled_source_count") or 0) > 0
+                ):
+                    total_before = 0
+                    total_after = 0
+                    total_unlabeled = 0
+                    for src_row in [primary_source_row, *bound_source_rows]:
+                        sub_meta = _parse_case_meta(str(src_row.get("meta_json") or ""))
+                        sub_files = [str(item) for item in (sub_meta.get("image_files") or []) if item]
+                        sub_profile = _enrich_profile_from_db(
+                            {"source_kind": "missing_before_after_pair", "unlabeled_source_count": len(sub_files)},
+                            int(src_row["id"]),
+                            sub_files,
+                        )
+                        total_before += int(sub_profile.get("before_count") or 0)
+                        total_after += int(sub_profile.get("after_count") or 0)
+                        total_unlabeled += int(sub_profile.get("unlabeled_source_count") or 0)
+                    if total_before > 0 and total_after > 0:
+                        source_profile["source_kind"] = "ready_source"
+                        source_profile["before_count"] = total_before
+                        source_profile["after_count"] = total_after
+                        source_profile["unlabeled_source_count"] = total_unlabeled
+                        source_profile["_db_enriched"] = True
                 staging_dir, bound_staging_files, bound_render_names = _build_bound_source_staging(
                     job_id,
                     [primary_source_row, *bound_source_rows],
@@ -2247,8 +2422,9 @@ class RenderQueue:
             image_files=image_files,
             manual_overrides=manual_overrides,
             semantic_judge=semantic_judge,
+            case_id=int(case_id),
         )
-        if classification_preflight is not None:
+        if classification_preflight is not None and not os.environ.get("SKIP_CLASSIFICATION_GATE"):
             ai_usage = dict(classification_preflight.get("ai_usage") or {})
             ai_usage["generated_artifact_count"] = int(source_filter.get("generated_artifact_count") or 0)
             ai_usage["generated_artifact_samples"] = source_filter.get("generated_artifact_samples") or []

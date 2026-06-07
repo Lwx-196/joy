@@ -179,7 +179,7 @@ def _profile(primary: dict[str, Any], bound: list[dict[str, Any]]) -> dict[str, 
         profile = dict(render_queue._merged_bound_profile([primary, *bound]))
         profile["bound_case_ids"] = [int(item["id"]) for item in bound]
     else:
-        profile = dict(render_queue._case_source_profile(primary.get("meta_json"), primary.get("abs_path")))
+        profile = dict(render_queue._case_source_profile(primary.get("meta_json"), primary.get("abs_path"), case_id=int(primary.get("id") or 0) or None))
     if source_images.case_marked_not_source(
         render_queue._json_list(str(primary.get("tags_json") or "")),
         render_queue._json_list(str(primary.get("manual_blocking_issues_json") or "")),

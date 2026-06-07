@@ -7,8 +7,11 @@ material.
 """
 from __future__ import annotations
 
+import logging
 import re
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 CASE_NOT_SOURCE_TAG = "素材归档"
@@ -61,6 +64,45 @@ def is_source_image_file(image_path: str) -> bool:
 
 def filter_source_image_files(image_files: list[str]) -> list[str]:
     return [str(item) for item in image_files if item and is_source_image_file(str(item))]
+
+
+COMPOSITE_ASPECT_RATIO_THRESHOLD = 2.5
+
+
+def is_composite_by_dimensions(width: int, height: int) -> bool:
+    """Return True when image dimensions suggest a composite (side-by-side or stacked)."""
+    if width <= 0 or height <= 0:
+        return False
+    ratio = max(width / height, height / width)
+    return ratio >= COMPOSITE_ASPECT_RATIO_THRESHOLD
+
+
+def is_composite_image(image_path: Path) -> bool:
+    """Content-level composite detection using PIL aspect ratio heuristic.
+
+    Returns True for images whose aspect ratio strongly suggests they are
+    side-by-side or stacked composites (e.g. before/after comparison collages).
+    """
+    if not image_path.is_file():
+        return False
+    try:
+        from PIL import Image, ImageOps
+    except ImportError:
+        return False
+    try:
+        with Image.open(image_path) as img:
+            transposed = ImageOps.exif_transpose(img)
+            width, height = transposed.size
+    except Exception:
+        return False
+    if is_composite_by_dimensions(width, height):
+        logger.info(
+            "composite image detected (aspect ratio %.2f): %s",
+            max(width / height, height / width),
+            image_path.name,
+        )
+        return True
+    return False
 
 
 def existing_source_image_files(abs_path: str, image_files: list[str]) -> dict[str, object]:
@@ -130,6 +172,11 @@ AFTER_TOKENS = ("术后", "治疗后", "after", "post")
 
 
 def _phase_from_filename(filename: str) -> str | None:
+    basename = Path(filename).name.lower()
+    if any(token.lower() in basename for token in BEFORE_TOKENS):
+        return "before"
+    if any(token.lower() in basename for token in AFTER_TOKENS):
+        return "after"
     lowered = filename.lower()
     if any(token.lower() in lowered for token in BEFORE_TOKENS):
         return "before"

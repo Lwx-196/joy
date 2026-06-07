@@ -237,7 +237,12 @@ def _binding_case_ids(meta: dict[str, Any]) -> list[int]:
 def _merged_profile(conn: sqlite3.Connection, row: sqlite3.Row, meta: dict[str, Any]) -> dict[str, Any]:
     binding_ids = _binding_case_ids(meta)
     if not binding_ids:
-        return source_images.classify_existing_case_source_profile(row["abs_path"], _case_image_files(meta))
+        from ..render_queue import _case_source_profile
+        return _case_source_profile(
+            row["meta_json"] if "meta_json" in row.keys() else json.dumps(meta),
+            row["abs_path"],
+            case_id=int(row["id"]) if "id" in row.keys() else None,
+        )
     placeholders = ",".join("?" * len(binding_ids))
     bound_rows = conn.execute(
         f"SELECT id, abs_path, meta_json FROM cases WHERE trashed_at IS NULL AND id IN ({placeholders})",
