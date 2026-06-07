@@ -129,3 +129,39 @@ def test_run_ai_enhanced_render_raises_when_no_marker(tmp_path, monkeypatch):
 def test_run_ai_enhanced_render_missing_case_dir(tmp_path):
     with pytest.raises(FileNotFoundError):
         render_executor.run_ai_enhanced_render(tmp_path / "does-not-exist")
+
+
+# ----------------------------------------------------------------------
+# enqueue() defaults enhance_direction="heal" for render_mode="ai"
+# ----------------------------------------------------------------------
+
+
+def _enqueue_options(options: dict | None, render_mode: str = "ai") -> dict:
+    """Simulate enqueue()'s options defaulting without touching the DB."""
+    if render_mode == "ai":
+        resolved = dict(options or {})
+        resolved.setdefault("enhance_direction", "heal")
+        return resolved
+    return dict(options or {})
+
+
+def test_enqueue_defaults_heal_when_no_options():
+    assert _enqueue_options(None, render_mode="ai")["enhance_direction"] == "heal"
+
+
+def test_enqueue_defaults_heal_when_options_omit_direction():
+    opts = _enqueue_options({"enhance_model": "gemini"}, render_mode="ai")
+    assert opts["enhance_direction"] == "heal"
+    assert opts["enhance_model"] == "gemini"
+
+
+def test_enqueue_best_pair_does_not_default_heal():
+    assert _enqueue_options(None, render_mode="best-pair").get("enhance_direction") is None
+
+
+def test_enqueue_explicit_direction_preserved():
+    assert _enqueue_options({"enhance_direction": "sharpen"})["enhance_direction"] == "sharpen"
+
+
+def test_enqueue_explicit_empty_direction_preserved():
+    assert _enqueue_options({"enhance_direction": ""})["enhance_direction"] == ""

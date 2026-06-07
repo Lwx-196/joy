@@ -1876,6 +1876,11 @@ class RenderQueue:
             raise ValueError("brand required")
         if render_mode not in {"ai", "best-pair"}:
             raise ValueError("render_mode must be ai or best-pair")
+        # render_mode="ai" 默认走 AI 增强管线（抠图+纯黑底+术后增强），
+        # 调用方不需要手动传 enhance_direction。显式传 "" 可关闭增强。
+        if render_mode == "ai":
+            options = dict(options or {})
+            options.setdefault("enhance_direction", "heal")
         with db.connect() as conn:
             row = conn.execute(
                 "SELECT id FROM cases WHERE id = ? AND trashed_at IS NULL", (case_id,)
@@ -2253,7 +2258,7 @@ class RenderQueue:
             template = row["template"]
             semantic_judge = row["semantic_judge"]
             case_id = row["case_id"]
-            # 第三条出图选项：术后 AI 增强板（heal/gemini）。options 经 job meta_json 携带。
+            # 术后 AI 增强板（heal/gemini）。options 经 job meta_json 携带。
             _job_options = _parse_job_options(row["meta_json"] if "meta_json" in row.keys() else None)
             ai_enhance_direction = str(_job_options.get("enhance_direction") or "").strip()
             ai_enhance_model = str(_job_options.get("enhance_model") or "").strip()
