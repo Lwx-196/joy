@@ -2803,3 +2803,80 @@ def test_render_queue_blocks_large_auto_when_manual_pair_leaves_uncertain_images
     meta = json.loads(job["meta_json"])
     assert meta["ai_usage"]["semantic_judge_requested"] == "auto"
     assert meta["ai_usage"]["semantic_judge_effective"] == "blocked-classification-preflight"
+
+
+def test_ai_enhance_direction_bypasses_semantic_auto_preflight(
+    client, seed_case, monkeypatch, tmp_path
+):
+    """AI 增强板（enhance_direction 有值）不受源图数量限制。
+
+    大源图集 + semantic_judge=auto 在普通渲染路径会触发 preflight block，
+    但走 AI 增强板时应跳过该检查，直接到 run_ai_enhanced_render。
+    """
+    from backend import db, render_executor, render_queue
+
+    files = [f"07041738_{idx:02}.jpg" for idx in range(35)]
+    case_dir = tmp_path / "case-render-large-ai-enhance"
+    _write_case_files(str(case_dir), files)
+    case_id = seed_case(abs_path=str(case_dir))
+    with db.connect() as conn:
+        conn.execute(
+            "UPDATE cases SET meta_json = ? WHERE id = ?",
+            (
+                json.dumps(
+                    {"image_files": files, "image_count_total": len(files)},
+                    ensure_ascii=False,
+                ),
+                case_id,
+            ),
+        )
+        cur = conn.execute(
+            """INSERT INTO render_jobs
+               (case_id, brand, template, status, enqueued_at, semantic_judge, meta_json)
+               VALUES (?, ?, ?, 'queued', ?, 'auto', ?)""",
+            (
+                case_id,
+                "fumei",
+                "tri-compare",
+                datetime.now(timezone.utc).isoformat(),
+                json.dumps({"options": {"enhance_direction": "heal", "enhance_model": "gemini-3-pro-image-preview"}}),
+            ),
+        )
+        job_id = cur.lastrowid
+
+    enhance_called = {}
+
+    def fake_ai_enhance(case_dir, **kwargs):
+        enhance_called["direction"] = kwargs.get("enhance_direction")
+        enhance_called["model"] = kwargs.get("enhance_model")
+        board = tmp_path / "final-board.jpg"
+        board.write_bytes(b"fake board")
+        return {
+            "output_path": str(board),
+            "manifest_path": None,
+            "status": "done",
+            "case_mode": "ai_enhanced_board",
+            "enhance": {"direction": kwargs.get("enhance_direction"), "model": kwargs.get("enhance_model")},
+            "blocking_issue_count": 0,
+            "warning_count": 0,
+            "effective_templates": {},
+            "manual_overrides_applied": [],
+        }
+
+    def fail_normal_render(*args, **kwargs):
+        raise AssertionError("should not call run_render for AI enhance jobs")
+
+    monkeypatch.setattr(render_executor, "run_ai_enhanced_render", fake_ai_enhance)
+    monkeypatch.setattr(render_executor, "run_render", fail_normal_render)
+    render_queue.RenderQueue()._execute_render(job_id)
+
+    with db.connect() as conn:
+        job = conn.execute(
+            "SELECT status, error_message, meta_json FROM render_jobs WHERE id = ?",
+            (job_id,),
+        ).fetchone()
+    assert enhance_called.get("direction") == "heal", (
+        f"enhance not called; job status={job['status']}, "
+        f"error={job['error_message']}, meta={job['meta_json'][:500] if job['meta_json'] else None}"
+    )
+    assert job["status"] != "blocked", f"AI enhance job should not be blocked: {job['error_message']}"

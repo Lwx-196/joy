@@ -2416,81 +2416,86 @@ class RenderQueue:
                 result=no_source_preflight,
             )
             return
-        classification_preflight = _classification_blocking_preflight(
-            case_meta_json=row["case_meta_json"],
-            skill_image_metadata_json=row["skill_image_metadata_json"],
-            image_files=image_files,
-            manual_overrides=manual_overrides,
-            semantic_judge=semantic_judge,
-            case_id=int(case_id),
-        )
-        if classification_preflight is not None and not os.environ.get("SKIP_CLASSIFICATION_GATE"):
-            ai_usage = dict(classification_preflight.get("ai_usage") or {})
-            ai_usage["generated_artifact_count"] = int(source_filter.get("generated_artifact_count") or 0)
-            ai_usage["generated_artifact_samples"] = source_filter.get("generated_artifact_samples") or []
-            classification_preflight["ai_usage"] = ai_usage
-            self._finish_result(
-                job_id,
-                case_id=case_id,
-                batch_id=batch_id,
-                brand=brand,
-                template=template,
-                result=classification_preflight,
+
+        # AI 增强板走独立 CLI（自带 build_manifest + apply_after_enhancements），
+        # 不依赖普通渲染的分类/槽位/VLM preflight 链，跳到 subprocess 分支。
+        if not ai_enhance_direction:
+            classification_preflight = _classification_blocking_preflight(
+                case_meta_json=row["case_meta_json"],
+                skill_image_metadata_json=row["skill_image_metadata_json"],
+                image_files=image_files,
+                manual_overrides=manual_overrides,
+                semantic_judge=semantic_judge,
+                case_id=int(case_id),
             )
-            return
-        source_readiness_preflight = _source_readiness_preflight(
-            semantic_judge=semantic_judge,
-            source_profile=source_profile,
-        )
-        if source_readiness_preflight is not None:
-            self._finish_result(
-                job_id,
-                case_id=case_id,
-                batch_id=batch_id,
-                brand=brand,
-                template=template,
-                result=source_readiness_preflight,
+            if classification_preflight is not None and not os.environ.get("SKIP_CLASSIFICATION_GATE"):
+                ai_usage = dict(classification_preflight.get("ai_usage") or {})
+                ai_usage["generated_artifact_count"] = int(source_filter.get("generated_artifact_count") or 0)
+                ai_usage["generated_artifact_samples"] = source_filter.get("generated_artifact_samples") or []
+                classification_preflight["ai_usage"] = ai_usage
+                self._finish_result(
+                    job_id,
+                    case_id=case_id,
+                    batch_id=batch_id,
+                    brand=brand,
+                    template=template,
+                    result=classification_preflight,
+                )
+                return
+            source_readiness_preflight = _source_readiness_preflight(
+                semantic_judge=semantic_judge,
+                source_profile=source_profile,
             )
-            return
-        slot_preflight = _tri_slot_preflight(
-            template=template,
-            semantic_judge=semantic_judge,
-            source_profile=source_profile,
-            selection_plan=render_selection_plan,
-        )
-        if slot_preflight is not None:
-            self._finish_result(
-                job_id,
-                case_id=case_id,
-                batch_id=batch_id,
-                brand=brand,
+            if source_readiness_preflight is not None:
+                self._finish_result(
+                    job_id,
+                    case_id=case_id,
+                    batch_id=batch_id,
+                    brand=brand,
+                    template=template,
+                    result=source_readiness_preflight,
+                )
+                return
+            slot_preflight = _tri_slot_preflight(
                 template=template,
-                result=slot_preflight,
+                semantic_judge=semantic_judge,
+                source_profile=source_profile,
+                selection_plan=render_selection_plan,
             )
-            return
+            if slot_preflight is not None:
+                self._finish_result(
+                    job_id,
+                    case_id=case_id,
+                    batch_id=batch_id,
+                    brand=brand,
+                    template=template,
+                    result=slot_preflight,
+                )
+                return
         metadata_by_file = _skill_metadata_by_file(row["skill_image_metadata_json"])
         inferred_override_count = _apply_inferred_phase_view_overrides(image_files, manual_overrides, metadata_by_file)
-        semantic_judge, preflight_result = _semantic_auto_preflight(
-            semantic_judge=semantic_judge,
-            source_count=source_count,
-            image_files=image_files,
-            manual_overrides=manual_overrides,
-        )
-        if preflight_result is not None:
-            ai_usage = dict(preflight_result.get("ai_usage") or {})
-            ai_usage["generated_artifact_count"] = int(source_filter.get("generated_artifact_count") or 0)
-            ai_usage["generated_artifact_samples"] = source_filter.get("generated_artifact_samples") or []
-            ai_usage["inferred_override_count"] = inferred_override_count
-            preflight_result["ai_usage"] = ai_usage
-            self._finish_result(
-                job_id,
-                case_id=case_id,
-                batch_id=batch_id,
-                brand=brand,
-                template=template,
-                result=preflight_result,
+        if not ai_enhance_direction:
+            semantic_judge, preflight_result = _semantic_auto_preflight(
+                semantic_judge=semantic_judge,
+                source_count=source_count,
+                image_files=image_files,
+                manual_overrides=manual_overrides,
             )
-            return
+            if preflight_result is not None:
+                ai_usage = dict(preflight_result.get("ai_usage") or {})
+                ai_usage["generated_artifact_count"] = int(source_filter.get("generated_artifact_count") or 0)
+                ai_usage["generated_artifact_samples"] = source_filter.get("generated_artifact_samples") or []
+                ai_usage["inferred_override_count"] = inferred_override_count
+                preflight_result["ai_usage"] = ai_usage
+                self._finish_result(
+                    job_id,
+                    case_id=case_id,
+                    batch_id=batch_id,
+                    brand=brand,
+                    template=template,
+                    result=preflight_result,
+                )
+                return
 
         # 1.5. MD-AI clinical enhancement (automation hook)
         if brand in ("md_ai", "meiji_ai"):
