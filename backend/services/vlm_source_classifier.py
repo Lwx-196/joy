@@ -349,6 +349,117 @@ def classify_batch_with_retry(
     return results
 
 
+CLOUD_TIERS = ("flash", "tuzi")
+
+
+def _make_cloud_provider(
+    base_env: dict[str, str],
+    tier: str,
+    *,
+    post_json: Any = None,
+    sleep: Any = None,
+    jitter: Any = None,
+) -> VLMProvider | None:
+    """Build a VLMProvider for cloud escalation. Returns None if not configured."""
+    if tier == "flash":
+        base_url = base_env.get("VLM_CLOUD_FLASH_BASE_URL", "").strip()
+        api_key = base_env.get("VLM_CLOUD_FLASH_API_KEY", "").strip()
+    elif tier == "tuzi":
+        base_url = base_env.get("VLM_CLOUD_TUZI_BASE_URL", "").strip()
+        api_key = base_env.get("VLM_CLOUD_TUZI_API_KEY", "").strip()
+    else:
+        return None
+    if not base_url or not api_key:
+        return None
+    model = base_env.get("VLM_CLOUD_MODEL", "gemini-3.1-pro-preview").strip()
+    cloud_env = dict(base_env)
+    cloud_env["CASE_WORKBENCH_VLM_CLASSIFIER_PROVIDER"] = "openai-compatible"
+    cloud_env["CASE_WORKBENCH_VLM_CLASSIFIER_MODEL"] = model
+    cloud_env["CASE_WORKBENCH_VLM_CLASSIFIER_ENDPOINT"] = base_url
+    cloud_env["VLM_API_KEY"] = api_key
+    kwargs: dict[str, Any] = {}
+    if post_json is not None:
+        kwargs["post_json"] = post_json
+    if sleep is not None:
+        kwargs["sleep"] = sleep
+    if jitter is not None:
+        kwargs["jitter"] = jitter
+    return VLMProvider(env=cloud_env, **kwargs)
+
+
+@dataclass(frozen=True)
+class EscalationTierStats:
+    tier: str
+    attempted: int
+    upgraded: int
+    failed: int
+
+
+def classify_with_escalation(
+    image_paths: list[Path],
+    provider: VLMProvider,
+    *,
+    concurrency: int = 3,
+    timeout: float = 30.0,
+    max_retries: int = 2,
+    escalation_threshold: float = MIN_VLM_APPLY_CONFIDENCE,
+    cloud_tiers: tuple[str, ...] = CLOUD_TIERS,
+) -> tuple[list[ClassificationResult | BaseException], list[EscalationTierStats]]:
+    """Classify with local VLM, then escalate low-confidence items to cloud tiers.
+
+    Returns (results, tier_stats) where tier_stats tracks per-tier escalation counts.
+    """
+    results = classify_batch_with_retry(
+        image_paths, provider,
+        concurrency=concurrency, timeout=timeout, max_retries=max_retries,
+    )
+    tier_stats: list[EscalationTierStats] = []
+
+    for tier_name in cloud_tiers:
+        escalation_indices = [
+            i for i, r in enumerate(results)
+            if isinstance(r, ClassificationResult) and r.confidence < escalation_threshold
+        ]
+        if not escalation_indices:
+            break
+
+        cloud_provider = _make_cloud_provider(provider.env, tier_name)
+        if cloud_provider is None:
+            logger.info("cloud tier %s not configured, skipping escalation", tier_name)
+            continue
+
+        escalation_paths = [image_paths[i] for i in escalation_indices]
+        logger.info(
+            "escalating %d low-confidence items to cloud tier %s",
+            len(escalation_paths), tier_name,
+        )
+
+        cloud_results = classify_batch_with_retry(
+            escalation_paths, cloud_provider,
+            concurrency=concurrency, timeout=timeout, max_retries=max_retries,
+        )
+
+        upgraded = 0
+        failed = 0
+        for idx, cloud_result in zip(escalation_indices, cloud_results):
+            if isinstance(cloud_result, BaseException):
+                failed += 1
+                continue
+            original = results[idx]
+            if isinstance(original, BaseException) or cloud_result.confidence > original.confidence:
+                results[idx] = cloud_result
+                upgraded += 1
+
+        tier_stats.append(EscalationTierStats(
+            tier=tier_name,
+            attempted=len(escalation_indices),
+            upgraded=upgraded,
+            failed=failed,
+        ))
+
+    return results, tier_stats
+
+
 def detect_composite_batch(
     image_paths: list[Path],
     provider: VLMProvider,
@@ -555,6 +666,7 @@ def run_classification(
     concurrency: int = 3,
     timeout: float = 30.0,
     max_retries: int = 2,
+    escalate: bool = True,
 ) -> dict[str, Any]:
     if case_id is None and not all_low_confidence:
         raise ValueError("case_id is required unless all_low_confidence is true")
@@ -593,14 +705,24 @@ def run_classification(
         report["run_status"] = "blocked_missing_vlm_provider"
         return report
     paths = [item.image_abs_path for item in queue]
+    escalation_tier_stats: list[EscalationTierStats] = []
     try:
-        results = classify_batch_with_retry(
-            paths,
-            provider,
-            concurrency=concurrency,
-            timeout=timeout,
-            max_retries=max_retries,
-        )
+        if escalate:
+            results, escalation_tier_stats = classify_with_escalation(
+                paths,
+                provider,
+                concurrency=concurrency,
+                timeout=timeout,
+                max_retries=max_retries,
+            )
+        else:
+            results = classify_batch_with_retry(
+                paths,
+                provider,
+                concurrency=concurrency,
+                timeout=timeout,
+                max_retries=max_retries,
+            )
     except (VLMRequestError, ValueError, OSError) as exc:
         report["run_status"] = "blocked_vlm_classification_failed"
         report["error_count"] = len(queue)
@@ -767,6 +889,11 @@ def run_classification(
     report["skipped_count"] = skipped
     report["error_count"] = len(errors)
     report["composite_detected_count"] = composite_updated
+    if escalation_tier_stats:
+        report["escalation"] = [
+            {"tier": s.tier, "attempted": s.attempted, "upgraded": s.upgraded, "failed": s.failed}
+            for s in escalation_tier_stats
+        ]
     if errors:
         report["errors"] = errors
     if resolved_mode == "live-no-apply":

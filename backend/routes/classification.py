@@ -39,6 +39,7 @@ class BatchClassifyRequest(BaseModel):
     concurrency: int = Field(default=3, ge=1, le=10)
     timeout_seconds: float = Field(default=45.0, ge=1.0, le=300.0)
     max_retries: int = Field(default=2, ge=0, le=5, description="Per-item retry rounds for timeout/transient errors")
+    escalate: bool = Field(default=True, description="Auto-escalate low-confidence items to cloud VLM tiers")
 
 
 @router.post("/{case_id}/enhanced")
@@ -110,6 +111,7 @@ def classify_batch(payload: BatchClassifyRequest) -> dict[str, Any]:
                 concurrency=payload.concurrency,
                 timeout=payload.timeout_seconds,
                 max_retries=payload.max_retries,
+                escalate=payload.escalate,
             )
             case_results.append(result)
             for key in totals:
@@ -134,6 +136,7 @@ def classify_batch(payload: BatchClassifyRequest) -> dict[str, Any]:
                     concurrency=payload.concurrency,
                     timeout=payload.timeout_seconds,
                     max_retries=payload.max_retries,
+                    escalate=payload.escalate,
                 )
                 case_results.append(result)
                 for key in totals:
