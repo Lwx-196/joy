@@ -89,14 +89,17 @@ def build_registry(env: dict[str, str]) -> dict[str, ImageProvider]:
     for upper in names:
         reg[upper.lower()] = _seed_from_prefix(env, upper.lower(), f"PANEL_IMG_{upper}")
     # Vertex ADC 出图（gemini image via generateContent）——通道宕机时的可靠兜底。
+    # 支持多项目轮转：VERTEX_IMAGE_PROJECTS 优先，退回 CASE_WORKBENCH_VERTEX_PROJECT 单项目。
+    vertex_projects_csv = env.get("VERTEX_IMAGE_PROJECTS", "")
     vertex_project = (env.get("CASE_WORKBENCH_VERTEX_PROJECT") or env.get("VLM_PROJECT") or "").strip()
-    if vertex_project:
-        vertex_location = (env.get("CASE_WORKBENCH_VERTEX_LOCATION") or env.get("VLM_LOCATION") or "global").strip()
+    if vertex_projects_csv.strip() or vertex_project:
+        first_project = vertex_projects_csv.split(",")[0].strip() if vertex_projects_csv.strip() else vertex_project
+        vertex_location = (env.get("CASE_WORKBENCH_VERTEX_IMAGE_LOCATION") or env.get("CASE_WORKBENCH_VERTEX_LOCATION") or env.get("VLM_LOCATION") or "global").strip()
         vertex_model = (env.get("CASE_WORKBENCH_VERTEX_IMAGE_MODEL") or "gemini-3-pro-image-preview").strip()
         reg["vertex"] = ImageProvider(
             name="vertex", base_url="", api_key="", model=vertex_model,
             api_format="vertex_generate_content",
-            project=vertex_project, location=vertex_location,
+            project=first_project, location=vertex_location,
         )
     return reg
 

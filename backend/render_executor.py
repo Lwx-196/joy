@@ -79,6 +79,8 @@ SEMANTIC_PROVIDER_ENV_VARS = (
     "GEMINI_FLASH_BACKUP_BASE_URL",
     "GEMINI_FLASH_BACKUP_API_KEY",
     "GEMINI_TUZI_API_KEY",
+    "CASE_WORKBENCH_VERTEX_IMAGE_MODEL",
+    "GOOGLE_GENAI_API_KEY",
 )
 
 # Keep at most this many archived final-board.jpg snapshots per (case, brand, template).

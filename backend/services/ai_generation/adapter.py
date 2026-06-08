@@ -30,6 +30,8 @@ SIMULATION_ROOT = stress.simulation_root(
 )
 PS_ENHANCE_SCRIPT = _SETTINGS.ps_enhance_script_path()
 DEFAULT_PROVIDER = "ps_model_router"
+VERTEX_ADC_PROVIDER = "vertex_adc"
+ENHANCE_PROVIDER = os.environ.get("CASE_WORKBENCH_ENHANCE_PROVIDER", DEFAULT_PROVIDER)
 DEFAULT_QUALITY = _SETTINGS.ai_quality
 DEFAULT_TIMEOUT_SEC = _SETTINGS.ai_timeout_sec
 PS_AUTOMATION_ENV = _SETTINGS.ps_env_file_path()
@@ -2745,6 +2747,195 @@ def _run_stress_stub_after_simulation(
     }
 
 
+class _VertexRateLimitError(Exception):
+    """429 rate limit from Vertex ADC — caller should backoff and retry."""
+
+
+class _VertexPermanentError(Exception):
+    """Non-retryable error (404, 400, 403) — fail fast."""
+
+
+class _VertexProjectPool:
+    """Round-robin pool across multiple GCP projects for Vertex image generation.
+
+    Env: VERTEX_IMAGE_PROJECTS (comma-separated project IDs).
+    Falls back to CASE_WORKBENCH_VERTEX_PROJECT for single-project mode.
+    On 429, marks the project as cooling down and rotates to the next.
+    """
+
+    _instance: "_VertexProjectPool | None" = None
+
+    def __init__(self) -> None:
+        import threading
+        import time as _time
+
+        raw = os.environ.get("VERTEX_IMAGE_PROJECTS", "")
+        if raw.strip():
+            self._projects = [p.strip() for p in raw.split(",") if p.strip()]
+        else:
+            single = os.environ.get("CASE_WORKBENCH_VERTEX_PROJECT", "")
+            self._projects = [single] if single else []
+        self._index = 0
+        self._cooldowns: dict[str, float] = {}
+        self._lock = threading.Lock()
+        self._time = _time
+        self._min_interval = float(os.environ.get("VERTEX_IMAGE_MIN_INTERVAL_SEC", "6"))
+        self._last_call_ts = 0.0
+
+    @classmethod
+    def get(cls) -> "_VertexProjectPool":
+        if cls._instance is None:
+            cls._instance = cls()
+        return cls._instance
+
+    @property
+    def available(self) -> bool:
+        return len(self._projects) > 0
+
+    def next_project(self) -> str | None:
+        with self._lock:
+            now = self._time.monotonic()
+            n = len(self._projects)
+            for _ in range(n):
+                proj = self._projects[self._index % n]
+                self._index += 1
+                cooldown_until = self._cooldowns.get(proj, 0.0)
+                if now >= cooldown_until:
+                    elapsed = now - self._last_call_ts
+                    if elapsed < self._min_interval:
+                        self._time.sleep(self._min_interval - elapsed)
+                    self._last_call_ts = self._time.monotonic()
+                    return proj
+            # All projects cooling down — return the one with shortest remaining cooldown
+            proj = min(self._projects, key=lambda p: self._cooldowns.get(p, 0.0))
+            wait = self._cooldowns.get(proj, 0.0) - now
+            if wait > 0:
+                LOGGER.info("Vertex pool: all projects cooling, waiting %.1fs for %s", wait, proj)
+                self._time.sleep(wait)
+            self._last_call_ts = self._time.monotonic()
+            return proj
+
+    def mark_rate_limited(self, project: str, backoff_sec: float = 60.0) -> None:
+        with self._lock:
+            self._cooldowns[project] = self._time.monotonic() + backoff_sec
+            LOGGER.warning("Vertex pool: %s rate-limited, cooldown %.0fs", project, backoff_sec)
+
+
+def _vertex_adc_enhance_image(
+    image_path: Path,
+    prompt: str,
+    *,
+    model: str = "gemini-3-pro-image-preview",
+    project_override: str | None = None,
+) -> Path | None:
+    """Call Vertex ADC Gemini image generation directly (no tu-zi relay).
+
+    Uses project pool for round-robin across GCP projects.
+    Raises _VertexRateLimitError on 429 so the caller can apply backoff.
+    Returns None on non-retryable failures.
+    """
+    import mimetypes
+
+    pool = _VertexProjectPool.get()
+    project = project_override or pool.next_project()
+    location = os.environ.get("CASE_WORKBENCH_VERTEX_IMAGE_LOCATION", "global")
+    if not project:
+        LOGGER.warning("Vertex ADC enhance: no project configured (set VERTEX_IMAGE_PROJECTS)")
+        return None
+
+    mime = mimetypes.guess_type(str(image_path))[0] or "image/jpeg"
+    image_bytes = image_path.read_bytes()
+
+    try:
+        from google import genai
+        from google.genai import types as genai_types
+
+        client = genai.Client(vertexai=True, project=project, location=location)
+        response = client.models.generate_content(
+            model=model,
+            contents=[
+                genai_types.Part.from_bytes(data=image_bytes, mime_type=mime),
+                genai_types.Part.from_text(text=prompt),
+            ],
+            config=genai_types.GenerateContentConfig(
+                response_modalities=["TEXT", "IMAGE"],
+            ),
+        )
+        for part in response.candidates[0].content.parts:
+            if part.inline_data and part.inline_data.mime_type and part.inline_data.mime_type.startswith("image/"):
+                out_ext = ".png" if "png" in part.inline_data.mime_type else ".jpg"
+                out_path = image_path.parent / f"{image_path.stem}-vertex{out_ext}"
+                out_path.write_bytes(part.inline_data.data)
+                LOGGER.info("Vertex ADC enhance [%s]: saved %s (%d bytes)", project[:20], out_path.name, len(part.inline_data.data))
+                return out_path
+
+        LOGGER.warning("Vertex ADC enhance [%s]: no image in response for %s", project[:20], image_path.name)
+        return None
+    except Exception as exc:
+        exc_str = str(exc)
+        if "429" in exc_str or "RESOURCE_EXHAUSTED" in exc_str:
+            pool.mark_rate_limited(project)
+            raise _VertexRateLimitError(exc_str) from exc
+        if "404" in exc_str or "NOT_FOUND" in exc_str or "400" in exc_str or "403" in exc_str:
+            LOGGER.error("Vertex ADC permanent error [%s] for %s: %s", project[:20], image_path.name, exc_str[:200])
+            raise _VertexPermanentError(exc_str) from exc
+        LOGGER.warning("Vertex ADC enhance failed [%s] for %s: %s: %s", project[:20], image_path.name, type(exc).__name__, exc)
+        return None
+
+
+def run_vertex_adc_clinical_enhancement(
+    image_path: Path,
+    brand: str,
+    focus_targets: list[str] | None = None,
+    *,
+    retry_count: int = 4,
+) -> Path:
+    """Vertex ADC direct image enhancement via 3-project round-robin pool.
+
+    On 429: marks project as cooling, rotates to next project, exponential backoff.
+    """
+    import time as _time
+
+    if stress.is_stress_mode() and not stress.allow_external_ai():
+        return image_path
+
+    focus_targets = focus_targets or ["面部"]
+    body_prompt = build_after_enhancement_prompt(focus_targets, [], brand=brand)
+    prompt = (
+        "CRITICAL: Preserve patient identity exactly. NO over-smoothing, NO over-brightening, "
+        "NO over-enhancement. The output must look like a real photograph of the SAME PERSON, "
+        "not an AI-generated portrait. Preserve all original skin texture, pores, freckles, "
+        "blemishes, eye shape, and facial structure.\n\n"
+        + body_prompt
+    )
+    model = os.environ.get("CASE_WORKBENCH_VERTEX_IMAGE_MODEL", "gemini-3-pro-image-preview")
+    inter_request_delay = int(os.environ.get("CASE_WORKBENCH_VERTEX_DELAY_SEC", "6"))
+    base_backoff = 15
+    for attempt in range(1 + retry_count):
+        try:
+            result = _vertex_adc_enhance_image(image_path, prompt, model=model)
+        except _VertexRateLimitError:
+            if attempt < retry_count:
+                delay = base_backoff * (2 ** attempt)
+                LOGGER.warning(
+                    "Vertex ADC 429 for %s, backoff %ds (attempt %d/%d)",
+                    image_path.name, delay, attempt + 1, 1 + retry_count,
+                )
+                _time.sleep(delay)
+                continue
+            LOGGER.warning("Vertex ADC 429 exhausted retries for %s after %d attempts", image_path.name, 1 + retry_count)
+            return image_path
+        except _VertexPermanentError:
+            return image_path
+        if result is not None:
+            if inter_request_delay > 0:
+                _time.sleep(inter_request_delay)
+            return result
+        LOGGER.warning("Vertex ADC non-429 failure for %s (attempt %d/%d)", image_path.name, attempt + 1, 1 + retry_count)
+    LOGGER.warning("Vertex ADC enhance terminal failure for %s after %d attempts", image_path.name, 1 + retry_count)
+    return image_path
+
+
 def run_direct_clinical_enhancement(
     image_path: Path,
     brand: str,
@@ -2764,6 +2955,11 @@ def run_direct_clinical_enhancement(
       * LOGGER.warning surfaces stderr on terminal failure so bulk runs can
         be grepped for root cause (was previously silent).
     """
+    if ENHANCE_PROVIDER == VERTEX_ADC_PROVIDER:
+        return run_vertex_adc_clinical_enhancement(
+            image_path, brand, focus_targets,
+        )
+
     if stress.is_stress_mode() and not stress.allow_external_ai():
         return image_path
 
