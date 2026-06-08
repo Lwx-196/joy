@@ -171,8 +171,8 @@ def test_render_queue_passes_review_exclusions_to_runner(seed_case, tmp_path, mo
         job_id = conn.execute(
             """
             INSERT INTO render_jobs
-                (case_id, brand, template, status, enqueued_at, semantic_judge)
-            VALUES (?, 'fumei', 'tri-compare', 'queued', ?, 'off')
+                (case_id, brand, template, status, enqueued_at, semantic_judge, render_mode)
+            VALUES (?, 'fumei', 'tri-compare', 'queued', ?, 'off', 'standard')
             """,
             (case_id, now),
         ).lastrowid

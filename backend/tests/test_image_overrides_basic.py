@@ -1652,8 +1652,8 @@ def test_ai_review_policy_is_configurable_and_quality_report_counts(client, seed
     with db.connect() as conn:
         render_id = conn.execute(
             """INSERT INTO render_jobs
-               (case_id, brand, template, status, enqueued_at, finished_at, output_path, semantic_judge)
-               VALUES (?, 'fumei', 'tri-compare', 'done_with_issues', ?, ?, '/tmp/final.jpg', 'auto')""",
+               (case_id, brand, template, status, enqueued_at, finished_at, output_path, semantic_judge, render_mode)
+               VALUES (?, 'fumei', 'tri-compare', 'done_with_issues', ?, ?, '/tmp/final.jpg', 'auto', 'standard')""",
             (case_id, now, now),
         ).lastrowid
         conn.execute(
@@ -1786,8 +1786,8 @@ def test_render_queue_pulls_overrides_into_run_render(client, seed_case, monkeyp
     with db.connect() as conn:
         cur = conn.execute(
             """INSERT INTO render_jobs
-               (case_id, brand, template, status, enqueued_at, semantic_judge)
-               VALUES (?, ?, ?, 'queued', ?, 'off')""",
+               (case_id, brand, template, status, enqueued_at, semantic_judge, render_mode)
+               VALUES (?, ?, ?, 'queued', ?, 'off', 'standard')""",
             (case_id, "fumei", "single-compare", datetime.now(timezone.utc).isoformat()),
         )
         job_id = cur.lastrowid
@@ -1835,8 +1835,8 @@ def test_render_queue_no_overrides_passes_empty_dict(client, seed_case, monkeypa
     with db.connect() as conn:
         cur = conn.execute(
             """INSERT INTO render_jobs
-               (case_id, brand, template, status, enqueued_at, semantic_judge)
-               VALUES (?, ?, ?, 'queued', ?, 'off')""",
+               (case_id, brand, template, status, enqueued_at, semantic_judge, render_mode)
+               VALUES (?, ?, ?, 'queued', ?, 'off', 'standard')""",
             (case_id, "fumei", "single-compare", datetime.now(timezone.utc).isoformat()),
         )
         job_id = cur.lastrowid
@@ -1901,8 +1901,8 @@ def test_render_queue_passes_source_selection_plan_to_renderer(client, seed_case
         )
         cur = conn.execute(
             """INSERT INTO render_jobs
-               (case_id, brand, template, status, enqueued_at, semantic_judge)
-               VALUES (?, ?, ?, 'queued', ?, 'off')""",
+               (case_id, brand, template, status, enqueued_at, semantic_judge, render_mode)
+               VALUES (?, ?, ?, 'queued', ?, 'off', 'standard')""",
             (case_id, "fumei", "single-compare", datetime.now(timezone.utc).isoformat()),
         )
         job_id = cur.lastrowid
@@ -2027,8 +2027,8 @@ def test_render_queue_uses_previous_render_feedback_to_reselect_candidates(clien
         )
         cur = conn.execute(
             """INSERT INTO render_jobs
-               (case_id, brand, template, status, enqueued_at, semantic_judge)
-               VALUES (?, ?, ?, 'queued', ?, 'off')""",
+               (case_id, brand, template, status, enqueued_at, semantic_judge, render_mode)
+               VALUES (?, ?, ?, 'queued', ?, 'off', 'standard')""",
             (case_id, "fumei", "single-compare", datetime.now(timezone.utc).isoformat()),
         )
         job_id = cur.lastrowid
@@ -2162,8 +2162,8 @@ def test_render_queue_reuses_primary_render_metadata_for_bound_oblique_reselecti
             )
         cur = conn.execute(
             """INSERT INTO render_jobs
-               (case_id, brand, template, status, enqueued_at, semantic_judge)
-               VALUES (?, ?, ?, 'queued', ?, 'off')""",
+               (case_id, brand, template, status, enqueued_at, semantic_judge, render_mode)
+               VALUES (?, ?, ?, 'queued', ?, 'off', 'standard')""",
             (before_case, "fumei", "single-compare", now),
         )
         job_id = cur.lastrowid
@@ -2230,8 +2230,8 @@ def test_render_queue_uses_source_group_locked_pair_in_selection_plan(client, se
         )
         cur = conn.execute(
             """INSERT INTO render_jobs
-               (case_id, brand, template, status, enqueued_at, semantic_judge)
-               VALUES (?, ?, ?, 'queued', ?, 'off')""",
+               (case_id, brand, template, status, enqueued_at, semantic_judge, render_mode)
+               VALUES (?, ?, ?, 'queued', ?, 'off', 'standard')""",
             (case_id, "fumei", "single-compare", datetime.now(timezone.utc).isoformat()),
         )
         job_id = cur.lastrowid
@@ -2280,8 +2280,8 @@ def test_render_queue_blocks_tri_compare_when_source_group_slots_missing(client,
         )
         cur = conn.execute(
             """INSERT INTO render_jobs
-               (case_id, brand, template, status, enqueued_at, semantic_judge)
-               VALUES (?, ?, ?, 'queued', ?, 'off')""",
+               (case_id, brand, template, status, enqueued_at, semantic_judge, render_mode)
+               VALUES (?, ?, ?, 'queued', ?, 'off', 'standard')""",
             (case_id, "fumei", "tri-compare", datetime.now(timezone.utc).isoformat()),
         )
         job_id = cur.lastrowid
@@ -2364,8 +2364,8 @@ def test_render_queue_allows_tri_compare_to_downgrade_when_side_pair_has_no_comp
         )
         cur = conn.execute(
             """INSERT INTO render_jobs
-               (case_id, brand, template, status, enqueued_at, semantic_judge)
-               VALUES (?, ?, ?, 'queued', ?, 'off')""",
+               (case_id, brand, template, status, enqueued_at, semantic_judge, render_mode)
+               VALUES (?, ?, ?, 'queued', ?, 'off', 'standard')""",
             (case_id, "fumei", "tri-compare", datetime.now(timezone.utc).isoformat()),
         )
         job_id = cur.lastrowid
@@ -2433,8 +2433,8 @@ def test_render_queue_infers_filename_labels_and_excludes_generated_artifacts(
         )
         cur = conn.execute(
             """INSERT INTO render_jobs
-               (case_id, brand, template, status, enqueued_at, semantic_judge)
-               VALUES (?, ?, ?, 'queued', ?, 'auto')""",
+               (case_id, brand, template, status, enqueued_at, semantic_judge, render_mode)
+               VALUES (?, ?, ?, 'queued', ?, 'auto', 'standard')""",
             (case_id, "fumei", "single-compare", datetime.now(timezone.utc).isoformat()),
         )
         job_id = cur.lastrowid
@@ -2500,8 +2500,8 @@ def test_render_queue_blocks_when_only_generated_artifacts_remain(
         )
         cur = conn.execute(
             """INSERT INTO render_jobs
-               (case_id, brand, template, status, enqueued_at, semantic_judge)
-               VALUES (?, ?, ?, 'queued', ?, 'auto')""",
+               (case_id, brand, template, status, enqueued_at, semantic_judge, render_mode)
+               VALUES (?, ?, ?, 'queued', ?, 'auto', 'standard')""",
             (case_id, "fumei", "single-compare", datetime.now(timezone.utc).isoformat()),
         )
         job_id = cur.lastrowid
@@ -2539,8 +2539,8 @@ def test_render_queue_blocks_single_source_before_renderer(client, seed_case, mo
         )
         cur = conn.execute(
             """INSERT INTO render_jobs
-               (case_id, brand, template, status, enqueued_at, semantic_judge)
-               VALUES (?, ?, ?, 'queued', ?, 'auto')""",
+               (case_id, brand, template, status, enqueued_at, semantic_judge, render_mode)
+               VALUES (?, ?, ?, 'queued', ?, 'auto', 'standard')""",
             (case_id, "fumei", "single-compare", datetime.now(timezone.utc).isoformat()),
         )
         job_id = cur.lastrowid
@@ -2582,8 +2582,8 @@ def test_render_queue_blocks_manual_not_source_marker(client, seed_case, monkeyp
         )
         cur = conn.execute(
             """INSERT INTO render_jobs
-               (case_id, brand, template, status, enqueued_at, semantic_judge)
-               VALUES (?, ?, ?, 'queued', ?, 'auto')""",
+               (case_id, brand, template, status, enqueued_at, semantic_judge, render_mode)
+               VALUES (?, ?, ?, 'queued', ?, 'auto', 'standard')""",
             (case_id, "fumei", "tri-compare", datetime.now(timezone.utc).isoformat()),
         )
         job_id = cur.lastrowid
@@ -2610,8 +2610,8 @@ def test_render_queue_marks_no_slot_result_blocked(client, seed_case, monkeypatc
     with db.connect() as conn:
         cur = conn.execute(
             """INSERT INTO render_jobs
-               (case_id, brand, template, status, enqueued_at, semantic_judge)
-               VALUES (?, ?, ?, 'queued', ?, 'off')""",
+               (case_id, brand, template, status, enqueued_at, semantic_judge, render_mode)
+               VALUES (?, ?, ?, 'queued', ?, 'off', 'standard')""",
             (case_id, "fumei", "single-compare", datetime.now(timezone.utc).isoformat()),
         )
         job_id = cur.lastrowid
@@ -2683,8 +2683,8 @@ def test_render_queue_blocks_large_unlabeled_semantic_auto_before_subprocess(
         )
         cur = conn.execute(
             """INSERT INTO render_jobs
-               (case_id, brand, template, status, enqueued_at, semantic_judge)
-               VALUES (?, ?, ?, 'queued', ?, 'auto')""",
+               (case_id, brand, template, status, enqueued_at, semantic_judge, render_mode)
+               VALUES (?, ?, ?, 'queued', ?, 'auto', 'standard')""",
             (case_id, "fumei", "tri-compare", datetime.now(timezone.utc).isoformat()),
         )
         job_id = cur.lastrowid
@@ -2765,8 +2765,8 @@ def test_render_queue_blocks_large_auto_when_manual_pair_leaves_uncertain_images
         )
         cur = conn.execute(
             """INSERT INTO render_jobs
-               (case_id, brand, template, status, enqueued_at, semantic_judge)
-               VALUES (?, ?, ?, 'queued', ?, 'auto')""",
+               (case_id, brand, template, status, enqueued_at, semantic_judge, render_mode)
+               VALUES (?, ?, ?, 'queued', ?, 'auto', 'standard')""",
             (case_id, "fumei", "tri-compare", datetime.now(timezone.utc).isoformat()),
         )
         job_id = cur.lastrowid

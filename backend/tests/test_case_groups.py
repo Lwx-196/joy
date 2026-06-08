@@ -510,8 +510,8 @@ def test_render_queue_blocks_unresolved_uncertain_images(seed_case, tmp_path, mo
         job_id = conn.execute(
             """
             INSERT INTO render_jobs
-              (case_id, brand, template, status, enqueued_at, semantic_judge)
-            VALUES (?, 'fumei', 'tri-compare', 'queued', ?, 'auto')
+              (case_id, brand, template, status, enqueued_at, semantic_judge, render_mode)
+            VALUES (?, 'fumei', 'tri-compare', 'queued', ?, 'auto', 'standard')
             """,
             (case_id, _now()),
         ).lastrowid

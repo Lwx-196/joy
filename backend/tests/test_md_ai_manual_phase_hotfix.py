@@ -387,8 +387,8 @@ def test_execute_render_translates_manual_phase_into_staging_lookup(
         job_id = conn.execute(
             """
             INSERT INTO render_jobs
-                (case_id, brand, template, status, enqueued_at, semantic_judge)
-            VALUES (?, 'md_ai', 'single-compare', 'queued', ?, 'off')
+                (case_id, brand, template, status, enqueued_at, semantic_judge, render_mode)
+            VALUES (?, 'md_ai', 'single-compare', 'queued', ?, 'off', 'standard')
             """,
             (case_id, now),
         ).lastrowid

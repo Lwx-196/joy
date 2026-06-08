@@ -131,8 +131,8 @@ def test_render_quality_review_updates_row(client, seed_case):
         job_id = conn.execute(
             """
             INSERT INTO render_jobs
-              (case_id, brand, template, status, enqueued_at, finished_at, semantic_judge)
-            VALUES (?, 'fumei', 'tri-compare', 'done_with_issues', ?, ?, 'off')
+              (case_id, brand, template, status, enqueued_at, finished_at, semantic_judge, render_mode)
+            VALUES (?, 'fumei', 'tri-compare', 'done_with_issues', ?, ?, 'off', 'standard')
             """,
             (case_id, now, now),
         ).lastrowid
@@ -166,8 +166,8 @@ def test_render_done_with_issues_is_pending_evaluation(client, seed_case):
         conn.execute(
             """
             INSERT INTO render_jobs
-              (case_id, brand, template, status, enqueued_at, finished_at, semantic_judge)
-            VALUES (?, 'fumei', 'tri-compare', 'done_with_issues', ?, ?, 'off')
+              (case_id, brand, template, status, enqueued_at, finished_at, semantic_judge, render_mode)
+            VALUES (?, 'fumei', 'tri-compare', 'done_with_issues', ?, ?, 'off', 'standard')
             """,
             (case_id, now, now),
         )
@@ -190,9 +190,9 @@ def test_render_quality_queue_lists_real_jobs_and_review_state(client, seed_case
             """
             INSERT INTO render_jobs
               (case_id, brand, template, status, enqueued_at, finished_at, output_path,
-               error_message, semantic_judge)
+               error_message, semantic_judge, render_mode)
             VALUES (?, 'fumei', 'tri-compare', 'done_with_issues', ?, ?, '/tmp/final-board.jpg',
-                    NULL, 'auto')
+                    NULL, 'auto', 'standard')
             """,
             (issue_case_id, now, now),
         ).lastrowid
@@ -213,8 +213,8 @@ def test_render_quality_queue_lists_real_jobs_and_review_state(client, seed_case
         failed_job_id = conn.execute(
             """
             INSERT INTO render_jobs
-              (case_id, brand, template, status, enqueued_at, finished_at, error_message, semantic_judge)
-            VALUES (?, 'fumei', 'tri-compare', 'failed', ?, ?, 'subprocess exit 1', 'auto')
+              (case_id, brand, template, status, enqueued_at, finished_at, error_message, semantic_judge, render_mode)
+            VALUES (?, 'fumei', 'tri-compare', 'failed', ?, ?, 'subprocess exit 1', 'auto', 'standard')
             """,
             (failed_case_id, now, now),
         ).lastrowid
@@ -258,16 +258,16 @@ def test_render_quality_queue_hides_old_failures_after_publishable_latest(client
         failed_job_id = conn.execute(
             """
             INSERT INTO render_jobs
-              (case_id, brand, template, status, enqueued_at, finished_at, error_message, semantic_judge)
-            VALUES (?, 'fumei', 'tri-compare', 'failed', ?, ?, 'old renderer crash', 'off')
+              (case_id, brand, template, status, enqueued_at, finished_at, error_message, semantic_judge, render_mode)
+            VALUES (?, 'fumei', 'tri-compare', 'failed', ?, ?, 'old renderer crash', 'off', 'standard')
             """,
             (case_id, older, older),
         ).lastrowid
         latest_job_id = conn.execute(
             """
             INSERT INTO render_jobs
-              (case_id, brand, template, status, enqueued_at, finished_at, output_path, semantic_judge)
-            VALUES (?, 'fumei', 'tri-compare', 'done', ?, ?, '/tmp/current-final-board.jpg', 'off')
+              (case_id, brand, template, status, enqueued_at, finished_at, output_path, semantic_judge, render_mode)
+            VALUES (?, 'fumei', 'tri-compare', 'done', ?, ?, '/tmp/current-final-board.jpg', 'off', 'standard')
             """,
             (case_id, newer, newer),
         ).lastrowid
@@ -311,24 +311,24 @@ def test_render_quality_queue_defaults_to_latest_problem_per_case(client, seed_c
         old_failed_id = conn.execute(
             """
             INSERT INTO render_jobs
-              (case_id, brand, template, status, enqueued_at, finished_at, error_message, semantic_judge)
-            VALUES (?, 'fumei', 'tri-compare', 'failed', ?, ?, 'old renderer crash', 'off')
+              (case_id, brand, template, status, enqueued_at, finished_at, error_message, semantic_judge, render_mode)
+            VALUES (?, 'fumei', 'tri-compare', 'failed', ?, ?, 'old renderer crash', 'off', 'standard')
             """,
             (case_id, first, first),
         ).lastrowid
         old_blocked_id = conn.execute(
             """
             INSERT INTO render_jobs
-              (case_id, brand, template, status, enqueued_at, finished_at, error_message, semantic_judge)
-            VALUES (?, 'fumei', 'tri-compare', 'blocked', ?, ?, 'old source blocker', 'off')
+              (case_id, brand, template, status, enqueued_at, finished_at, error_message, semantic_judge, render_mode)
+            VALUES (?, 'fumei', 'tri-compare', 'blocked', ?, ?, 'old source blocker', 'off', 'standard')
             """,
             (case_id, second, second),
         ).lastrowid
         latest_failed_id = conn.execute(
             """
             INSERT INTO render_jobs
-              (case_id, brand, template, status, enqueued_at, finished_at, error_message, semantic_judge)
-            VALUES (?, 'fumei', 'tri-compare', 'failed', ?, ?, 'current timeout', 'off')
+              (case_id, brand, template, status, enqueued_at, finished_at, error_message, semantic_judge, render_mode)
+            VALUES (?, 'fumei', 'tri-compare', 'failed', ?, ?, 'current timeout', 'off', 'standard')
             """,
             (case_id, latest, latest),
         ).lastrowid
@@ -368,8 +368,8 @@ def test_quality_report_current_baseline_uses_latest_job_per_case(client, seed_c
         conn.execute(
             """
             INSERT INTO render_jobs
-              (case_id, brand, template, status, enqueued_at, finished_at, error_message, semantic_judge)
-            VALUES (?, 'fumei', 'tri-compare', 'failed', ?, ?, 'old crash', 'off')
+              (case_id, brand, template, status, enqueued_at, finished_at, error_message, semantic_judge, render_mode)
+            VALUES (?, 'fumei', 'tri-compare', 'failed', ?, ?, 'old crash', 'off', 'standard')
             """,
             (publishable_case_id, old_time, old_time),
         )
@@ -377,8 +377,8 @@ def test_quality_report_current_baseline_uses_latest_job_per_case(client, seed_c
             """
             INSERT INTO render_jobs
               (case_id, brand, template, status, enqueued_at, finished_at, output_path,
-               manifest_path, semantic_judge)
-            VALUES (?, 'fumei', 'tri-compare', 'done', ?, ?, ?, ?, 'off')
+               manifest_path, semantic_judge, render_mode)
+            VALUES (?, 'fumei', 'tri-compare', 'done', ?, ?, ?, ?, 'off', 'standard')
             """,
             (publishable_case_id, new_time, new_time, str(final_board), str(manifest)),
         ).lastrowid
@@ -400,16 +400,16 @@ def test_quality_report_current_baseline_uses_latest_job_per_case(client, seed_c
             """
             INSERT INTO render_jobs
               (case_id, brand, template, status, enqueued_at, finished_at, output_path,
-               manifest_path, semantic_judge)
-            VALUES (?, 'fumei', 'tri-compare', 'done', ?, ?, ?, ?, 'off')
+               manifest_path, semantic_judge, render_mode)
+            VALUES (?, 'fumei', 'tri-compare', 'done', ?, ?, ?, ?, 'off', 'standard')
             """,
             (failed_case_id, old_time, old_time, str(final_board), str(manifest)),
         )
         conn.execute(
             """
             INSERT INTO render_jobs
-              (case_id, brand, template, status, enqueued_at, finished_at, error_message, semantic_judge)
-            VALUES (?, 'fumei', 'tri-compare', 'failed', ?, ?, 'current timeout', 'off')
+              (case_id, brand, template, status, enqueued_at, finished_at, error_message, semantic_judge, render_mode)
+            VALUES (?, 'fumei', 'tri-compare', 'failed', ?, ?, 'current timeout', 'off', 'standard')
             """,
             (failed_case_id, new_time, new_time),
         )
@@ -446,8 +446,8 @@ def test_quality_report_exposes_delivery_baseline_without_counting_blocked_as_re
             """
             INSERT INTO render_jobs
               (case_id, brand, template, status, enqueued_at, finished_at, output_path,
-               manifest_path, semantic_judge)
-            VALUES (?, 'fumei', 'tri-compare', 'done', ?, ?, ?, ?, 'off')
+               manifest_path, semantic_judge, render_mode)
+            VALUES (?, 'fumei', 'tri-compare', 'done', ?, ?, ?, ?, 'off', 'standard')
             """,
             (publishable_case_id, now, now, str(final_board), str(manifest)),
         ).lastrowid
@@ -463,16 +463,16 @@ def test_quality_report_exposes_delivery_baseline_without_counting_blocked_as_re
         conn.execute(
             """
             INSERT INTO render_jobs
-              (case_id, brand, template, status, enqueued_at, finished_at, error_message, semantic_judge)
-            VALUES (?, 'fumei', 'tri-compare', 'failed', ?, ?, 'renderer timeout', 'off')
+              (case_id, brand, template, status, enqueued_at, finished_at, error_message, semantic_judge, render_mode)
+            VALUES (?, 'fumei', 'tri-compare', 'failed', ?, ?, 'renderer timeout', 'off', 'standard')
             """,
             (failed_case_id, now, now),
         )
         conn.execute(
             """
             INSERT INTO render_jobs
-              (case_id, brand, template, status, enqueued_at, finished_at, error_message, semantic_judge)
-            VALUES (?, 'fumei', 'tri-compare', 'blocked', ?, ?, '分类未闭环', 'off')
+              (case_id, brand, template, status, enqueued_at, finished_at, error_message, semantic_judge, render_mode)
+            VALUES (?, 'fumei', 'tri-compare', 'blocked', ?, ?, '分类未闭环', 'off', 'standard')
             """,
             (blocked_case_id, now, now),
         )
@@ -480,8 +480,8 @@ def test_quality_report_exposes_delivery_baseline_without_counting_blocked_as_re
             """
             INSERT INTO render_jobs
               (case_id, brand, template, status, enqueued_at, finished_at, output_path,
-               manifest_path, semantic_judge)
-            VALUES (?, 'fumei', 'tri-compare', 'done_with_issues', ?, ?, ?, ?, 'off')
+               manifest_path, semantic_judge, render_mode)
+            VALUES (?, 'fumei', 'tri-compare', 'done_with_issues', ?, ?, ?, ?, 'off', 'standard')
             """,
             (issue_case_id, now, now, str(final_board), str(manifest)),
         ).lastrowid
@@ -590,9 +590,9 @@ def test_render_quality_queue_hides_stale_pose_noise_from_summary(client, seed_c
             """
             INSERT INTO render_jobs
               (case_id, brand, template, status, enqueued_at, finished_at, output_path,
-               semantic_judge)
+               semantic_judge, render_mode)
             VALUES (?, 'fumei', 'tri-compare', 'done_with_issues', ?, ?, '/tmp/final-board.jpg',
-                    'off')
+                    'off', 'standard')
             """,
             (case_id, now, now),
         ).lastrowid
