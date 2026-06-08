@@ -279,7 +279,7 @@ def _get_rembg_session():
     global _REMBG_SESSION
     if _REMBG_SESSION is None:
         from rembg import new_session
-        _REMBG_SESSION = new_session(os.environ.get("CASE_REMBG_MODEL", "u2net_human_seg"))
+        _REMBG_SESSION = new_session(os.environ.get("CASE_REMBG_MODEL", "birefnet-portrait"))
     return _REMBG_SESSION
 
 
@@ -846,6 +846,32 @@ def _rembg_composite_on_black(pil_img: Image.Image) -> Image.Image:
     return Image.fromarray(out)
 
 
+def _match_face_luminance(ref_img: Image.Image, target_img: Image.Image) -> Image.Image:
+    """术后人脸亮度对齐术前：AI 增强 + rembg 黑底合成会压暗术后，这里补偿回来。"""
+    import numpy as np
+
+    ref = np.array(ref_img, dtype=np.float64)
+    tgt = np.array(target_img, dtype=np.float64)
+
+    ref_mask = ref.max(axis=2) > 20
+    tgt_mask = tgt.max(axis=2) > 20
+
+    if not ref_mask.any() or not tgt_mask.any():
+        return target_img
+
+    ref_lum = float(ref[ref_mask].mean())
+    tgt_lum = float(tgt[tgt_mask].mean())
+
+    if tgt_lum >= ref_lum or tgt_lum < 1:
+        return target_img
+
+    gain = min(ref_lum / tgt_lum, 1.3)
+    out = np.clip(tgt * gain, 0, 255).astype(np.uint8)
+    out[~tgt_mask] = 0
+    logger.info("  [lum-match] before=%.0f after=%.0f gain=%.2f", ref_lum, tgt_lum, gain)
+    return Image.fromarray(out)
+
+
 def _make_matte_black_transform(case_layout, stats: dict):
     """matte + 纯黑底 slot_transform；native-enhance 用（AI 已在 apply_after_enhancements 做完，这里只抠黑底）。
 
@@ -856,6 +882,7 @@ def _make_matte_black_transform(case_layout, stats: dict):
         stats["total"] += 1
         before_img = _rembg_composite_on_black(before_img)
         after_img = _rembg_composite_on_black(after_img)
+        after_img = _match_face_luminance(before_img, after_img)
         stats["ok"] += 1
         return before_img, after_img
     return transform
