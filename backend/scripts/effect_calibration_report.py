@@ -4,7 +4,7 @@ Runs the production effect gate (``EffectDeliveryQA``, judge_profile=
 effect_projection) over an ``effect_calibration_packet`` and aggregates the
 verdict distribution into a calibration report — the Phase 3 Exit artifact.
 
-Judge credentials (Vertex ADC, ``tasks/t54_vertex_adc.local.env``) are SEPARATE
+Judge credentials (``tasks/t52_vlm_judge.local.env``) are SEPARATE
 from gpt-image-2 image quota: the judge runs as soon as a packet exists. Over a
 ``--stub`` packet (candidate = raw copy) the judge SHOULD reject every item
 (no-change effect = failure, never a candidate win) — that is the calibration
@@ -12,7 +12,7 @@ of the gate's discrimination floor. Over a real-projection packet it produces
 the actual effect calibration.
 
 Usage:
-    source case-workbench/tasks/t54_vertex_adc.local.env
+    source case-workbench/tasks/t52_vlm_judge.local.env
     python -m backend.scripts.effect_calibration_report \
         --packet-json /tmp/effect-cal/packet.json \
         --report-output /tmp/effect-cal/report.md \
@@ -135,7 +135,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--env-file", type=Path, action="append", default=[],
-        help="judge 凭证 env 文件(如 tasks/t54_vertex_adc.local.env)。t54 是无 export "
+        help="judge 凭证 env 文件(如 tasks/t52_vlm_judge.local.env)。t52 是无 export "
              "前缀的 VAR=val 格式，用 --env-file 读取免去 `set -a; source`(对齐 judge runner)。",
     )
     args = parser.parse_args(argv)

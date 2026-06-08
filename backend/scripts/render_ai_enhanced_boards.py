@@ -68,7 +68,7 @@ PROVIDER_ENV_FILES = {
     "tuzi": "tuzi_image.local.env",
     "flashapi": "flashapi_image.local.env",
     "77code": "77code_image.local.env",
-    "vertex": "t54_vertex_adc.local.env",  # Vertex ADC 出图兜底（gemini-3-pro-image）
+    "vertex": "t52_vlm_judge.local.env",  # Vertex 出图兜底（保留映射，当前默认不走）
 }
 
 PROVIDER_PREFIX_REMAP = {

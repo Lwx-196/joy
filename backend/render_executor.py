@@ -79,7 +79,6 @@ SEMANTIC_PROVIDER_ENV_VARS = (
     "GEMINI_FLASH_BACKUP_BASE_URL",
     "GEMINI_FLASH_BACKUP_API_KEY",
     "GEMINI_TUZI_API_KEY",
-    "CASE_WORKBENCH_VERTEX_IMAGE_MODEL",
     "GOOGLE_GENAI_API_KEY",
 )
 
@@ -1914,7 +1913,7 @@ def run_ai_enhanced_render(
     brand: str = "fumei",
     template: str = "tri-compare",
     enhance_direction: str = "heal",
-    enhance_model: str = "gemini-3-pro-image-preview",
+    enhance_model: str = "gpt-image-2",
     timeout: int = DEFAULT_AI_ENHANCE_TIMEOUT_SEC,
 ) -> dict[str, Any]:
     """术后 AI 增强板：spawn `render_ai_enhanced_boards.py --case-dir`（仿 run_render 子进程隔离），
