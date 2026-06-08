@@ -36,8 +36,9 @@ class ImageProvider:
     @property
     def ready(self) -> bool:
         if self.api_format == "vertex_generate_content":
-            # Vertex 走 ADC（gcloud token），不需要 base_url/api_key
             return bool(self.project and self.location and self.model)
+        if self.api_format == "ai_studio_generate_content":
+            return bool(self.api_key and self.model)
         return bool(self.base_url and self.api_key and self.model)
 
 
@@ -88,8 +89,15 @@ def build_registry(env: dict[str, str]) -> dict[str, ImageProvider]:
             names.add(k[len("PANEL_IMG_"):-len("_BASE_URL")])
     for upper in names:
         reg[upper.lower()] = _seed_from_prefix(env, upper.lower(), f"PANEL_IMG_{upper}")
-    # Vertex ADC 出图（gemini image via generateContent）——通道宕机时的可靠兜底。
-    # 支持多项目轮转：VERTEX_IMAGE_PROJECTS 优先，退回 CASE_WORKBENCH_VERTEX_PROJECT 单项目。
+    # Google AI Studio 出图（gemini image via generativelanguage API key 认证）
+    ai_studio_key = (env.get("GOOGLE_GENAI_API_KEY") or env.get("GEMINI_API_KEY") or "").strip()
+    ai_studio_model = (env.get("AI_STUDIO_IMAGE_MODEL") or "gemini-2.0-flash-preview-image-generation").strip()
+    if ai_studio_key:
+        reg["ai_studio"] = ImageProvider(
+            name="ai_studio", base_url="", api_key=ai_studio_key, model=ai_studio_model,
+            api_format="ai_studio_generate_content",
+        )
+    # Vertex ADC 出图（gemini image via generateContent）——GCP 受限时暂停。
     vertex_projects_csv = env.get("VERTEX_IMAGE_PROJECTS", "")
     vertex_project = (env.get("CASE_WORKBENCH_VERTEX_PROJECT") or env.get("VLM_PROJECT") or "").strip()
     if vertex_projects_csv.strip() or vertex_project:
@@ -215,9 +223,57 @@ def vertex_generate_content(provider: ImageProvider, image_bytes: bytes, prompt:
     raise RuntimeError(f"{provider.name} generateContent 重试 4 次仍失败: {last_err}")
 
 
+def ai_studio_generate_content(provider: ImageProvider, image_bytes: bytes, prompt: str,
+                               *, mime: str = "image/png") -> bytes:
+    """Google AI Studio gemini 出图（API key 认证，generativelanguage 端点）。"""
+    import base64
+    import time
+
+    import requests
+
+    url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
+           f"{provider.model}:generateContent?key={provider.api_key}")
+    payload = {
+        "contents": [{"role": "user", "parts": [
+            {"inlineData": {"mimeType": mime, "data": base64.b64encode(image_bytes).decode("ascii")}},
+            {"text": prompt},
+        ]}],
+        "generationConfig": {"responseModalities": ["TEXT", "IMAGE"]},
+    }
+    timeout_s = max(provider.timeout_ms, 180_000) / 1000.0
+    last_err: Exception | None = None
+    for attempt in range(1, 5):
+        session = requests.Session()
+        session.trust_env = False
+        try:
+            r = session.post(url, json=payload, timeout=timeout_s)
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout,
+                requests.exceptions.SSLError) as exc:
+            last_err = exc
+            time.sleep(min(2 ** attempt, 10))
+            continue
+        if r.status_code in (408, 429, 500, 502, 503, 504):
+            last_err = RuntimeError(f"HTTP {r.status_code}: {r.text[:160]}")
+            time.sleep(min(2 ** attempt, 10))
+            continue
+        if r.status_code != 200:
+            raise RuntimeError(f"ai_studio generateContent HTTP {r.status_code}: {r.text[:300]}")
+        data = r.json()
+        for cand in data.get("candidates", []):
+            for part in (cand.get("content", {}).get("parts") or []):
+                inline = part.get("inlineData") or part.get("inline_data")
+                if inline and inline.get("data"):
+                    return base64.b64decode(inline["data"])
+        last_err = RuntimeError(f"无 image part: {str(data)[:160]}")
+        time.sleep(2)
+    raise RuntimeError(f"ai_studio generateContent 重试 4 次仍失败: {last_err}")
+
+
 def images_edit(provider: ImageProvider, image_bytes: bytes, prompt: str,
                 *, mime: str = "image/jpeg") -> bytes:
     """单次生图调用，返回生成图字节。失败抛异常。按 api_format 分派。"""
+    if provider.api_format == "ai_studio_generate_content":
+        return ai_studio_generate_content(provider, image_bytes, prompt, mime=mime)
     if provider.api_format == "vertex_generate_content":
         return vertex_generate_content(provider, image_bytes, prompt, mime=mime)
 

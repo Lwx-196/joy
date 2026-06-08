@@ -2547,7 +2547,7 @@ class RenderQueue:
                     brand=brand,
                     template=template,
                     enhance_direction=ai_enhance_direction,
-                    enhance_model=ai_enhance_model or "gpt-image-2",
+                    enhance_model=ai_enhance_model or "gemini-2.0-flash-preview-image-generation",
                 )
             else:
                 result = render_executor.run_render(

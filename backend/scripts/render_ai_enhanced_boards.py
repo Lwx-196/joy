@@ -65,15 +65,20 @@ _SIBLING_TASKS_DIRS = [
 ]
 
 PROVIDER_ENV_FILES = {
+    "ai_studio": "t52_vlm_judge.local.env",
     "tuzi": "tuzi_image.local.env",
     "flashapi": "flashapi_image.local.env",
     "77code": "77code_image.local.env",
-    "vertex": "t52_vlm_judge.local.env",  # Vertex 出图兜底（保留映射，当前默认不走）
+    "vertex": "t52_vlm_judge.local.env",
 }
 
 PROVIDER_PREFIX_REMAP = {
     "flashapi": "PANEL_IMG_FLASHAPI",
     "77code": "PANEL_IMG_77CODE",
+}
+
+AI_STUDIO_KEY_REMAP = {
+    "CASE_WORKBENCH_VLM_JUDGE_API_KEY": "GOOGLE_GENAI_API_KEY",
 }
 
 # provider 名归一化：用户口语 "vertex adc" / "vertex-adc" 都映射到 registry key "vertex"
@@ -117,6 +122,12 @@ def _load_all_provider_envs(provider_order: list[str]) -> dict[str, str]:
             logger.warning("env file not found for %s: %s", name, env_filename)
             continue
         raw = _load_env_from_file(env_path)
+        if name == "ai_studio":
+            for k, v in raw.items():
+                mapped = AI_STUDIO_KEY_REMAP.get(k)
+                if mapped:
+                    merged[mapped] = v
+            continue
         remap_prefix = PROVIDER_PREFIX_REMAP.get(name)
         if remap_prefix:
             for k, v in raw.items():
@@ -272,6 +283,19 @@ def _strip_blue_background(arr, mask):
 
 
 _REMBG_SESSION = None
+
+
+def _guided_filter(guide, src, radius, eps):
+    """He et al. guided filter — edge-aware alpha refinement using image structure."""
+    import cv2
+    ksize = (2 * radius + 1, 2 * radius + 1)
+    mean_g = cv2.boxFilter(guide, -1, ksize)
+    mean_s = cv2.boxFilter(src, -1, ksize)
+    cov_gs = cv2.boxFilter(guide * src, -1, ksize) - mean_g * mean_s
+    var_g = cv2.boxFilter(guide * guide, -1, ksize) - mean_g * mean_g
+    a = cov_gs / (var_g + eps)
+    b = mean_s - a * mean_g
+    return cv2.boxFilter(a, -1, ksize) * guide + cv2.boxFilter(b, -1, ksize)
 
 
 def _get_rembg_session():
@@ -772,6 +796,19 @@ def _rembg_composite_on_black(pil_img: Image.Image) -> Image.Image:
         )
     else:
         alpha = (m / 255.0) * kept
+    # Guided-filter alpha refinement: snap mask edges to natural image boundaries,
+    # eliminating jagged binary thresholding artifacts on nose/chin/hair edges.
+    guide_gray = cv2.cvtColor(np.asarray(rgb, dtype=np.uint8), cv2.COLOR_RGB2GRAY)
+    alpha_refined = _guided_filter(
+        guide_gray.astype(np.float32) / 255.0,
+        alpha.astype(np.float32),
+        radius=6, eps=1e-4,
+    )
+    alpha = np.clip(alpha_refined, 0, 1).astype(np.float64)
+    dilate_r = 5
+    possible_fg = cv2.dilate(kept.astype(np.uint8),
+                             np.ones((dilate_r, dilate_r), np.uint8)) > 0
+    alpha[~possible_fg] = 0
     # Light-background bright-fringe suppression for off-center subjects.
     # Skipped when upsample was applied — higher-res mask is already clean enough.
     h_img, w_img = kept.shape
@@ -964,8 +1001,8 @@ def main() -> None:
     parser.add_argument("--cases-root", type=Path, default=DEFAULT_CASES_ROOT)
     parser.add_argument("--output-dir", type=Path, default=Path("/tmp/ai-enhance-boards"))
     parser.add_argument("--brand", default="fumei")
-    parser.add_argument("--provider-order", default="tuzi,flashapi,77code",
-                        help="逗号分隔的 provider 优先级（默认: tuzi,flashapi,77code）")
+    parser.add_argument("--provider-order", default="ai_studio,tuzi,flashapi,77code",
+                        help="逗号分隔的 provider 优先级（默认: ai_studio,tuzi,flashapi,77code）")
     parser.add_argument("--customers", default="",
                         help="逗号分隔的客户名筛选（空=全部）")
     parser.add_argument("--dry-run", action="store_true",
@@ -978,9 +1015,9 @@ def main() -> None:
     parser.add_argument("--native-enhance", action="store_true",
                         help="owner 管线：渲染器原生 focus-scoped 局部增强"
                              "(gpt-image-2 忠实 + 姿态锁 + 稳定回退) → matte 纯黑底；替代 gemini bolt-on")
-    parser.add_argument("--enhance-model", default="gpt-image-2",
-                        help="原生增强模型（默认 gpt-image-2 走 tuzi/flashapi/77code；"
-                             "gemini 失败时单角度退未增强原图）")
+    parser.add_argument("--enhance-model", default="gemini-2.0-flash-preview-image-generation",
+                        help="原生增强模型（默认 gemini-2.0-flash 走 AI Studio；"
+                             "失败时单角度退未增强原图）")
     parser.add_argument("--enhance-direction", default="heal", choices=["strict", "heal"],
                         help="增强方向：heal(默认)=恢复预览定向 prompt（身份锁不变 + 往恢复良好理想化，"
                              "4 案例验证一致安全）；strict=旧版忠实严格 prompt（只许极轻、偏保守）")
