@@ -1015,8 +1015,8 @@ def main() -> None:
     parser.add_argument("--native-enhance", action="store_true",
                         help="owner 管线：渲染器原生 focus-scoped 局部增强"
                              "(gpt-image-2 忠实 + 姿态锁 + 稳定回退) → matte 纯黑底；替代 gemini bolt-on")
-    parser.add_argument("--enhance-model", default="gemini-2.0-flash-preview-image-generation",
-                        help="原生增强模型（默认 gemini-2.0-flash 走 AI Studio；"
+    parser.add_argument("--enhance-model", default="nanobanana pro",
+                        help="原生增强模型（默认 nanobanana pro 走 AI Studio；"
                              "失败时单角度退未增强原图）")
     parser.add_argument("--enhance-direction", default="heal", choices=["strict", "heal"],
                         help="增强方向：heal(默认)=恢复预览定向 prompt（身份锁不变 + 往恢复良好理想化，"

@@ -1913,7 +1913,7 @@ def run_ai_enhanced_render(
     brand: str = "fumei",
     template: str = "tri-compare",
     enhance_direction: str = "heal",
-    enhance_model: str = "gemini-2.0-flash-preview-image-generation",
+    enhance_model: str = "nanobanana pro",
     timeout: int = DEFAULT_AI_ENHANCE_TIMEOUT_SEC,
 ) -> dict[str, Any]:
     """术后 AI 增强板：spawn `render_ai_enhanced_boards.py --case-dir`（仿 run_render 子进程隔离），
