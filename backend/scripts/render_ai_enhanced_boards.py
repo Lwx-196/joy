@@ -278,6 +278,7 @@ def _get_rembg_session():
     return _REMBG_SESSION
 
 
+
 def _composite_on_black(pil_img: Image.Image, slot: str, case_layout) -> Image.Image:
     """人物分割 + 纯黑底还原（对齐后的 cell，不依赖源图背景颜色）。
 
@@ -711,6 +712,7 @@ def _rembg_composite_on_black(pil_img: Image.Image) -> Image.Image:
     根因（2026-06-06 owner 揪出）：_composite_on_black 的那两个去白领 hack 会截断下颌/颈、
     且 MediaPipe 前景 mask 留脏边——污染人物。rembg 人像分割完整保人物（含肩/领自然过渡），
     边缘干净、无截断，对 studio 深底/灰底都稳。
+
     """
     import cv2
     import numpy as np
@@ -718,14 +720,55 @@ def _rembg_composite_on_black(pil_img: Image.Image) -> Image.Image:
     from rembg import remove
 
     rgb = ImageOps.exif_transpose(pil_img).convert("RGB")
+    arr_orig = np.asarray(rgb, dtype=np.float64)
+
     mask = remove(rgb, session=_get_rembg_session(), only_mask=True, post_process_mask=True)
     m = np.asarray(mask.convert("L"), dtype=np.float64)
     # 保 rembg 软边（消锯齿），但用最大连通域把背景残岛/漏光软边压到 0 → 背景纯黑。
     kept = _largest_component(m > 110)
     kept = np.asarray(kept if isinstance(kept, np.ndarray) else (m > 110), dtype=bool)
     alpha = (m / 255.0) * kept
-    arr = np.asarray(rgb, dtype=np.float64)
-    out = np.clip(arr * alpha[..., None], 0, 255).astype(np.uint8)
+    # Light-background bright-fringe suppression for off-center subjects.
+    # rembg on side profile + bright studio bg includes background as hard 255-mask.
+    # Fix: position-adaptive brightness kill on the side opposite to the subject centroid.
+    h_img, w_img = kept.shape
+    fg_ratio = float(kept.sum()) / kept.size
+    bg_region = ~kept
+    if fg_ratio > 0.45 and bg_region.any():
+        bg_brightness = float(arr_orig.max(axis=2)[bg_region].mean())
+        if bg_brightness > 180:
+            xs_fg = np.where(kept)[1]
+            centroid_x = float(xs_fg.mean())
+            centroid_offset = (centroid_x - w_img / 2.0) / w_img
+            if abs(centroid_offset) > 0.05:
+                orig_brightness = arr_orig.max(axis=2)
+                bright_thr_base = bg_brightness - 80
+                killed = 0
+                if centroid_offset > 0:
+                    cx_int = int(centroid_x)
+                    bg_cols = np.arange(0, cx_int, dtype=np.float64)
+                    if len(bg_cols) > 0:
+                        dist_ratio = 1.0 - bg_cols / centroid_x
+                        col_thr = 255.0 - dist_ratio * (255.0 - bright_thr_base)
+                        kill_zone = kept[:, :cx_int] & (orig_brightness[:, :cx_int] > col_thr[np.newaxis, :])
+                        alpha[:, :cx_int][kill_zone] = 0
+                        killed = int(kill_zone.sum())
+                else:
+                    cx_int = int(centroid_x)
+                    bg_cols = np.arange(cx_int, w_img, dtype=np.float64)
+                    if len(bg_cols) > 0:
+                        dist_ratio = (bg_cols - centroid_x) / (w_img - centroid_x)
+                        col_thr = 255.0 - dist_ratio * (255.0 - bright_thr_base)
+                        kill_zone = kept[:, cx_int:] & (orig_brightness[:, cx_int:] > col_thr[np.newaxis, :])
+                        alpha[:, cx_int:][kill_zone] = 0
+                        killed = int(kill_zone.sum())
+                if killed > 0:
+                    kept = alpha > 0
+                    logger.info(
+                        "  [rembg-fringe] bg_L=%.0f offset=%.1f%% killed=%d",
+                        bg_brightness, centroid_offset * 100, killed,
+                    )
+    out = np.clip(arr_orig * alpha[..., None], 0, 255).astype(np.uint8)
     # 背景纯黑兜底①：erode person mask 建「安全区」——安全区内（瞳孔/虹膜/鼻孔/深色发根）
     # 保留所有暗像素，只在安全区外做地板清零灭 rembg 误留的暗背景缝。
     erode_r = max(10, out.shape[0] // 60)
@@ -739,7 +782,7 @@ def _rembg_composite_on_black(pil_img: Image.Image) -> Image.Image:
     if num > 2:
         largest = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
         out[labels != largest] = 0
-    _audit_eye_preservation(arr, out, kept)
+    _audit_eye_preservation(arr_orig, out, kept)
     return Image.fromarray(out)
 
 

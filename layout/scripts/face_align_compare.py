@@ -274,7 +274,7 @@ def align_face(img, landmarks, target_eye_distance, target_eye_center, output_si
         img, M, output_size,
         flags=cv2.INTER_LANCZOS4,
         borderMode=cv2.BORDER_CONSTANT,
-        borderValue=estimate_background_color(img),
+        borderValue=(0, 0, 0),
     )
     if not return_mask:
         return aligned
@@ -584,9 +584,9 @@ def create_comparison(before_path, after_path, output_path,
 
     output_size = (half_width, img_height)
 
-    # 3. 对齐两张图
-    before_aligned = align_face(before['image'], before, target_eye_distance, target_eye_center, output_size)
-    after_aligned = align_face(after['image'], after, target_eye_distance, target_eye_center, output_size)
+    # 3. 对齐两张图（带 mask，borderValue=黑色后用 mask 合成避免黑角）
+    before_aligned, before_mask = align_face(before['image'], before, target_eye_distance, target_eye_center, output_size, return_mask=True)
+    after_aligned, after_mask = align_face(after['image'], after, target_eye_distance, target_eye_center, output_size, return_mask=True)
 
     # 4. 色彩归一化（术后匹配术前）
     after_aligned = normalize_color(after_aligned, before_aligned)
@@ -609,9 +609,11 @@ def create_comparison(before_path, after_path, output_path,
                      (half_width + half_width // 2 - 24, label_height // 2 - 16),
                      color=(255, 255, 255), font_scale=1.3, thickness=2)
 
-    # 放置对齐后的图片
-    canvas[label_height:canvas_height, 0:half_width] = before_aligned
-    canvas[label_height:canvas_height, half_width:canvas_width] = after_aligned
+    # 放置对齐后的图片（mask 合成：只覆盖有效像素，填充区保持画布底色）
+    region_before = canvas[label_height:canvas_height, 0:half_width]
+    region_before[before_mask] = before_aligned[before_mask]
+    region_after = canvas[label_height:canvas_height, half_width:canvas_width]
+    region_after[after_mask] = after_aligned[after_mask]
 
     # 中线分隔
     cv2.line(canvas, (half_width, 0), (half_width, canvas_height), (255, 255, 255), 2)
