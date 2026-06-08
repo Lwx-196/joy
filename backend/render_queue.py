@@ -2547,7 +2547,7 @@ class RenderQueue:
                     brand=brand,
                     template=template,
                     enhance_direction=ai_enhance_direction,
-                    enhance_model=ai_enhance_model or "nanobanana pro",
+                    enhance_model=ai_enhance_model or "gemini-3-pro-image",
                 )
             else:
                 result = render_executor.run_render(

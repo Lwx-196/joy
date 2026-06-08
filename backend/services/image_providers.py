@@ -91,7 +91,7 @@ def build_registry(env: dict[str, str]) -> dict[str, ImageProvider]:
         reg[upper.lower()] = _seed_from_prefix(env, upper.lower(), f"PANEL_IMG_{upper}")
     # Google AI Studio 出图（gemini image via generativelanguage API key 认证）
     ai_studio_key = (env.get("GOOGLE_GENAI_API_KEY") or env.get("GEMINI_API_KEY") or "").strip()
-    ai_studio_model = (env.get("AI_STUDIO_IMAGE_MODEL") or "nanobanana pro").strip()
+    ai_studio_model = (env.get("AI_STUDIO_IMAGE_MODEL") or "gemini-3-pro-image").strip()
     if ai_studio_key:
         reg["ai_studio"] = ImageProvider(
             name="ai_studio", base_url="", api_key=ai_studio_key, model=ai_studio_model,
