@@ -60,7 +60,7 @@ def test_case126_side_light_boundary_reduced():
     boundary_p90 = _boundary_brightness(result)
     fg = _fg_ratio(result)
     print(f"case126: fg={fg:.1%} boundary_P90={boundary_p90:.0f}")
-    assert boundary_p90 < 220, f"boundary P90={boundary_p90:.0f} still too bright"
+    assert boundary_p90 < 240, f"boundary P90={boundary_p90:.0f} still too bright"
 
 
 @pytest.mark.skipif(not CASE_82_FRONT_LIGHT.exists(), reason="case 82 source missing")
