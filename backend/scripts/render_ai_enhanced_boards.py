@@ -228,10 +228,10 @@ def _log_cell_coverage(before_img: Image.Image, after_img: Image.Image, slot: st
 
 
 def _largest_component(mask):
-    """只保留最大连通域，去掉断开的背景残留岛（深色背景被误判为前景的情况）。
+    """保留面积 ≥ 最大连通域 1% 的所有组件，去掉微小背景残岛。
 
-    98% 守卫：最大域已占前景 ≥98% 视为干净 → 原样返回，不改 mask 字节，
-    从而保住其他客户已验证板的缓存命中（只有真有 bleed 的 mask 才被清理）。
+    侧面角度鼻尖等身体部位可能与主体断裂形成独立岛，面积远超 1% 阈值会保留。
+    98% 守卫：最大域已占前景 ≥98% 视为干净 → 原样返回，不改 mask 字节。
     """
     import cv2
     import numpy as np
@@ -244,8 +244,13 @@ def _largest_component(mask):
     total = int(areas.sum())
     if total == 0 or int(areas.max()) >= 0.98 * total:
         return mask
-    largest_idx = 1 + int(np.argmax(areas))
-    return labels == largest_idx
+    largest_area = int(areas.max())
+    min_area = max(1, int(largest_area * 0.01))
+    keep = np.zeros(labels.shape, dtype=bool)
+    for i in range(1, num):
+        if stats[i, cv2.CC_STAT_AREA] >= min_area:
+            keep |= (labels == i)
+    return keep
 
 
 def _strip_blue_background(arr, mask):
@@ -672,6 +677,8 @@ def _native_focus_targets(case_layout, prm, treatment: str):
 # 背景暗像素地板阈值：max(RGB) < 此值 → 纯黑（灭 rembg 误留的暗背景缝）。
 # 仅在 eroded person mask 外生效——安全区内保留所有暗五官（瞳孔/虹膜/鼻孔/深色发根）。
 _BLACK_FLOOR = 50
+_REMBG_MIN_SHORT_SIDE = 1024
+_REMBG_FG_LEAK_THRESHOLD = 0.60
 
 
 def _audit_eye_preservation(orig_arr, out_arr, kept_mask):
@@ -720,14 +727,51 @@ def _rembg_composite_on_black(pil_img: Image.Image) -> Image.Image:
     from rembg import remove
 
     rgb = ImageOps.exif_transpose(pil_img).convert("RGB")
+    w_orig, h_orig = rgb.size
     arr_orig = np.asarray(rgb, dtype=np.float64)
 
-    mask = remove(rgb, session=_get_rembg_session(), only_mask=True, post_process_mask=True)
+    short_side = min(h_orig, w_orig)
+    if short_side < _REMBG_MIN_SHORT_SIDE:
+        scale = _REMBG_MIN_SHORT_SIDE / short_side
+        rgb_hi = rgb.resize((round(w_orig * scale), round(h_orig * scale)), Image.LANCZOS)
+        logger.info("  [rembg-upsample] %dx%d → %dx%d", w_orig, h_orig, *rgb_hi.size)
+    else:
+        rgb_hi = rgb
+        scale = 1.0
+
+    session = _get_rembg_session()
+    mask_hi = remove(rgb_hi, session=session, only_mask=True, post_process_mask=True)
+    if scale > 1.0:
+        mask = mask_hi.resize((w_orig, h_orig), Image.LANCZOS)
+    else:
+        mask = mask_hi
     m = np.asarray(mask.convert("L"), dtype=np.float64)
-    # 保 rembg 软边（消锯齿），但用最大连通域把背景残岛/漏光软边压到 0 → 背景纯黑。
+
     kept = _largest_component(m > 110)
     kept = np.asarray(kept if isinstance(kept, np.ndarray) else (m > 110), dtype=bool)
-    alpha = (m / 255.0) * kept
+    fg_ratio = float(kept.sum()) / kept.size
+
+    if fg_ratio > _REMBG_FG_LEAK_THRESHOLD:
+        mask_raw_hi = remove(rgb_hi, session=session, only_mask=True, post_process_mask=False)
+        if scale > 1.0:
+            mask_raw = mask_raw_hi.resize((w_orig, h_orig), Image.LANCZOS)
+        else:
+            mask_raw = mask_raw_hi
+        m_raw = np.asarray(mask_raw.convert("L"), dtype=np.float64)
+        chosen_thr = 200
+        for thr in (140, 170, 200):
+            if float((m_raw > thr).sum()) / m_raw.size < _REMBG_FG_LEAK_THRESHOLD:
+                chosen_thr = thr
+                break
+        kept = _largest_component(m_raw > chosen_thr)
+        kept = np.asarray(kept if isinstance(kept, np.ndarray) else (m_raw > chosen_thr), dtype=bool)
+        alpha = (m_raw / 255.0) * kept
+        logger.info(
+            "  [rembg-bg-leak] fg@110=%.0f%% → raw thr=%d fg=%.0f%%",
+            fg_ratio * 100, chosen_thr, float(kept.sum()) / kept.size * 100,
+        )
+    else:
+        alpha = (m / 255.0) * kept
     # Light-background bright-fringe suppression for off-center subjects.
     # rembg on side profile + bright studio bg includes background as hard 255-mask.
     # Fix: position-adaptive brightness kill on the side opposite to the subject centroid.
@@ -780,8 +824,12 @@ def _rembg_composite_on_black(pil_img: Image.Image) -> Image.Image:
     nonblack = (out.max(axis=2) > 0).astype(np.uint8)
     num, labels, stats, _ = cv2.connectedComponentsWithStats(nonblack, connectivity=8)
     if num > 2:
-        largest = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
-        out[labels != largest] = 0
+        areas = stats[1:, cv2.CC_STAT_AREA]
+        largest_area = int(areas.max())
+        min_area = max(1, int(largest_area * 0.01))
+        for i in range(1, num):
+            if stats[i, cv2.CC_STAT_AREA] < min_area:
+                out[labels == i] = 0
     _audit_eye_preservation(arr_orig, out, kept)
     return Image.fromarray(out)
 
