@@ -964,9 +964,8 @@ def main() -> None:
     parser.add_argument("--cases-root", type=Path, default=DEFAULT_CASES_ROOT)
     parser.add_argument("--output-dir", type=Path, default=Path("/tmp/ai-enhance-boards"))
     parser.add_argument("--brand", default="fumei")
-    parser.add_argument("--provider-order", default="vertex,flashapi,tuzi",
-                        help="逗号分隔的 provider 优先级（默认: vertex,flashapi,tuzi；"
-                             "vertex=Vertex ADC gemini-3-pro-image 优先）")
+    parser.add_argument("--provider-order", default="tuzi,flashapi,77code",
+                        help="逗号分隔的 provider 优先级（默认: tuzi,flashapi,77code）")
     parser.add_argument("--customers", default="",
                         help="逗号分隔的客户名筛选（空=全部）")
     parser.add_argument("--dry-run", action="store_true",
@@ -979,9 +978,9 @@ def main() -> None:
     parser.add_argument("--native-enhance", action="store_true",
                         help="owner 管线：渲染器原生 focus-scoped 局部增强"
                              "(gpt-image-2 忠实 + 姿态锁 + 稳定回退) → matte 纯黑底；替代 gemini bolt-on")
-    parser.add_argument("--enhance-model", default=os.environ.get("CASE_WORKBENCH_VERTEX_IMAGE_MODEL", "gemini-2.5-flash-preview-image-generation"),
-                        help="原生增强模型（默认读 CASE_WORKBENCH_VERTEX_IMAGE_MODEL env 或 gemini-2.5-flash；"
-                             "gpt-image-2=忠实零 vertex 依赖备选，gemini 失败时单角度退未增强原图）")
+    parser.add_argument("--enhance-model", default="gpt-image-2",
+                        help="原生增强模型（默认 gpt-image-2 走 tuzi/flashapi/77code；"
+                             "gemini 失败时单角度退未增强原图）")
     parser.add_argument("--enhance-direction", default="heal", choices=["strict", "heal"],
                         help="增强方向：heal(默认)=恢复预览定向 prompt（身份锁不变 + 往恢复良好理想化，"
                              "4 案例验证一致安全）；strict=旧版忠实严格 prompt（只许极轻、偏保守）")
@@ -998,9 +997,7 @@ def main() -> None:
         # 原生强化器是 node subprocess（继承 os.environ）：注入图像 creds + 顶掉写死的 gemini-4k 死模型。
         _enhance_env_files = ["tuzi_image.local.env", "flashapi_image.local.env"]
         if args.enhance_model.startswith("gemini"):
-            # gemini 走 relay 的 vertex 成员（6-05「Vertex 404」是 -4k 死模型 id 而非鉴权问题；
-            # 基础款 gemini-3-pro-image-preview 可达）。t54 ADC 若存在一并注入兜底。
-            _enhance_env_files.append("t54_vertex_adc.local.env")
+            _enhance_env_files.append("t52_vlm_judge.local.env")
         for _env_fn in _enhance_env_files:
             _p = _find_env_file(_env_fn)
             if _p:
@@ -1031,7 +1028,7 @@ def main() -> None:
         sys.exit(1)
 
     board_qa = None
-    _qa_env_p = _find_env_file("t54_vertex_adc.local.env")
+    _qa_env_p = _find_env_file("t52_vlm_judge.local.env")
     if _qa_env_p:
         os.environ.update(_load_env_from_file(_qa_env_p))
     if args.board_qa or _qa_env_p:

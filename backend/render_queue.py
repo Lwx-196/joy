@@ -2547,7 +2547,7 @@ class RenderQueue:
                     brand=brand,
                     template=template,
                     enhance_direction=ai_enhance_direction,
-                    enhance_model=ai_enhance_model or os.environ.get("CASE_WORKBENCH_VERTEX_IMAGE_MODEL", "gemini-2.5-flash-preview-image-generation"),
+                    enhance_model=ai_enhance_model or "gpt-image-2",
                 )
             else:
                 result = render_executor.run_render(

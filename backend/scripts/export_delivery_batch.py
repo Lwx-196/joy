@@ -63,13 +63,13 @@ def _load_env_file(path: Path) -> dict[str, str]:
 def _build_board_qa(conn: sqlite3.Connection, repo_root: Path) -> BoardDeliveryQA:
     """Construct the fail-closed VLM QA gate, loading t54 ADC config if present."""
     env = dict(os.environ)
-    env.update(_load_env_file(repo_root / "tasks" / "t54_vertex_adc.local.env"))
+    env.update(_load_env_file(repo_root / "tasks" / "t52_vlm_judge.local.env"))
     return BoardDeliveryQA(VLMProvider(env=env), conn)
 
 
 def _build_single_image_qa(conn: sqlite3.Connection, repo_root: Path) -> SingleImageDeliveryQA:
     env = dict(os.environ)
-    env.update(_load_env_file(repo_root / "tasks" / "t54_vertex_adc.local.env"))
+    env.update(_load_env_file(repo_root / "tasks" / "t52_vlm_judge.local.env"))
     return SingleImageDeliveryQA(conn, env=env)
 
 
@@ -87,7 +87,7 @@ def _build_effect_qa(conn: sqlite3.Connection, repo_root: Path) -> "EffectDelive
     from backend.services.effect_delivery_qa import EffectDeliveryQA
 
     env = dict(os.environ)
-    env.update(_load_env_file(repo_root / "tasks" / "t54_vertex_adc.local.env"))
+    env.update(_load_env_file(repo_root / "tasks" / "t52_vlm_judge.local.env"))
     return EffectDeliveryQA(VLMProvider(env=env), conn, purpose="judge")
 
 
