@@ -678,7 +678,7 @@ def _native_focus_targets(case_layout, prm, treatment: str):
 # 仅在 eroded person mask 外生效——安全区内保留所有暗五官（瞳孔/虹膜/鼻孔/深色发根）。
 _BLACK_FLOOR = 50
 _REMBG_MIN_SHORT_SIDE = 1024
-_REMBG_FG_LEAK_THRESHOLD = 0.60
+_REMBG_FG_LEAK_THRESHOLD = 0.75
 
 
 def _audit_eye_preservation(orig_arr, out_arr, kept_mask):
@@ -773,12 +773,11 @@ def _rembg_composite_on_black(pil_img: Image.Image) -> Image.Image:
     else:
         alpha = (m / 255.0) * kept
     # Light-background bright-fringe suppression for off-center subjects.
-    # rembg on side profile + bright studio bg includes background as hard 255-mask.
-    # Fix: position-adaptive brightness kill on the side opposite to the subject centroid.
+    # Skipped when upsample was applied — higher-res mask is already clean enough.
     h_img, w_img = kept.shape
     fg_ratio = float(kept.sum()) / kept.size
     bg_region = ~kept
-    if fg_ratio > 0.45 and bg_region.any():
+    if scale <= 1.0 and fg_ratio > 0.45 and bg_region.any():
         bg_brightness = float(arr_orig.max(axis=2)[bg_region].mean())
         if bg_brightness > 180:
             xs_fg = np.where(kept)[1]
@@ -787,6 +786,11 @@ def _rembg_composite_on_black(pil_img: Image.Image) -> Image.Image:
             if abs(centroid_offset) > 0.05:
                 orig_brightness = arr_orig.max(axis=2)
                 bright_thr_base = bg_brightness - 80
+                fringe_r = max(20, min(h_img, w_img) // 15)
+                fringe_safe = cv2.erode(
+                    kept.astype(np.uint8),
+                    np.ones((fringe_r, fringe_r), np.uint8),
+                ) > 0
                 killed = 0
                 if centroid_offset > 0:
                     cx_int = int(centroid_x)
@@ -794,7 +798,11 @@ def _rembg_composite_on_black(pil_img: Image.Image) -> Image.Image:
                     if len(bg_cols) > 0:
                         dist_ratio = 1.0 - bg_cols / centroid_x
                         col_thr = 255.0 - dist_ratio * (255.0 - bright_thr_base)
-                        kill_zone = kept[:, :cx_int] & (orig_brightness[:, :cx_int] > col_thr[np.newaxis, :])
+                        kill_zone = (
+                            kept[:, :cx_int]
+                            & (orig_brightness[:, :cx_int] > col_thr[np.newaxis, :])
+                            & ~fringe_safe[:, :cx_int]
+                        )
                         alpha[:, :cx_int][kill_zone] = 0
                         killed = int(kill_zone.sum())
                 else:
@@ -803,14 +811,18 @@ def _rembg_composite_on_black(pil_img: Image.Image) -> Image.Image:
                     if len(bg_cols) > 0:
                         dist_ratio = (bg_cols - centroid_x) / (w_img - centroid_x)
                         col_thr = 255.0 - dist_ratio * (255.0 - bright_thr_base)
-                        kill_zone = kept[:, cx_int:] & (orig_brightness[:, cx_int:] > col_thr[np.newaxis, :])
+                        kill_zone = (
+                            kept[:, cx_int:]
+                            & (orig_brightness[:, cx_int:] > col_thr[np.newaxis, :])
+                            & ~fringe_safe[:, cx_int:]
+                        )
                         alpha[:, cx_int:][kill_zone] = 0
                         killed = int(kill_zone.sum())
                 if killed > 0:
                     kept = alpha > 0
                     logger.info(
-                        "  [rembg-fringe] bg_L=%.0f offset=%.1f%% killed=%d",
-                        bg_brightness, centroid_offset * 100, killed,
+                        "  [rembg-fringe] bg_L=%.0f offset=%.1f%% killed=%d safe_r=%d",
+                        bg_brightness, centroid_offset * 100, killed, fringe_r,
                     )
     out = np.clip(arr_orig * alpha[..., None], 0, 255).astype(np.uint8)
     # 背景纯黑兜底①：erode person mask 建「安全区」——安全区内（瞳孔/虹膜/鼻孔/深色发根）

@@ -85,3 +85,32 @@ def test_case414_front_dark_no_trigger():
     fg = _fg_ratio(result)
     print(f"case414: fg={fg:.1%}")
     assert fg > 0.30, f"fg={fg:.1%} too low"
+
+
+@pytest.mark.skipif(not CASE_126_SIDE_LIGHT.exists(), reason="case 126 source missing")
+def test_upsample_triggers_on_small_cell():
+    """小图（短边 516）应触发上采样路径。"""
+    from backend.scripts.render_ai_enhanced_boards import (
+        _REMBG_MIN_SHORT_SIDE,
+        _rembg_composite_on_black,
+    )
+
+    img = Image.open(CASE_126_SIDE_LIGHT).resize((516, 624))
+    assert min(img.size) < _REMBG_MIN_SHORT_SIDE
+    result = _rembg_composite_on_black(img)
+    fg = _fg_ratio(result)
+    print(f"upsample_small: fg={fg:.1%}")
+    assert fg > 0.20, f"fg={fg:.1%} too low — person lost after upsample"
+    assert fg < 0.85, f"fg={fg:.1%} too high — background not removed"
+
+
+@pytest.mark.skipif(not CASE_82_FRONT_LIGHT.exists(), reason="case 82 source missing")
+def test_adaptive_threshold_limits_fg():
+    """浅底正面人像 fg 不应超过 60%（自适应阈值应控制背景泄漏）。"""
+    from backend.scripts.render_ai_enhanced_boards import _rembg_composite_on_black
+
+    img = Image.open(CASE_82_FRONT_LIGHT).resize((516, 624))
+    result = _rembg_composite_on_black(img)
+    fg = _fg_ratio(result)
+    print(f"adaptive_thr: fg={fg:.1%}")
+    assert fg < 0.80, f"fg={fg:.1%} — background leak not controlled"
