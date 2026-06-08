@@ -1001,8 +1001,8 @@ def main() -> None:
     parser.add_argument("--cases-root", type=Path, default=DEFAULT_CASES_ROOT)
     parser.add_argument("--output-dir", type=Path, default=Path("/tmp/ai-enhance-boards"))
     parser.add_argument("--brand", default="fumei")
-    parser.add_argument("--provider-order", default="ai_studio,tuzi,flashapi,77code",
-                        help="逗号分隔的 provider 优先级（默认: ai_studio,tuzi,flashapi,77code）")
+    parser.add_argument("--provider-order", default="tuzi,flashapi,77code",
+                        help="逗号分隔的 provider 优先级（默认: tuzi,flashapi,77code）")
     parser.add_argument("--customers", default="",
                         help="逗号分隔的客户名筛选（空=全部）")
     parser.add_argument("--dry-run", action="store_true",

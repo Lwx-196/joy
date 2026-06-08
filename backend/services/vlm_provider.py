@@ -768,10 +768,13 @@ class VLMProvider:
         if config.provider in ("openai_chat_completions", "ollama"):
             content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
             content.extend({"type": "image_url", "image_url": {"url": _data_url(image)}} for image in images)
+            # ollama gemma4 uses ~450 thinking tokens even with think=false on
+            # the OpenAI compat endpoint; 800 causes empty output on complex images.
+            max_tok = 4096 if config.provider == "ollama" else 800
             result = {
                 "model": config.model,
                 "messages": [{"role": "user", "content": content}],
-                "max_tokens": 800,
+                "max_tokens": max_tok,
                 "stream": False,
             }
             if config.provider == "ollama":
