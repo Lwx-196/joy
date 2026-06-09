@@ -704,30 +704,85 @@ def run_classification(
     if provider is None:
         report["run_status"] = "blocked_missing_vlm_provider"
         return report
-    paths = [item.image_abs_path for item in queue]
-    escalation_tier_stats: list[EscalationTierStats] = []
+
+    # ── EfficientNet pre-screen: skip VLM for items that only need phase ──
+    en_resolved: dict[int, ClassificationResult] = {}  # index → result
+    vlm_indices: list[int] = list(range(len(queue)))
     try:
-        if escalate:
-            results, escalation_tier_stats = classify_with_escalation(
-                paths,
-                provider,
-                concurrency=concurrency,
-                timeout=timeout,
-                max_retries=max_retries,
+        from .phase_classifier import EfficientNetPhaseClassifier
+        en_classifier = EfficientNetPhaseClassifier.get_instance()
+        en_skipped = 0
+        new_vlm_indices: list[int] = []
+        for i, item in enumerate(queue):
+            only_phase_unknown = (
+                (item.phase == "unknown" or item.confidence < LOW_CONFIDENCE_THRESHOLD)
+                and item.view not in ("unknown", "")
+                and item.body_part not in ("unknown", "")
             )
+            if not only_phase_unknown:
+                new_vlm_indices.append(i)
+                continue
+            en_result = en_classifier.classify(item.image_abs_path)
+            if en_result.confidence >= 0.85:
+                en_resolved[i] = ClassificationResult(
+                    image_path=item.image_abs_path,
+                    phase=en_result.phase,
+                    view=item.view,
+                    body_part=item.body_part,
+                    confidence=round(en_result.confidence, 4),
+                    reasoning=f"efficientnet phase={en_result.phase} conf={en_result.confidence:.2%}",
+                    provider="efficientnet",
+                    model="efficientnet-b0",
+                )
+                en_skipped += 1
+            else:
+                new_vlm_indices.append(i)
+        vlm_indices = new_vlm_indices
+        if en_skipped:
+            logger.info("EfficientNet pre-screen: %d resolved, %d → VLM", en_skipped, len(vlm_indices))
+    except Exception as exc:
+        logger.warning("EfficientNet pre-screen unavailable (%s), full VLM fallback", exc)
+
+    # ── VLM classification for remaining items ──
+    vlm_paths = [queue[i].image_abs_path for i in vlm_indices]
+    escalation_tier_stats: list[EscalationTierStats] = []
+    vlm_results_map: dict[int, ClassificationResult | BaseException] = {}
+    if vlm_paths:
+        try:
+            if escalate:
+                vlm_raw, escalation_tier_stats = classify_with_escalation(
+                    vlm_paths,
+                    provider,
+                    concurrency=concurrency,
+                    timeout=timeout,
+                    max_retries=max_retries,
+                )
+            else:
+                vlm_raw = classify_batch_with_retry(
+                    vlm_paths,
+                    provider,
+                    concurrency=concurrency,
+                    timeout=timeout,
+                    max_retries=max_retries,
+                )
+            for vi, vr in zip(vlm_indices, vlm_raw):
+                vlm_results_map[vi] = vr
+        except (VLMRequestError, ValueError, OSError) as exc:
+            report["run_status"] = "blocked_vlm_classification_failed"
+            report["error_count"] = len(queue)
+            report["errors"] = [{"reason": str(exc)}]
+            return report
+
+    # ── Merge results in original order ──
+    results: list[ClassificationResult | BaseException] = []
+    for i in range(len(queue)):
+        if i in en_resolved:
+            results.append(en_resolved[i])
+        elif i in vlm_results_map:
+            results.append(vlm_results_map[i])
         else:
-            results = classify_batch_with_retry(
-                paths,
-                provider,
-                concurrency=concurrency,
-                timeout=timeout,
-                max_retries=max_retries,
-            )
-    except (VLMRequestError, ValueError, OSError) as exc:
-        report["run_status"] = "blocked_vlm_classification_failed"
-        report["error_count"] = len(queue)
-        report["errors"] = [{"reason": str(exc)}]
-        return report
+            results.append(ValueError(f"item {i} not classified"))
+    report["efficientnet_resolved"] = len(en_resolved)
 
     # P0.3-b: fail-closed 守门 — 在 apply 之前先看整批分布是否坍缩；如坍缩则
     # 强制把 mode 从 apply 降到 live-no-apply，不写 image_observations，但保留
