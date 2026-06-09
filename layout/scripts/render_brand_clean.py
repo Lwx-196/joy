@@ -28,6 +28,13 @@ if CASE_LAYOUT_SPEC is None or CASE_LAYOUT_SPEC.loader is None:
 CASE_LAYOUT = importlib.util.module_from_spec(CASE_LAYOUT_SPEC)
 CASE_LAYOUT_SPEC.loader.exec_module(CASE_LAYOUT)
 
+SMART_CROP_PATH = Path(__file__).resolve().parent / "smart_crop.py"
+_smart_crop_spec = importlib.util.spec_from_file_location("smart_crop", SMART_CROP_PATH)
+if _smart_crop_spec and _smart_crop_spec.loader:
+    SMART_CROP = importlib.util.module_from_spec(_smart_crop_spec)
+    _smart_crop_spec.loader.exec_module(SMART_CROP)
+else:
+    SMART_CROP = None
 
 DATE_RE = re.compile(r"^(\d{2,4}\.\d{1,2}\.\d{1,2})(.*)$")
 
@@ -128,6 +135,11 @@ def collect_protection_targets(manifest: dict, meta: dict) -> list[str]:
             parts.extend(str(target.get(key) or "") for key in ("part", "effect", "text", "target"))
         else:
             parts.append(str(target))
+    for group in manifest.get("groups") or []:
+        for slot_data in (group.get("selected_slots") or {}).values():
+            for phase in ("before", "after"):
+                p = slot_data.get(phase, {}).get("path") or ""
+                parts.append(p)
     haystack = " ".join(parts)
     targets = [
         name
@@ -138,7 +150,7 @@ def collect_protection_targets(manifest: dict, meta: dict) -> list[str]:
 
 
 def should_use_protected_alignment(slot: str, protection_targets: list[str]) -> bool:
-    return bool(protection_targets) and slot in {"front", "oblique", "side"}
+    return slot in {"front", "oblique", "side"}
 
 
 def clean_background_color(image: np.ndarray) -> tuple[int, int, int]:
@@ -221,6 +233,9 @@ def pair_protected_scale(
     after_box: tuple[float, float, float, float],
     size: tuple[int, int],
     slot: str,
+    smart_crop_ratio: float | None = None,
+    before_eye_distance: float | None = None,
+    after_eye_distance: float | None = None,
 ) -> float:
     target_w, target_h = size
     if slot == "front":
@@ -246,7 +261,29 @@ def pair_protected_scale(
         (target_h - 28) / max(1.0, max(protection_heights)),
     )
     upper = min(contain * (1.10 if slot != "side" else 1.04), protection_fit)
-    return float(max(contain * 0.92, min(raw, upper)))
+    base_scale = float(max(contain * 0.92, min(raw, upper)))
+
+    # smart crop 融合：用 eye_distance_ratio 计算标准对齐等效 scale。
+    # 部位越小 → ratio 越高 → 允许保护框 padding 被适度裁切
+    # （小部位在脸部中心，外围 padding 可牺牲）
+    _BASELINE_RATIO = 0.31
+    if smart_crop_ratio and smart_crop_ratio > _BASELINE_RATIO and before_eye_distance and after_eye_distance:
+        target_ted = target_w * smart_crop_ratio
+        smart_scale = min(
+            target_ted / max(before_eye_distance, 1.0),
+            target_ted / max(after_eye_distance, 1.0),
+        )
+        if smart_scale > base_scale:
+            shrink = min(0.70, (smart_crop_ratio - _BASELINE_RATIO) / _BASELINE_RATIO * 0.65)
+            eff_widths = [w * (1 - shrink) for w in protection_widths]
+            eff_heights = [h * (1 - shrink) for h in protection_heights]
+            relaxed_fit = min(
+                (target_w - 28) / max(1.0, max(eff_widths)),
+                (target_h - 28) / max(1.0, max(eff_heights)),
+            )
+            return float(min(smart_scale, relaxed_fit))
+
+    return base_scale
 
 
 def compute_protected_transform(
@@ -493,41 +530,13 @@ def extend_padding_background(cell: np.ndarray, valid_mask: np.ndarray, slot: st
     if invalid_ratio <= 0:
         return cell, record
 
-    ys, xs = np.where(valid_mask)
-    if len(xs) == 0 or len(ys) == 0:
-        wall_color = np.asarray([244, 244, 243], dtype=np.float64)
-        rect = (0, 0, cell.shape[1], cell.shape[0])
-    else:
-        rect = (int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1)
-        wall_color = sample_valid_wall_color(cell, valid_mask)
+    dark_fill = np.array([25, 25, 25], dtype=np.uint8)
     seeded = cell.copy()
-    seeded[invalid_mask] = np.clip(wall_color, 0, 255).astype(np.uint8)
-    x1, y1, x2, y2 = rect
-    h, w = cell.shape[:2]
-    yy, xx = np.indices((h, w))
-    side_colors = {
-        "left": sample_edge_wall_color(cell, valid_mask, rect, "left"),
-        "right": sample_edge_wall_color(cell, valid_mask, rect, "right"),
-        "top": sample_edge_wall_color(cell, valid_mask, rect, "top"),
-        "bottom": sample_edge_wall_color(cell, valid_mask, rect, "bottom"),
-    }
-    side_masks = {
-        "left": invalid_mask & (xx < x1),
-        "right": invalid_mask & (xx >= x2),
-        "top": invalid_mask & (yy < y1),
-        "bottom": invalid_mask & (yy >= y2),
-    }
-    for side, side_mask in side_masks.items():
-        if np.any(side_mask):
-            seeded[side_mask] = np.clip(side_colors[side], 0, 255).astype(np.uint8)
+    seeded[invalid_mask] = dark_fill
     record.update({
-        "mode": "edge_sampled_wall_tone_padding",
-        "sampled_bgr": [int(round(v)) for v in wall_color.tolist()],
-        "side_sampled_bgr": {
-            side: [int(round(v)) for v in color.tolist()]
-            for side, color in side_colors.items()
-        },
-        "reason": "avoid_local_inpaint_bleeding_into_medical_subject",
+        "mode": "dark_fill_for_studio_replacement",
+        "fill_bgr": [25, 25, 25],
+        "reason": "dark_fill_eliminates_paste_boundary_artifact",
     })
     return seeded, record
 
@@ -538,8 +547,7 @@ def render_protected_cell(
     size: tuple[int, int],
 ) -> np.ndarray:
     target_w, target_h = size
-    background = clean_background_color(image)
-    canvas = np.full((target_h, target_w, 3), background, dtype=np.uint8)
+    canvas = np.full((target_h, target_w, 3), (25, 25, 25), dtype=np.uint8)
     scale = max(float(transform["scale"]), 1e-6)
     resized_w = max(1, int(round(image.shape[1] * scale)))
     resized_h = max(1, int(round(image.shape[0] * scale)))
@@ -547,6 +555,20 @@ def render_protected_cell(
     resized = cv2.resize(image, (resized_w, resized_h), interpolation=interpolation)
     x, y = transform["offset"]
     valid_mask = paste_clipped_with_mask(canvas, resized, int(x), int(y))
+
+    feather_w = 6
+    dist_inside = cv2.distanceTransform(valid_mask.astype(np.uint8), cv2.DIST_L2, 5)
+    feather_zone = (dist_inside > 0) & (dist_inside < feather_w)
+    if np.any(feather_zone):
+        feather_alpha = np.clip(dist_inside / feather_w, 0, 1)
+        bg_dark = np.array([25, 25, 25], dtype=np.float64)
+        for c in range(3):
+            canvas[:, :, c] = np.where(
+                feather_zone,
+                np.clip(canvas[:, :, c].astype(np.float64) * feather_alpha + bg_dark[c] * (1 - feather_alpha), 0, 255),
+                canvas[:, :, c],
+            ).astype(np.uint8)
+
     slot = str(transform.get("slot") or "front")
     canvas, extension = extend_padding_background(canvas, valid_mask, slot)
     try:
@@ -707,8 +729,8 @@ def paste_resized_cell_with_background(
     offset_y: int,
 ) -> np.ndarray:
     h, w = cell.shape[:2]
-    bg = sample_cell_background(cell)
-    canvas = np.full((h, w, 3), np.clip(bg, 0, 255).astype(np.uint8), dtype=np.uint8)
+    bg = np.array([25, 25, 25], dtype=np.uint8)
+    canvas = np.full((h, w, 3), bg, dtype=np.uint8)
     resized_w = max(1, int(round(w * scale)))
     resized_h = max(1, int(round(h * scale)))
     interpolation = cv2.INTER_AREA if scale < 1 else cv2.INTER_CUBIC
@@ -817,7 +839,7 @@ def align_before_size_to_after_cell(
     after_h = max(1.0, ay2 - ay1)
     height_ratio = after_h / before_h
     width_ratio = after_w / before_w
-    if not (0.72 <= height_ratio <= 1.38):
+    if not (0.58 <= height_ratio <= 1.72):
         result.update({
             "reason": "face_box_ratio_out_of_safe_range",
             "height_ratio": round(height_ratio, 4),
@@ -826,8 +848,8 @@ def align_before_size_to_after_cell(
         return before_arr, result
 
     raw_scale = float((height_ratio * width_ratio) ** 0.5)
-    lower = 0.88 if slot != "side" else 0.92
-    upper = 1.12 if slot != "side" else 1.08
+    lower = 0.65 if slot != "side" else 0.62
+    upper = 1.45 if slot != "side" else 1.50
     scale = float(max(lower, min(upper, raw_scale)))
     before_center_x = (bx1 + bx2) / 2.0
     after_center_x = (ax1 + ax2) / 2.0
@@ -1060,6 +1082,148 @@ def trim_before_excess_to_after_reference(
     return trimmed, result
 
 
+_REMBG_SESSION = None
+
+
+def _get_rembg_session():
+    global _REMBG_SESSION
+    if _REMBG_SESSION is None:
+        import os
+        from rembg import new_session
+        _REMBG_SESSION = new_session(os.environ.get("CASE_REMBG_MODEL", "birefnet-portrait"))
+    return _REMBG_SESSION
+
+
+def replace_studio_background(cell: np.ndarray) -> tuple[np.ndarray, dict]:
+    """rembg 人像分割 → 影棚背景替换为亮黑色 + 衣服区域保护。
+
+    步骤：
+    1. 检测暗色像素占比 ≥ 5% 才启用（纯墙面背景不处理）
+    2. rembg 抠人像前景 mask
+    3. 亮色邻近扩展：从前景 mask 边缘向外迭代扩展到亮色像素（brightness>130），
+       保护被 rembg 误判为背景的浅色衣服，距离衰减防止保护远处杂物
+    4. guided filter 平滑 alpha 边缘
+    5. 合成人物到亮黑色背景（和纯黑发色保持区分度）
+    """
+    h, w = cell.shape[:2]
+    record: dict = {"enabled": False, "method": "rembg_studio_replace"}
+
+    bg_color = np.array([25, 25, 25], dtype=np.float64)
+
+    gray = cv2.cvtColor(cell, cv2.COLOR_BGR2GRAY).astype(np.float64)
+    dark_ratio = float((gray < 80).sum()) / gray.size
+    if dark_ratio < 0.05:
+        record["reason"] = f"dark_ratio={dark_ratio:.3f} < 0.05, skip"
+        return cell, record
+
+    try:
+        from rembg import remove
+    except ImportError:
+        record["reason"] = "rembg not available"
+        return cell, record
+
+    cell_rgb = cv2.cvtColor(cell, cv2.COLOR_BGR2RGB)
+    from PIL import Image as PILImage
+    pil_img = PILImage.fromarray(cell_rgb)
+    session = _get_rembg_session()
+    mask_pil = remove(pil_img, session=session, only_mask=True, post_process_mask=True)
+    raw_alpha = np.asarray(mask_pil.convert("L"), dtype=np.float64) / 255.0
+
+    binary = (raw_alpha > 0.4).astype(np.uint8)
+    num, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
+    if num > 2:
+        areas = stats[1:, cv2.CC_STAT_AREA]
+        min_area = max(1, int(areas.max() * 0.01))
+        keep = np.zeros_like(binary)
+        for i in range(1, num):
+            if stats[i, cv2.CC_STAT_AREA] >= min_area:
+                keep[labels == i] = 1
+        raw_alpha = raw_alpha * keep
+
+    fg_ratio = float((raw_alpha > 0.5).sum()) / raw_alpha.size
+    if fg_ratio < 0.15 or fg_ratio > 0.92:
+        record["reason"] = f"fg_ratio={fg_ratio:.3f} out of safe range"
+        return cell, record
+
+    fg_binary = (raw_alpha > 0.3).astype(np.uint8)
+    brightness = cell.astype(np.float64).mean(axis=2)
+    bright_mask = (brightness > 130).astype(np.uint8)
+
+    dist_from_fg = cv2.distanceTransform(1 - fg_binary, cv2.DIST_L2, 5)
+
+    content_mask = (brightness > 35).astype(np.uint8)
+    content_eroded = cv2.erode(content_mask, np.ones((8, 8), np.uint8))
+    dist_from_content_edge = cv2.distanceTransform(content_eroded, cv2.DIST_L2, 5)
+
+    edge_margin = 28
+    edge_interior = np.zeros((h, w), dtype=np.uint8)
+    edge_interior[edge_margin:h - edge_margin, edge_margin:w - edge_margin] = 1
+    dist_from_cell_edge = cv2.distanceTransform(edge_interior, cv2.DIST_L2, 5)
+
+    safe_zone = np.minimum(dist_from_content_edge, dist_from_cell_edge)
+
+    max_extend = 15
+    extended = fg_binary.copy()
+    kernel = np.ones((3, 3), np.uint8)
+    for step in range(max_extend):
+        dilated = cv2.dilate(extended, kernel, iterations=1)
+        new_pixels = (dilated > 0) & (extended == 0) & (bright_mask > 0) & (safe_zone > 12)
+        if not np.any(new_pixels):
+            break
+        extended[new_pixels] = 1
+
+    clothing_recovered = int((extended - fg_binary).sum())
+
+    extend_zone = (extended > 0) & (fg_binary == 0)
+    extend_alpha = np.zeros((h, w), dtype=np.float64)
+    if np.any(extend_zone):
+        dist_vals = dist_from_fg[extend_zone]
+        safe_vals = safe_zone[extend_zone]
+        alpha_vals = np.clip(1.0 - (dist_vals - 2) / 12.0, 0.0, 0.85)
+        boundary_fade = np.clip((safe_vals - 12) / 25.0, 0.0, 1.0)
+        alpha_vals = alpha_vals * boundary_fade
+        extend_alpha[extend_zone] = alpha_vals
+
+    guide = cv2.cvtColor(cell, cv2.COLOR_BGR2GRAY).astype(np.float32) / 255.0
+    try:
+        alpha_refined = cv2.ximgproc.guidedFilter(guide, raw_alpha.astype(np.float32),
+                                                   radius=6, eps=1e-4)
+        alpha_refined = np.clip(alpha_refined, 0, 1).astype(np.float64)
+    except Exception:
+        alpha_refined = raw_alpha
+
+    final_alpha = np.maximum(alpha_refined, extend_alpha)
+
+    dilate_r = 3
+    possible_fg = cv2.dilate((final_alpha > 0.05).astype(np.uint8),
+                             np.ones((dilate_r, dilate_r), np.uint8)) > 0
+    final_alpha[~possible_fg] = 0
+
+    bg_u8 = np.clip(bg_color, 0, 255).astype(np.uint8)
+    canvas = np.full_like(cell, bg_u8)
+    alpha_3ch = final_alpha[..., np.newaxis]
+    result = np.clip(
+        cell.astype(np.float64) * alpha_3ch + canvas.astype(np.float64) * (1 - alpha_3ch),
+        0, 255
+    ).astype(np.uint8)
+
+    result[final_alpha < 0.15] = bg_u8
+
+    record.update({
+        "enabled": True,
+        "dark_ratio": round(dark_ratio, 3),
+        "fg_ratio": round(fg_ratio, 3),
+        "clothing_recovered_px": clothing_recovered,
+        "bg_color_bgr": [int(v) for v in bg_color.tolist()],
+    })
+    return result, record
+
+
+def fill_dark_cell_edges(cell: np.ndarray) -> tuple[np.ndarray, dict]:
+    """replace_studio_background 的入口，rembg 不可用时回退到像素级边缘填充。"""
+    return replace_studio_background(cell)
+
+
 def render_protected_pair(
     before_path: str,
     after_path: str,
@@ -1069,6 +1233,7 @@ def render_protected_pair(
     slot: str,
     protection_targets: list[str],
     render_plan_records: list[dict] | None = None,
+    smart_crop_ratio: float | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     before_raw = cv2.imread(before_path)
     after_raw = cv2.imread(after_path)
@@ -1079,62 +1244,72 @@ def render_protected_pair(
 
     before_box = protection_box_from_face(before_face, slot, protection_targets)
     after_box = protection_box_from_face(after_face, slot, protection_targets)
-    scale = pair_protected_scale(
-        before_image.shape[:2],
-        after_image.shape[:2],
-        before_box,
-        after_box,
-        size,
-        slot,
+
+    target_w, target_h = size
+    target_ratio = 0.72 if slot == "front" else (0.74 if slot == "side" else 0.70)
+    target_protection_h = target_h * target_ratio
+
+    before_protection_h = max(1.0, before_box[3] - before_box[1])
+    after_protection_h = max(1.0, after_box[3] - after_box[1])
+    face_ratio = after_protection_h / before_protection_h
+
+    before_contain = min(
+        target_w / max(before_image.shape[1], 1),
+        target_h / max(before_image.shape[0], 1),
     )
-    before_transform = compute_protected_transform(before_image.shape[:2], before_box, size, slot, scale)
-    after_transform = compute_protected_transform(after_image.shape[:2], after_box, size, slot, scale)
-    before_transform, crop_alignment = align_before_transform_to_after_reference(
-        before_transform,
-        after_transform,
-        before_box,
-        before_image.shape[:2],
-        size,
+    before_raw_scale = target_protection_h / before_protection_h
+    before_scale = float(max(before_contain * 0.92, min(before_raw_scale, before_contain * 1.10)))
+
+    after_contain = min(
+        target_w / max(after_image.shape[1], 1),
+        target_h / max(after_image.shape[0], 1),
     )
+    after_target_scale = before_scale * (before_protection_h / after_protection_h)
+    after_scale = float(max(after_contain * 0.92, min(after_target_scale, after_contain * 2.50)))
+
+    if smart_crop_ratio:
+        _BASELINE_RATIO = 0.31
+        if smart_crop_ratio > _BASELINE_RATIO:
+            before_eye_d = float(before_face.get("eye_distance", 0))
+            after_eye_d = float(after_face.get("eye_distance", 0))
+            if before_eye_d and after_eye_d:
+                target_ted = target_w * smart_crop_ratio
+                smart_before = target_ted / max(before_eye_d, 1.0)
+                smart_after = target_ted / max(after_eye_d, 1.0)
+                if smart_before > before_scale:
+                    before_scale = float(min(smart_before, before_contain * 1.10))
+                if smart_after > after_scale:
+                    after_scale = float(min(smart_after, after_contain * 2.50))
+
+    before_transform = compute_protected_transform(before_image.shape[:2], before_box, size, slot, before_scale)
+    after_transform = compute_protected_transform(after_image.shape[:2], after_box, size, slot, after_scale)
     before_transform["slot"] = slot
     after_transform["slot"] = slot
-    before_face_box_cell = transform_box_in_cell(face_crop_box_from_face(before_face), before_transform)
-    after_face_box_cell = transform_box_in_cell(face_crop_box_from_face(after_face), after_transform)
+
     before_arr = render_protected_cell(before_image, before_transform, size)
     after_arr = render_protected_cell(after_image, after_transform, size)
-    before_arr, size_alignment = align_before_size_to_after_cell(
-        before_arr,
-        before_face_box_cell,
-        after_face_box_cell,
-        slot,
+
+    after_arr, after_trim = trim_before_excess_to_after_reference(
+        after_arr, before_arr, after_transform, before_transform, slot
     )
-    profile_alignment = {
-        "enabled": False,
-        "strategy": "not_applicable",
-        "reason": "face_box_alignment_available",
-    }
-    if (
-        slot == "side"
-        and not size_alignment.get("enabled")
-        and size_alignment.get("reason") == "face_box_ratio_out_of_safe_range"
-    ):
-        before_arr, profile_alignment = align_before_side_silhouette_to_after_cell(before_arr, after_arr)
+
     before_arr, position_alignment = align_before_position_to_after_cell(before_arr, after_arr, slot)
     composition_diagnostic = composition_diagnostic_from_cells(before_arr, after_arr, slot)
 
     if render_plan_records is not None:
         render_plan_records.append({
             "slot": slot,
-            "strategy": "protected_region_first",
+            "strategy": "independent_scale_zoom_after",
             "targets": protection_targets,
             "before": Path(before_path).name,
             "after": Path(after_path).name,
-            "pair_scale": round(scale, 4),
+            "before_scale": round(before_scale, 4),
+            "after_scale": round(after_scale, 4),
+            "face_ratio": round(face_ratio, 4),
+            "smart_crop_ratio": smart_crop_ratio,
             "before_transform": before_transform,
             "after_transform": after_transform,
-            "crop_only_alignment": crop_alignment,
-            "preop_size_alignment": size_alignment,
-            "preop_profile_alignment": profile_alignment,
+            "after_trim": after_trim,
             "preop_position_alignment": position_alignment,
             "composition_diagnostic": composition_diagnostic,
         })
@@ -1195,9 +1370,20 @@ def render_aligned_pair(
     allow_direction_mismatch: bool = False,
     protection_targets: list[str] | None = None,
     render_plan_records: list[dict] | None = None,
+    focus_targets: list[dict] | None = None,
+    slot_index: int = 0,
+    angle_count: int = 3,
 ) -> tuple[Image.Image, Image.Image]:
     protection_targets = protection_targets or []
-    target_eye_distance, target_eye_center = CASE_LAYOUT.build_alignment_target(size)
+    smart_debug = None
+    if SMART_CROP is not None and focus_targets:
+        ted, ecx, ecy, smart_debug = SMART_CROP.compute_smart_alignment(
+            size, focus_targets, slot_index, angle_count,
+        )
+        target_eye_distance = ted
+        target_eye_center = np.array([ecx, ecy], dtype=np.float64)
+    else:
+        target_eye_distance, target_eye_center = CASE_LAYOUT.build_alignment_target(size)
     before_face = CASE_LAYOUT.detect_face_for_alignment(before_path)
     before_direction = None if slot == "front" else view_direction_from_face(before_face)
 
@@ -1226,6 +1412,7 @@ def render_aligned_pair(
                 )
                 continue
             if should_use_protected_alignment(slot, protection_targets):
+                smart_ratio = smart_debug.get("eye_distance_ratio") if smart_debug else None
                 try:
                     before_arr, candidate = render_protected_pair(
                         before_path,
@@ -1236,6 +1423,7 @@ def render_aligned_pair(
                         slot,
                         protection_targets,
                         render_plan_records,
+                        smart_crop_ratio=smart_ratio,
                     )
                 except Exception as exc:
                     after_errors.append(f"{Path(path).name}: 保护区对齐失败，回退常规对齐: {exc}")
@@ -1297,13 +1485,16 @@ def render_aligned_pair(
                     "before",
                 )
                 if render_plan_records is not None:
-                    render_plan_records.append({
+                    record = {
                         "slot": slot,
                         "strategy": "face_landmark_align",
                         "targets": protection_targets,
                         "before": Path(before_path).name,
                         "after": Path(path).name,
-                    })
+                    }
+                    if smart_debug:
+                        record["smart_crop"] = smart_debug
+                    render_plan_records.append(record)
             after_arr = candidate
             used_after_path = path
             used_after_direction = current_direction
@@ -1326,6 +1517,9 @@ def render_aligned_pair(
             f"术前术后方向不一致(slot={slot}, before={before_direction}, after={used_after_direction})"
         )
 
+    before_arr, _ = fill_dark_cell_edges(before_arr)
+    after_arr, _ = fill_dark_cell_edges(after_arr)
+
     before_arr, after_arr = CASE_LAYOUT.FACE_ALIGN.harmonize_pair(before_arr, after_arr)
     after_arr = CASE_LAYOUT.FACE_ALIGN.lift_face_shadows(after_arr, slot=slot)
     return whiten_background(CASE_LAYOUT.cv_to_pil(before_arr)), whiten_background(CASE_LAYOUT.cv_to_pil(after_arr))
@@ -1335,7 +1529,7 @@ def whiten_background(img: Image.Image) -> Image.Image:
     return img
 
 
-def render_from_manifest(manifest: dict, out_path: Path) -> Path:
+def render_from_manifest(manifest: dict, out_path: Path, *, after_transform=None, slot_transform=None, scale: float = 1.0) -> Path:
     # body/颈纹 案例走专用渲染器（不依赖人脸眼距对齐）
     if manifest.get("case_mode") == "body":
         return CASE_LAYOUT.render_body_board(manifest, out_path)
@@ -1363,25 +1557,32 @@ def render_from_manifest(manifest: dict, out_path: Path) -> Path:
     outline_color = (227, 218, 209)
     date_fill = (236, 227, 216)
 
-    board_w = 1920
-    pad = 58
-    inner_gap = 34
-    section_gap = 41
-    section_title_h = 67
-    footer_h = 106
-    header_h = 216
-    image_w, image_h = 516, 624
+    s = lambda v: int(v * scale)
 
-    name_font = CASE_LAYOUT.load_font(60, bold=True)
-    date_font = CASE_LAYOUT.load_font(26, bold=True)
-    project_font = CASE_LAYOUT.load_font(31, bold=False)
-    section_font = CASE_LAYOUT.load_font(36, bold=True)
-    label_font = CASE_LAYOUT.load_font(26, bold=True)
+    board_w = s(1920)
+    pad = s(58)
+    inner_gap = s(34)
+    section_gap = s(41)
+    section_title_h = s(67)
+    footer_h = s(106)
+    header_h = s(216)
+    image_w, image_h = s(516), s(624)
 
+    name_font = CASE_LAYOUT.load_font(s(60), bold=True)
+    date_font = CASE_LAYOUT.load_font(s(26), bold=True)
+    project_font = CASE_LAYOUT.load_font(s(31), bold=False)
+    section_font = CASE_LAYOUT.load_font(s(36), bold=True)
+    label_font = CASE_LAYOUT.load_font(s(26), bold=True)
+
+    manifest_focus = manifest.get("focus_targets") or []
     prepared_groups = []
     for group in groups:
         render_slots = group.get("render_slots") or list(CASE_LAYOUT.ANGLE_SLOTS)
+        active_slot_count = sum(
+            1 for sl in render_slots if group["selected_slots"].get(sl)
+        )
         slots = []
+        slot_idx = 0
         for slot in render_slots:
             selection = group["selected_slots"].get(slot)
             if not selection:
@@ -1406,7 +1607,11 @@ def render_from_manifest(manifest: dict, out_path: Path) -> Path:
                 allow_direction_mismatch=allow_direction_mismatch,
                 protection_targets=protection_targets,
                 render_plan_records=render_plan_records,
+                focus_targets=manifest_focus,
+                slot_index=slot_idx,
+                angle_count=active_slot_count,
             )
+            slot_idx += 1
             manual_transform = selection["before"].get("manual_transform")
             before_img, manual_transform_record = apply_manual_preop_transform(before_img, manual_transform)
             if manual_transform_record.get("enabled"):
@@ -1417,6 +1622,10 @@ def render_from_manifest(manifest: dict, out_path: Path) -> Path:
                     selection["after"]["path"],
                     manual_transform_record,
                 )
+            if slot_transform is not None:
+                before_img, after_img = slot_transform(before_img, after_img, slot)
+            elif after_transform is not None:
+                after_img = after_transform(after_img, slot, before_img=before_img)
             slots.append({
                 "slot": slot,
                 "title": f"{CASE_LAYOUT.ANGLE_LABELS[slot]}对比",
@@ -1430,19 +1639,19 @@ def render_from_manifest(manifest: dict, out_path: Path) -> Path:
         raise ValueError("没有可渲染的角度槽位")
 
     total_sections = sum(len(group["slots"]) for group in prepared_groups)
-    section_body_h = image_h + 78
+    section_body_h = image_h + s(78)
     board_h = header_h + total_sections * (section_title_h + section_body_h) + section_gap * (total_sections - 1) + footer_h + pad * 2
     canvas = Image.new("RGB", (board_w, board_h), bg)
     draw = ImageDraw.Draw(canvas)
 
-    card_x1, card_y1 = pad, 26
+    card_x1, card_y1 = pad, s(26)
     card_x2, card_y2 = board_w - pad, header_h
-    draw.rounded_rectangle((card_x1, card_y1, card_x2, card_y2), radius=32, fill=panel, outline=outline_color, width=2)
-    for x in range(card_x1 + 28, card_x2 - 20, 20):
-        draw.rounded_rectangle((x, card_y1 + 16, x + 10, card_y1 + 22), radius=3, fill=(226, 216, 206))
+    draw.rounded_rectangle((card_x1, card_y1, card_x2, card_y2), radius=s(32), fill=panel, outline=outline_color, width=max(1, s(2)))
+    for x in range(card_x1 + s(28), card_x2 - s(20), s(20)):
+        draw.rounded_rectangle((x, card_y1 + s(16), x + s(10), card_y1 + s(22)), radius=s(3), fill=(226, 216, 206))
 
-    pill = (card_x1 + 28, card_y1 + 42, card_x1 + 190, card_y1 + 82)
-    draw.rounded_rectangle(pill, radius=18, fill=date_fill)
+    pill = (card_x1 + s(28), card_y1 + s(42), card_x1 + s(190), card_y1 + s(82))
+    draw.rounded_rectangle(pill, radius=s(18), fill=date_fill)
     db = CASE_LAYOUT.textbbox_with_fallback(draw, (0, 0), meta["date"], date_font, fill=accent, bold=True)
     CASE_LAYOUT.draw_text_with_fallback(
         draw,
@@ -1458,52 +1667,52 @@ def render_from_manifest(manifest: dict, out_path: Path) -> Path:
 
     name_bbox = CASE_LAYOUT.textbbox_with_fallback(draw, (0, 0), meta["customer_name"], name_font, fill=ink, bold=True)
     name_w = name_bbox[2] - name_bbox[0]
-    name_y = card_y1 + 104
-    name_x = card_x1 + 28
+    name_y = card_y1 + s(104)
+    name_x = card_x1 + s(28)
     CASE_LAYOUT.draw_text_with_fallback(draw, (name_x, name_y), meta["customer_name"], name_font, ink, bold=True)
 
-    project_x = name_x + name_w + 24
-    project_y = name_y + 13
-    max_project_w = card_x2 - 30 - project_x
+    project_x = name_x + name_w + s(24)
+    project_y = name_y + s(13)
+    max_project_w = card_x2 - s(30) - project_x
     while True:
         pb = CASE_LAYOUT.textbbox_with_fallback(draw, (0, 0), meta["project"], project_font, fill=ink)
-        if (pb[2] - pb[0]) <= max_project_w or project_font.size <= 20:
+        if (pb[2] - pb[0]) <= max_project_w or project_font.size <= s(20):
             break
         project_font = CASE_LAYOUT.load_font(project_font.size - 1, bold=False)
     if meta["project"]:
         CASE_LAYOUT.draw_text_with_fallback(draw, (project_x, project_y), meta["project"], project_font, ink)
 
-    y = header_h + 8
+    y = header_h + s(8)
     rendered_count = 0
     for group in prepared_groups:
         for slot in group["slots"]:
-            draw.rounded_rectangle((pad, y, board_w - pad, y + section_title_h), radius=18, fill=accent)
+            draw.rounded_rectangle((pad, y, board_w - pad, y + section_title_h), radius=s(18), fill=accent)
             bbox = CASE_LAYOUT.textbbox_with_fallback(draw, (0, 0), slot["title"], section_font, fill=(255, 255, 255), bold=True)
             tx = pad + ((board_w - pad * 2) - (bbox[2] - bbox[0])) / 2
             ty = y + (section_title_h - (bbox[3] - bbox[1])) / 2 - 2
             CASE_LAYOUT.draw_text_with_fallback(draw, (tx, ty), slot["title"], section_font, (255, 255, 255), bold=True)
-            y += section_title_h + 14
+            y += section_title_h + s(14)
 
-            box_w = slot["before"].width + slot["after"].width + inner_gap + 76
-            box_h = max(slot["before"].height, slot["after"].height) + 72
+            box_w = slot["before"].width + slot["after"].width + inner_gap + s(76)
+            box_h = max(slot["before"].height, slot["after"].height) + s(72)
             box_x = (board_w - box_w) // 2
-            draw.rounded_rectangle((box_x, y, box_x + box_w, y + box_h), radius=26, fill=panel, outline=outline_color, width=2)
+            draw.rounded_rectangle((box_x, y, box_x + box_w, y + box_h), radius=s(26), fill=panel, outline=outline_color, width=max(1, s(2)))
 
-            left_x = box_x + 24
+            left_x = box_x + s(24)
             right_x = left_x + slot["before"].width + inner_gap
-            label_y = y + 16
-            draw.rounded_rectangle((left_x, label_y, left_x + slot["before"].width, label_y + 34), radius=12, fill=(245, 240, 234))
-            draw.rounded_rectangle((right_x, label_y, right_x + slot["after"].width, label_y + 34), radius=12, fill=soft_green)
+            label_y = y + s(16)
+            draw.rounded_rectangle((left_x, label_y, left_x + slot["before"].width, label_y + s(34)), radius=s(12), fill=(245, 240, 234))
+            draw.rounded_rectangle((right_x, label_y, right_x + slot["after"].width, label_y + s(34)), radius=s(12), fill=soft_green)
             for x0, w, text_label, label_fill in [
                 (left_x, slot["before"].width, "术前", ink),
                 (right_x, slot["after"].width, "术后", green),
             ]:
                 bb = CASE_LAYOUT.textbbox_with_fallback(draw, (0, 0), text_label, label_font, fill=label_fill, bold=True)
                 tx = x0 + (w - (bb[2] - bb[0])) / 2
-                ty = label_y + (34 - (bb[3] - bb[1])) / 2 - 1
+                ty = label_y + (s(34) - (bb[3] - bb[1])) / 2 - 1
                 CASE_LAYOUT.draw_text_with_fallback(draw, (tx, ty), text_label, label_font, label_fill, bold=True)
 
-            img_y = y + 54
+            img_y = y + s(54)
             canvas.paste(slot["before"], (left_x, img_y))
             canvas.paste(slot["after"], (right_x, img_y))
             y += box_h
@@ -1513,9 +1722,9 @@ def render_from_manifest(manifest: dict, out_path: Path) -> Path:
 
     if Path(brand["logo_path"]).exists():
         logo = Image.open(brand["logo_path"]).convert("RGBA")
-        logo = ImageOps.contain(logo, (260, 88))
+        logo = ImageOps.contain(logo, (s(260), s(88)))
         logo_x = (board_w - logo.width) // 2
-        logo_y = board_h - footer_h + (footer_h - logo.height) // 2 - 6
+        logo_y = board_h - footer_h + (footer_h - logo.height) // 2 - s(6)
         canvas.paste(logo.convert("RGB"), (logo_x, logo_y), logo)
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
