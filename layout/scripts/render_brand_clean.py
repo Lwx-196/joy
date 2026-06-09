@@ -1094,16 +1094,99 @@ def _get_rembg_session():
     return _REMBG_SESSION
 
 
-def replace_studio_background(cell: np.ndarray) -> tuple[np.ndarray, dict]:
-    """rembg 人像分割 → 影棚背景替换为亮黑色 + 衣服区域保护。
+def _decontaminate_edge_color(
+    cell: np.ndarray,
+    alpha: np.ndarray,
+    fg_binary: np.ndarray,
+) -> np.ndarray:
+    """alpha 边缘颜色去污：partial alpha 像素用最近纯前景色替代，消除白墙泄漏。"""
+    h, w = cell.shape[:2]
+    edge_zone = (alpha > 0.05) & (alpha < 0.92) & (fg_binary == 0)
+    if not np.any(edge_zone):
+        return cell
 
-    步骤：
-    1. 检测暗色像素占比 ≥ 5% 才启用（纯墙面背景不处理）
-    2. rembg 抠人像前景 mask
-    3. 亮色邻近扩展：从前景 mask 边缘向外迭代扩展到亮色像素（brightness>130），
-       保护被 rembg 误判为背景的浅色衣服，距离衰减防止保护远处杂物
-    4. guided filter 平滑 alpha 边缘
-    5. 合成人物到亮黑色背景（和纯黑发色保持区分度）
+    solid_fg = (alpha > 0.92).astype(np.uint8)
+    dist_to_solid = cv2.distanceTransform(1 - solid_fg, cv2.DIST_L2, 5)
+
+    blurred = cv2.GaussianBlur(cell.astype(np.float64), (0, 0), sigmaX=5)
+    solid_color = np.zeros_like(cell, dtype=np.float64)
+    for c in range(3):
+        ch = cell[:, :, c].astype(np.float64)
+        ch_blur = cv2.GaussianBlur(ch * solid_fg, (0, 0), sigmaX=8)
+        weight_blur = cv2.GaussianBlur(solid_fg.astype(np.float64), (0, 0), sigmaX=8)
+        safe_weight = np.maximum(weight_blur, 1e-6)
+        solid_color[:, :, c] = ch_blur / safe_weight
+
+    result = cell.copy().astype(np.float64)
+    blend = np.clip(dist_to_solid / 12.0, 0, 1)
+    for c in range(3):
+        result[:, :, c] = np.where(
+            edge_zone,
+            cell[:, :, c] * (1 - blend) + solid_color[:, :, c] * blend,
+            result[:, :, c],
+        )
+    return np.clip(result, 0, 255).astype(np.uint8)
+
+
+def _recover_hair_alpha(
+    cell: np.ndarray,
+    fg_binary: np.ndarray,
+    raw_alpha: np.ndarray,
+) -> np.ndarray:
+    """头部区域发丝 alpha 恢复：对 rembg 丢掉的碎发用颜色相似度重新给 alpha。"""
+    h, w = cell.shape[:2]
+    hair_alpha = np.zeros((h, w), dtype=np.float64)
+
+    fg_ys = np.where(fg_binary.any(axis=1))[0]
+    if len(fg_ys) == 0:
+        return hair_alpha
+    fg_top = int(fg_ys[0])
+    fg_xs = np.where(fg_binary[fg_top:fg_top + max(1, h // 8), :].any(axis=0))[0]
+    if len(fg_xs) == 0:
+        return hair_alpha
+    fg_cx = int((fg_xs[0] + fg_xs[-1]) / 2)
+
+    hair_sample_y0 = max(0, fg_top)
+    hair_sample_y1 = min(h, fg_top + max(20, h // 6))
+    hair_sample_x0 = max(0, fg_cx - w // 4)
+    hair_sample_x1 = min(w, fg_cx + w // 4)
+    hair_region_mask = (fg_binary[hair_sample_y0:hair_sample_y1, hair_sample_x0:hair_sample_x1] > 0)
+    if hair_region_mask.sum() < 100:
+        return hair_alpha
+    hair_pixels = cell[hair_sample_y0:hair_sample_y1, hair_sample_x0:hair_sample_x1][hair_region_mask]
+    hair_mean = hair_pixels.mean(axis=0).astype(np.float64)
+    hair_std = max(hair_pixels.std(), 15.0)
+
+    search_y0 = max(0, fg_top - h // 6)
+    search_y1 = min(h, fg_top + h // 4)
+    search_region = cell[search_y0:search_y1, :].astype(np.float64)
+    color_dist = np.sqrt(((search_region - hair_mean) ** 2).sum(axis=2))
+    similarity = np.clip(1.0 - (color_dist - hair_std) / (hair_std * 2.5), 0, 1)
+
+    dist_from_fg_local = cv2.distanceTransform(
+        1 - fg_binary[search_y0:search_y1, :], cv2.DIST_L2, 5
+    )
+    proximity = np.clip(1.0 - (dist_from_fg_local - 2) / 25.0, 0, 1)
+
+    local_alpha = similarity * proximity * 0.8
+    local_alpha[fg_binary[search_y0:search_y1, :] > 0] = 0
+
+    brightness_local = cv2.cvtColor(
+        cell[search_y0:search_y1, :], cv2.COLOR_BGR2GRAY
+    ).astype(np.float64)
+    local_alpha[brightness_local > 200] = 0
+
+    hair_alpha[search_y0:search_y1, :] = local_alpha
+    return hair_alpha
+
+
+def replace_studio_background(cell: np.ndarray) -> tuple[np.ndarray, dict]:
+    """rembg 人像分割 → 影棚背景替换为亮黑色。
+
+    改进：
+    - 衣服扩展增加向心约束，防止白墙/门框被当衣服保护
+    - 头部区域发丝颜色相似度 alpha 恢复
+    - guided filter 头部区域参数放大
     """
     h, w = cell.shape[:2]
     record: dict = {"enabled": False, "method": "rembg_studio_replace"}
@@ -1147,30 +1230,38 @@ def replace_studio_background(cell: np.ndarray) -> tuple[np.ndarray, dict]:
 
     fg_binary = (raw_alpha > 0.3).astype(np.uint8)
     brightness = cell.astype(np.float64).mean(axis=2)
+
+    fg_ys, fg_xs = np.where(fg_binary > 0)
+    fg_cy = float(fg_ys.mean()) if len(fg_ys) > 0 else h / 2.0
+    fg_cx = float(fg_xs.mean()) if len(fg_xs) > 0 else w / 2.0
+
     bright_mask = (brightness > 130).astype(np.uint8)
+    hsv = cv2.cvtColor(cell, cv2.COLOR_BGR2HSV)
+    low_saturation = (hsv[:, :, 1].astype(np.float64) < 40).astype(np.uint8)
+    wall_suspect = bright_mask & low_saturation
 
     dist_from_fg = cv2.distanceTransform(1 - fg_binary, cv2.DIST_L2, 5)
 
-    content_mask = (brightness > 35).astype(np.uint8)
-    content_eroded = cv2.erode(content_mask, np.ones((8, 8), np.uint8))
-    dist_from_content_edge = cv2.distanceTransform(content_eroded, cv2.DIST_L2, 5)
-
-    edge_margin = 28
+    edge_margin = 48
     edge_interior = np.zeros((h, w), dtype=np.uint8)
     edge_interior[edge_margin:h - edge_margin, edge_margin:w - edge_margin] = 1
     dist_from_cell_edge = cv2.distanceTransform(edge_interior, cv2.DIST_L2, 5)
 
-    safe_zone = np.minimum(dist_from_content_edge, dist_from_cell_edge)
+    yy, xx = np.indices((h, w), dtype=np.float64)
+    dist_to_centroid = np.sqrt((yy - fg_cy) ** 2 + (xx - fg_cx) ** 2)
 
-    max_extend = 15
+    max_extend = 10
     extended = fg_binary.copy()
     kernel = np.ones((3, 3), np.uint8)
     for step in range(max_extend):
         dilated = cv2.dilate(extended, kernel, iterations=1)
-        new_pixels = (dilated > 0) & (extended == 0) & (bright_mask > 0) & (safe_zone > 12)
-        if not np.any(new_pixels):
+        candidates = (dilated > 0) & (extended == 0) & (bright_mask > 0)
+        candidates &= (dist_from_cell_edge > 40)
+        candidates &= (wall_suspect == 0)
+        candidates &= (dist_to_centroid < dist_to_centroid[fg_binary > 0].max() * 0.95)
+        if not np.any(candidates):
             break
-        extended[new_pixels] = 1
+        extended[candidates] = 1
 
     clothing_recovered = int((extended - fg_binary).sum())
 
@@ -1178,32 +1269,45 @@ def replace_studio_background(cell: np.ndarray) -> tuple[np.ndarray, dict]:
     extend_alpha = np.zeros((h, w), dtype=np.float64)
     if np.any(extend_zone):
         dist_vals = dist_from_fg[extend_zone]
-        safe_vals = safe_zone[extend_zone]
-        alpha_vals = np.clip(1.0 - (dist_vals - 2) / 12.0, 0.0, 0.85)
-        boundary_fade = np.clip((safe_vals - 12) / 25.0, 0.0, 1.0)
-        alpha_vals = alpha_vals * boundary_fade
+        alpha_vals = np.clip(1.0 - (dist_vals - 1) / 8.0, 0.0, 0.75)
         extend_alpha[extend_zone] = alpha_vals
+
+    hair_alpha = _recover_hair_alpha(cell, fg_binary, raw_alpha)
 
     guide = cv2.cvtColor(cell, cv2.COLOR_BGR2GRAY).astype(np.float32) / 255.0
     try:
-        alpha_refined = cv2.ximgproc.guidedFilter(guide, raw_alpha.astype(np.float32),
-                                                   radius=6, eps=1e-4)
-        alpha_refined = np.clip(alpha_refined, 0, 1).astype(np.float64)
+        alpha_body = cv2.ximgproc.guidedFilter(guide, raw_alpha.astype(np.float32),
+                                                radius=6, eps=1e-4)
+        alpha_head = cv2.ximgproc.guidedFilter(guide, raw_alpha.astype(np.float32),
+                                                radius=16, eps=5e-4)
+        alpha_refined = np.zeros((h, w), dtype=np.float64)
+        fg_top_ys = np.where(fg_binary.any(axis=1))[0]
+        head_bottom = int(fg_top_ys[0] + (fg_top_ys[-1] - fg_top_ys[0]) * 0.35) if len(fg_top_ys) > 1 else h // 3
+        head_blend = np.zeros((h, w), dtype=np.float64)
+        head_blend[:head_bottom, :] = 1.0
+        blend_zone = min(h // 10, 50)
+        for row in range(head_bottom, min(head_bottom + blend_zone, h)):
+            head_blend[row, :] = 1.0 - (row - head_bottom) / blend_zone
+        alpha_refined = (alpha_head * head_blend + alpha_body * (1 - head_blend)).astype(np.float64)
+        alpha_refined = np.clip(alpha_refined, 0, 1)
     except Exception:
         alpha_refined = raw_alpha
 
     final_alpha = np.maximum(alpha_refined, extend_alpha)
+    final_alpha = np.maximum(final_alpha, hair_alpha)
 
     dilate_r = 3
     possible_fg = cv2.dilate((final_alpha > 0.05).astype(np.uint8),
                              np.ones((dilate_r, dilate_r), np.uint8)) > 0
     final_alpha[~possible_fg] = 0
 
+    cell_clean = _decontaminate_edge_color(cell, final_alpha, fg_binary)
+
     bg_u8 = np.clip(bg_color, 0, 255).astype(np.uint8)
-    canvas = np.full_like(cell, bg_u8)
+    canvas = np.full_like(cell_clean, bg_u8)
     alpha_3ch = final_alpha[..., np.newaxis]
     result = np.clip(
-        cell.astype(np.float64) * alpha_3ch + canvas.astype(np.float64) * (1 - alpha_3ch),
+        cell_clean.astype(np.float64) * alpha_3ch + canvas.astype(np.float64) * (1 - alpha_3ch),
         0, 255
     ).astype(np.uint8)
 
@@ -1214,6 +1318,7 @@ def replace_studio_background(cell: np.ndarray) -> tuple[np.ndarray, dict]:
         "dark_ratio": round(dark_ratio, 3),
         "fg_ratio": round(fg_ratio, 3),
         "clothing_recovered_px": clothing_recovered,
+        "hair_recovered": bool(hair_alpha.max() > 0.1),
         "bg_color_bgr": [int(v) for v in bg_color.tolist()],
     })
     return result, record
