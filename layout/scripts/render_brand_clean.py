@@ -1180,6 +1180,57 @@ def _recover_hair_alpha(
     return hair_alpha
 
 
+def _predarken_bright_background(
+    cell: np.ndarray, bg_color: np.ndarray,
+) -> tuple[np.ndarray, bool]:
+    """rembg 前预处理：检测并压暗白墙/高亮背景区域。
+
+    白墙/门框等高亮低饱和区域会导致 rembg alpha 过渡带采样到白色像素，
+    合成后形成 halo。预先将这些区域压暗到 bg_color，让过渡带从根源变暗。
+
+    只压暗同时满足以下条件的像素：
+    1. 亮度 > 130 且饱和度 < 50（白墙/门框典型特征）
+    2. 所在连通域面积 > 图像 1.5%
+    3. 连通域触碰图像边缘（排除居中的白色衣物）
+    """
+    h, w = cell.shape[:2]
+
+    hsv = cv2.cvtColor(cell, cv2.COLOR_BGR2HSV)
+    brightness = cell.astype(np.float64).mean(axis=2)
+    saturation = hsv[:, :, 1].astype(np.float64)
+
+    wall_cand = ((brightness > 130) & (saturation < 50)).astype(np.uint8)
+
+    num, labels, stats, _ = cv2.connectedComponentsWithStats(wall_cand, connectivity=8)
+    min_area = int(h * w * 0.015)
+    wall_mask = np.zeros((h, w), dtype=np.uint8)
+    for i in range(1, num):
+        if stats[i, cv2.CC_STAT_AREA] < min_area:
+            continue
+        x0, y0 = stats[i, cv2.CC_STAT_LEFT], stats[i, cv2.CC_STAT_TOP]
+        cw, ch = stats[i, cv2.CC_STAT_WIDTH], stats[i, cv2.CC_STAT_HEIGHT]
+        if x0 == 0 or y0 == 0 or x0 + cw >= w or y0 + ch >= h:
+            wall_mask[labels == i] = 1
+
+    wall_px = int(wall_mask.sum())
+    if wall_px < min_area:
+        return cell, False
+
+    darken_map = cv2.GaussianBlur(
+        wall_mask.astype(np.float32), (0, 0), sigmaX=12,
+    ).astype(np.float64)
+    darken_map = np.clip(darken_map, 0, 1)
+
+    result = cell.astype(np.float64).copy()
+    for c in range(3):
+        result[:, :, c] = (
+            cell[:, :, c].astype(np.float64) * (1 - darken_map)
+            + float(bg_color[c]) * darken_map
+        )
+
+    return np.clip(result, 0, 255).astype(np.uint8), True
+
+
 def replace_studio_background(cell: np.ndarray) -> tuple[np.ndarray, dict]:
     """rembg 人像分割 → 影棚背景替换为亮黑色。
 
@@ -1205,7 +1256,10 @@ def replace_studio_background(cell: np.ndarray) -> tuple[np.ndarray, dict]:
         record["reason"] = "rembg not available"
         return cell, record
 
-    cell_rgb = cv2.cvtColor(cell, cv2.COLOR_BGR2RGB)
+    # 预处理：白墙压暗，消除 rembg alpha 过渡带的白色泄漏
+    cell_predarkened, bg_was_darkened = _predarken_bright_background(cell, bg_color)
+
+    cell_rgb = cv2.cvtColor(cell_predarkened, cv2.COLOR_BGR2RGB)
     from PIL import Image as PILImage
     pil_img = PILImage.fromarray(cell_rgb)
     session = _get_rembg_session()
@@ -1229,14 +1283,14 @@ def replace_studio_background(cell: np.ndarray) -> tuple[np.ndarray, dict]:
         return cell, record
 
     fg_binary = (raw_alpha > 0.3).astype(np.uint8)
-    brightness = cell.astype(np.float64).mean(axis=2)
+    brightness = cell_predarkened.astype(np.float64).mean(axis=2)
 
     fg_ys, fg_xs = np.where(fg_binary > 0)
     fg_cy = float(fg_ys.mean()) if len(fg_ys) > 0 else h / 2.0
     fg_cx = float(fg_xs.mean()) if len(fg_xs) > 0 else w / 2.0
 
     bright_mask = (brightness > 130).astype(np.uint8)
-    hsv = cv2.cvtColor(cell, cv2.COLOR_BGR2HSV)
+    hsv = cv2.cvtColor(cell_predarkened, cv2.COLOR_BGR2HSV)
     low_saturation = (hsv[:, :, 1].astype(np.float64) < 40).astype(np.uint8)
     wall_suspect = bright_mask & low_saturation
 
@@ -1274,7 +1328,7 @@ def replace_studio_background(cell: np.ndarray) -> tuple[np.ndarray, dict]:
 
     hair_alpha = _recover_hair_alpha(cell, fg_binary, raw_alpha)
 
-    guide = cv2.cvtColor(cell, cv2.COLOR_BGR2GRAY).astype(np.float32) / 255.0
+    guide = cv2.cvtColor(cell_predarkened, cv2.COLOR_BGR2GRAY).astype(np.float32) / 255.0
     try:
         alpha_body = cv2.ximgproc.guidedFilter(guide, raw_alpha.astype(np.float32),
                                                 radius=6, eps=1e-4)
@@ -1301,7 +1355,7 @@ def replace_studio_background(cell: np.ndarray) -> tuple[np.ndarray, dict]:
                              np.ones((dilate_r, dilate_r), np.uint8)) > 0
     final_alpha[~possible_fg] = 0
 
-    cell_clean = _decontaminate_edge_color(cell, final_alpha, fg_binary)
+    cell_clean = _decontaminate_edge_color(cell_predarkened, final_alpha, fg_binary)
 
     bg_u8 = np.clip(bg_color, 0, 255).astype(np.uint8)
     canvas = np.full_like(cell_clean, bg_u8)
@@ -1341,6 +1395,7 @@ def replace_studio_background(cell: np.ndarray) -> tuple[np.ndarray, dict]:
         "clothing_recovered_px": clothing_recovered,
         "hair_recovered": bool(hair_alpha.max() > 0.1),
         "bg_color_bgr": [int(v) for v in bg_color.tolist()],
+        "bg_predarkened": bg_was_darkened,
     })
     return result, record
 
