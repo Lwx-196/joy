@@ -1313,6 +1313,27 @@ def replace_studio_background(cell: np.ndarray) -> tuple[np.ndarray, dict]:
 
     result[final_alpha < 0.15] = bg_u8
 
+    fg_interior = cv2.erode(
+        (final_alpha > 0.8).astype(np.uint8),
+        np.ones((5, 5), np.uint8), iterations=1,
+    )
+    dist_from_interior = cv2.distanceTransform(1 - fg_interior, cv2.DIST_L2, 5)
+    halo_band = (dist_from_interior > 0) & (dist_from_interior < 10) & (final_alpha > 0.05) & (final_alpha < 0.6)
+    if np.any(halo_band):
+        result_gray = cv2.cvtColor(result, cv2.COLOR_BGR2GRAY).astype(np.float64)
+        bg_brightness = float(bg_color.mean())
+        expected = bg_brightness + (result_gray[fg_interior > 0].mean() - bg_brightness) * final_alpha if np.any(fg_interior) else result_gray
+        excess = result_gray - expected
+        suppress_mask = halo_band & (excess > 25)
+        if np.any(suppress_mask):
+            strength = np.clip((excess - 25) / 60.0, 0, 0.45)
+            strength[~suppress_mask] = 0
+            for c in range(3):
+                result[:, :, c] = np.clip(
+                    result[:, :, c].astype(np.float64) - strength * (result[:, :, c].astype(np.float64) - bg_color[c]),
+                    0, 255,
+                ).astype(np.uint8)
+
     record.update({
         "enabled": True,
         "dark_ratio": round(dark_ratio, 3),
