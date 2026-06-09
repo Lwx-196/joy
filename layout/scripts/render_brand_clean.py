@@ -1183,15 +1183,9 @@ def _recover_hair_alpha(
 def _predarken_bright_background(
     cell: np.ndarray, bg_color: np.ndarray,
 ) -> tuple[np.ndarray, bool]:
-    """rembg 前预处理：检测并压暗白墙/高亮背景区域。
+    """rembg 前预处理：检测并压暗白墙/高亮低饱和背景区域。
 
-    白墙/门框等高亮低饱和区域会导致 rembg alpha 过渡带采样到白色像素，
-    合成后形成 halo。预先将这些区域压暗到 bg_color，让过渡带从根源变暗。
-
-    只压暗同时满足以下条件的像素：
-    1. 亮度 > 130 且饱和度 < 50（白墙/门框典型特征）
-    2. 所在连通域面积 > 图像 1.5%
-    3. 连通域触碰图像边缘（排除居中的白色衣物）
+    检测条件：亮度 > 130 + 饱和度 < 50 + 连通域 > 1.5% + 触碰图像边缘。
     """
     h, w = cell.shape[:2]
 
@@ -1367,26 +1361,14 @@ def replace_studio_background(cell: np.ndarray) -> tuple[np.ndarray, dict]:
 
     result[final_alpha < 0.15] = bg_u8
 
-    fg_interior = cv2.erode(
-        (final_alpha > 0.8).astype(np.uint8),
-        np.ones((5, 5), np.uint8), iterations=1,
-    )
-    dist_from_interior = cv2.distanceTransform(1 - fg_interior, cv2.DIST_L2, 5)
-    halo_band = (dist_from_interior > 0) & (dist_from_interior < 10) & (final_alpha > 0.05) & (final_alpha < 0.6)
-    if np.any(halo_band):
-        result_gray = cv2.cvtColor(result, cv2.COLOR_BGR2GRAY).astype(np.float64)
-        bg_brightness = float(bg_color.mean())
-        expected = bg_brightness + (result_gray[fg_interior > 0].mean() - bg_brightness) * final_alpha if np.any(fg_interior) else result_gray
-        excess = result_gray - expected
-        suppress_mask = halo_band & (excess > 25)
-        if np.any(suppress_mask):
-            strength = np.clip((excess - 25) / 60.0, 0, 0.45)
-            strength[~suppress_mask] = 0
-            for c in range(3):
-                result[:, :, c] = np.clip(
-                    result[:, :, c].astype(np.float64) - strength * (result[:, :, c].astype(np.float64) - bg_color[c]),
-                    0, 255,
-                ).astype(np.uint8)
+    # 低 alpha 渐进推向目标背景——通杀白墙/灰帘/彩帘 halo
+    # alpha<0.1 全推，0.1-0.45 渐变，>0.45 不动
+    halo_push = np.clip((0.45 - final_alpha) / 0.35, 0, 1)
+    for c in range(3):
+        result[:, :, c] = np.clip(
+            result[:, :, c].astype(np.float64) * (1 - halo_push) + bg_color[c] * halo_push,
+            0, 255,
+        ).astype(np.uint8)
 
     record.update({
         "enabled": True,
