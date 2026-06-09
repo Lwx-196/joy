@@ -1244,6 +1244,16 @@ def replace_studio_background(cell: np.ndarray) -> tuple[np.ndarray, dict]:
         record["reason"] = f"dark_ratio={dark_ratio:.3f} < 0.05, skip"
         return cell, record
 
+    margin = max(8, min(h, w) // 8)
+    corners = np.concatenate([
+        gray[:margin, :margin].ravel(),
+        gray[:margin, -margin:].ravel(),
+        gray[-margin:, :margin].ravel(),
+        gray[-margin:, -margin:].ravel(),
+    ])
+    bg_brightness = float(np.median(corners))
+    dark_bg = bg_brightness < 70
+
     try:
         from rembg import remove
     except ImportError:
@@ -1349,7 +1359,12 @@ def replace_studio_background(cell: np.ndarray) -> tuple[np.ndarray, dict]:
                              np.ones((dilate_r, dilate_r), np.uint8)) > 0
     final_alpha[~possible_fg] = 0
 
-    cell_clean = _decontaminate_edge_color(cell_predarkened, final_alpha, fg_binary)
+    final_alpha[final_alpha > 0.5] = 1.0
+
+    fg_solid = (final_alpha == 1.0)[..., np.newaxis]
+    cell_hybrid = np.where(fg_solid, cell, cell_predarkened).astype(np.uint8)
+
+    cell_clean = _decontaminate_edge_color(cell_hybrid, final_alpha, fg_binary)
 
     bg_u8 = np.clip(bg_color, 0, 255).astype(np.uint8)
     canvas = np.full_like(cell_clean, bg_u8)
@@ -1361,9 +1376,8 @@ def replace_studio_background(cell: np.ndarray) -> tuple[np.ndarray, dict]:
 
     result[final_alpha < 0.15] = bg_u8
 
-    # 低 alpha 渐进推向目标背景——通杀白墙/灰帘/彩帘 halo
-    # alpha<0.1 全推，0.1-0.45 渐变，>0.45 不动
-    halo_push = np.clip((0.45 - final_alpha) / 0.35, 0, 1)
+    halo_ceiling = 0.25 if dark_bg else 0.45
+    halo_push = np.clip((halo_ceiling - final_alpha) / max(halo_ceiling - 0.10, 0.01), 0, 1)
     for c in range(3):
         result[:, :, c] = np.clip(
             result[:, :, c].astype(np.float64) * (1 - halo_push) + bg_color[c] * halo_push,
