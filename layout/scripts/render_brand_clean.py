@@ -1531,6 +1531,30 @@ def render_prepared_cell(
     )
 
 
+def compute_pair_alignment_scales(
+    before_face: dict,
+    after_face: dict,
+    size: tuple[int, int],
+    target_eye_distance: float,
+) -> tuple[float, float]:
+    # 术后源图通常拍得更近（面部占画幅更大）：独立对齐时术前常被 face-height cap
+    # 压小、术后却放满 target eye distance，导致板面术后更紧凑（构图不匹配根因，
+    # 见 handoff-enhance-pipeline-v4）。这里以术前最终眼距为锚反推术后 scale，
+    # 锁定两侧面部大小一致；同时保留术后自身 face-height cap 防止面部被裁切。
+    before_scale = CASE_LAYOUT.estimate_alignment_effective_scale(
+        before_face, size, target_eye_distance
+    )
+    before_final_eye = max(float(before_face["eye_distance"]), 1e-6) * before_scale
+    after_eye = max(float(after_face["eye_distance"]), 1e-6)
+    match_scale = before_final_eye / after_eye
+    after_height_cap = (
+        size[1] * CASE_LAYOUT.ALIGN_TARGET_FACE_HEIGHT_RATIO
+        / max(float(after_face["face_height"]), 1e-6)
+        * CASE_LAYOUT.ALIGN_FACE_HEIGHT_SCALE_HEADROOM
+    )
+    return before_scale, float(min(match_scale, after_height_cap))
+
+
 def render_side_profile_contain_cell(image_path: str, size: tuple[int, int]) -> np.ndarray:
     image = cv2.imread(image_path)
     if image is None:
@@ -1654,6 +1678,9 @@ def render_aligned_pair(
                         "after": Path(path).name,
                     })
             else:
+                before_forced_scale, after_forced_scale = compute_pair_alignment_scales(
+                    before_face, current_face, size, target_eye_distance,
+                )
                 candidate = render_prepared_cell(
                     path,
                     current_face,
@@ -1662,6 +1689,7 @@ def render_aligned_pair(
                     target_eye_center,
                     slot,
                     "after",
+                    forced_effective_scale=after_forced_scale,
                 )
                 before_arr = render_prepared_cell(
                     before_path,
@@ -1671,6 +1699,7 @@ def render_aligned_pair(
                     target_eye_center,
                     slot,
                     "before",
+                    forced_effective_scale=before_forced_scale,
                 )
                 if render_plan_records is not None:
                     record = {
@@ -1679,6 +1708,9 @@ def render_aligned_pair(
                         "targets": protection_targets,
                         "before": Path(before_path).name,
                         "after": Path(path).name,
+                        "before_scale": round(before_forced_scale, 4),
+                        "after_scale": round(after_forced_scale, 4),
+                        "scale_lock": "after_matched_to_before_final_eye_distance",
                     }
                     if smart_debug:
                         record["smart_crop"] = smart_debug
@@ -1776,8 +1808,10 @@ def render_from_manifest(manifest: dict, out_path: Path, *, after_transform=None
             if not selection:
                 continue
             before_path = selection["before"]["path"]
+            enhancement = selection["after"].get("enhancement") or {}
+            is_native_crop = enhancement.get("input_mode") == "aligned-after"
             after_candidates = [
-                selection["after"].get("enhancement", {}).get("enhanced_path"),
+                None if is_native_crop else enhancement.get("enhanced_path"),
                 selection["after"]["path"],
             ]
             allow_direction_mismatch = (

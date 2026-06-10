@@ -40,6 +40,14 @@ if FACE_ALIGN_SPEC is None or FACE_ALIGN_SPEC.loader is None:
     raise RuntimeError(f"无法加载底层 face_align_compare.py: {FACE_ALIGN_PATH}")
 FACE_ALIGN = importlib.util.module_from_spec(FACE_ALIGN_SPEC)
 FACE_ALIGN_SPEC.loader.exec_module(FACE_ALIGN)
+_SMART_CROP_PATH = Path(__file__).resolve().parent / "smart_crop.py"
+_smart_crop_spec = importlib.util.spec_from_file_location("smart_crop", _SMART_CROP_PATH)
+if _smart_crop_spec and _smart_crop_spec.loader:
+    SMART_CROP = importlib.util.module_from_spec(_smart_crop_spec)
+    _smart_crop_spec.loader.exec_module(SMART_CROP)
+else:
+    SMART_CROP = None
+
 SEGMENTER_MODEL_URL = "https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_multiclass_256x256/float32/latest/selfie_multiclass_256x256.tflite"
 SEGMENTER_MODEL_PATH = Path("/tmp/selfie_multiclass_256x256.tflite")
 _IMAGE_SEGMENTER = None
@@ -1549,6 +1557,22 @@ def build_after_enhancement_prompt(group_name: str, slot: str, focus_targets: li
             "不得把参考图的人物身份、肤质瑕疵或术前状态替换到术后图。"
         )
     focus_summary = build_focus_summary(focus_targets)
+    if os.environ.get("CASE_LAYOUT_ENHANCE_DIRECTION", "strict").strip().lower() == "heal":
+        return (
+            f"这是医美术后恢复效果预览图，案例组名是“{group_name}”，"
+            "用途是让求美者看到接受治疗后、充分恢复消肿后的良好样貌。"
+            "输入图已经完成统一的人物位置、大小、裁切和朝向标准化。"
+            f"必须严格保持同一人物身份与五官识别特征、同一{ANGLE_LABELS[slot]}角度、"
+            f"同一背景、同一构图、同一画面裁切、同一发型与妆容不变，{pose_note}"
+            "在身份与构图完全不变的前提下，呈现术后充分恢复、消肿消炎后的健康状态："
+            f"重点改善以下确认目标：{focus_summary}；"
+            "并可让整体气色更红润健康、肤质更光滑紧致有光泽、消除疲态与术后肿胀痕迹，"
+            "呈现自然、年轻、恢复良好的效果。"
+            "改善须真实自然、符合本人恢复预期，不得夸张到改变五官几何或身份识别，"
+            "不得过度磨皮成塑料质感、不得漂白肤色，必须保留真实毛孔与皮肤纹理。"
+            "不要新增文字、边框、饰品、服装变化，"
+            "不要改变方向、抬头角、头部大小、背景或画面裁切。"
+        )
     return (
         f"这是医美术后案例图，案例组名是“{group_name}”。"
         "输入图已经完成统一的人物位置、大小、裁切和朝向标准化。"
@@ -2239,6 +2263,14 @@ def inspect_group(
             group["blocking_issues"].append(f"{group_dir.name}：缺少术前术后都可用的正面样本，无法自动降级模板")
         group["effective_template"] = None
         group["render_slots"] = []
+
+    if SMART_CROP is not None and focus_targets and group["render_slots"]:
+        active_slots = [sl for sl in group["render_slots"] if group["selected_slots"].get(sl)]
+        for si, sl in enumerate(active_slots):
+            _, _, _, debug_info = SMART_CROP.compute_smart_alignment(
+                (516, 624), focus_targets, si, len(active_slots),
+            )
+            group["selected_slots"][sl]["smart_crop"] = debug_info
 
     if group["blocking_issues"]:
         group["status"] = "error"
@@ -3450,10 +3482,19 @@ def render_board(manifest: dict, out_path: Path, preview: bool = False) -> Path:
         draw_centered_text(draw, (after_x, y, after_x + column_w, y + header_h), "术后", header_font, (255, 255, 255))
         y += header_h
 
-        target_eye_distance, target_eye_center = build_alignment_target((column_w, image_h))
-
         group_slots = group.get("render_slots") or ANGLE_SLOTS
-        
+        manifest_focus = manifest.get("focus_targets") or []
+        active_slots = [sl for sl in group_slots if group["selected_slots"].get(sl)]
+        slot_alignments: dict[str, tuple[float, np.ndarray]] = {}
+        for si, sl in enumerate(active_slots):
+            if SMART_CROP is not None and manifest_focus:
+                ted, ecx, ecy, _ = SMART_CROP.compute_smart_alignment(
+                    (column_w, image_h), manifest_focus, si, len(active_slots),
+                )
+                slot_alignments[sl] = (ted, np.array([ecx, ecy], dtype=np.float64))
+            else:
+                slot_alignments[sl] = build_alignment_target((column_w, image_h))
+
         # 第一阶段：对齐并统一所有术前图的色彩（以第一张可用图为锚点，通常是正面）
         temp_slots_data = {}
         before_arrays = []
@@ -3463,6 +3504,9 @@ def render_board(manifest: dict, out_path: Path, preview: bool = False) -> Path:
             selection = group["selected_slots"].get(slot)
             if not selection:
                 continue
+            target_eye_distance, target_eye_center = slot_alignments.get(
+                slot, build_alignment_target((column_w, image_h))
+            )
             before_source = selection["before"]["path"]
             b_arr, b_mask = render_aligned_cell_with_mask(before_source, (column_w, image_h), target_eye_distance, target_eye_center)
             b_arr = prepare_face_cell_for_board(
@@ -3490,8 +3534,11 @@ def render_board(manifest: dict, out_path: Path, preview: bool = False) -> Path:
             selection = group["selected_slots"].get(slot)
             if selection and slot in temp_slots_data:
                 before_arr = temp_slots_data[slot]["before_arr"]
+                slot_ted, slot_tec = slot_alignments.get(
+                    slot, build_alignment_target((column_w, image_h))
+                )
                 after_source = selection["after"].get("enhancement", {}).get("enhanced_path") or selection["after"]["path"]
-                after_arr, after_mask = render_aligned_cell_with_mask(after_source, (column_w, image_h), target_eye_distance, target_eye_center)
+                after_arr, after_mask = render_aligned_cell_with_mask(after_source, (column_w, image_h), slot_ted, slot_tec)
                 after_arr = prepare_face_cell_for_board(
                     after_source,
                     after_arr,
