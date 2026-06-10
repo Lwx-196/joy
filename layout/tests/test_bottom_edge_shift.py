@@ -8,6 +8,7 @@ import numpy as np
 
 from scripts.render_brand_clean import (
     bottom_valid_gap_px,
+    compute_protected_transform,
     shift_cell_bottom_edge_to_frame,
 )
 
@@ -65,3 +66,33 @@ def test_diagonal_truncation_uses_lowest_valid_row():
     assert shift == 10
     assert out_mask[59, : w // 2].all()
     assert not out_mask[59, w // 2:].any()
+
+
+# ---- 保护区主路径（should_use_protected_alignment 恒 True，实际渲染全走
+# render_protected_pair → compute_protected_transform）。6ed6e6b 只修了不可达的
+# render_prepared_cell fallback，本组测试钉死主路径的贴框行为。----
+
+
+def test_protected_transform_shifts_bottom_edge_to_frame():
+    # landscape 源图缩放后矮于 portrait cell：offset 下移使源图底边贴下框线
+    size = (400, 600)
+    image_shape = (300, 800)  # src_h, src_w → scaled_h=300 < target_h=600
+    box = (350.0, 100.0, 450.0, 200.0)
+    t = compute_protected_transform(image_shape, box, size, "front", 1.0)
+    _, y = t["offset"]
+    assert y + 300 == 600
+    assert t["bottom_edge_shift_px"] > 0
+    assert t["clipped_px"]["bottom"] == 0
+    # protection_cell_box 记录的是 shift 后的真实落位
+    assert t["protection_cell_box"][3] == box[3] + y
+
+
+def test_protected_transform_no_shift_when_image_covers_bottom():
+    # 源图覆盖 cell 底边（无 gap）：不动
+    size = (400, 600)
+    image_shape = (900, 700)
+    box = (250.0, 300.0, 450.0, 500.0)
+    t = compute_protected_transform(image_shape, box, size, "front", 1.0)
+    _, y = t["offset"]
+    assert t["bottom_edge_shift_px"] == 0
+    assert y + 900 >= 600

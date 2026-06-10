@@ -282,6 +282,13 @@ def compute_protected_transform(
 
     scaled_w = int(round(src_w * scale))
     scaled_h = int(round(src_h * scale))
+    # ④底部断图贴框（保护区主路径）：源图 bottom edge 高于 cell 下边线时，底部
+    # 行无源像素、被 dark fill，rembg 黑底化后成了人物截断边浮空 + 黑带。整体
+    # 下移使截断边与下框线齐平；只 shift 有 gap 的一侧（对齐 tradeoff owner 已
+    # 接受），口径与 render_prepared_cell 的 shift_cell_bottom_edge_to_frame 一致。
+    bottom_gap = target_h - (y + scaled_h)
+    if bottom_gap > 0:
+        y += bottom_gap
     clipped = {
         "left": max(0, -x),
         "right": max(0, x + scaled_w - target_w),
@@ -291,6 +298,7 @@ def compute_protected_transform(
     return {
         "scale": scale,
         "offset": [x, y],
+        "bottom_edge_shift_px": max(0, int(bottom_gap)),
         "protection_cell_box": [round(value, 1) for value in box_in_cell(x, y)],
         "clipped_px": clipped,
     }
