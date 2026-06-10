@@ -197,6 +197,36 @@ def _pad_to_square(img: Image.Image) -> tuple[Image.Image, tuple[int, int, int, 
     return padded, crop_box
 
 
+def _restore_content_geometry(enh: Image.Image, sq: int,
+                              crop_box: tuple[int, int, int, int],
+                              slot: str) -> Image.Image:
+    """把 AI 返回图复原到 crop_box 内容几何，绝不改变内容纵横比。
+
+    pad 成正方形送审后，provider 有两种返回形态（2026-06-10 批量实锤）：
+    - 正方形：视为保留 pad 的原构图 → resize 回 sq² 后裁 crop_box
+    - 非正方形：模型丢弃 pad 按内容比例出图（tuzi/flashapi 均出现）→
+      视为 crop_box 区域的内容，等比 cover 缩放 + 居中裁。
+      此前盲 resize((sq, sq)) 会把竖图内容横向拉宽 25-37%。
+    """
+    w, h = enh.size
+    if w == h:
+        if (w, h) != (sq, sq):
+            enh = enh.resize((sq, sq), Image.LANCZOS)
+        return enh.crop(crop_box)
+
+    cw = crop_box[2] - crop_box[0]
+    ch = crop_box[3] - crop_box[1]
+    scale = max(cw / w, ch / h)
+    rw = max(cw, round(w * scale))
+    rh = max(ch, round(h * scale))
+    logger.info("  [geometry] %s: 返回 %dx%d 非正方形 → 等比复原 %dx%d → 居中裁 %dx%d",
+                slot, w, h, rw, rh, cw, ch)
+    enh = enh.resize((rw, rh), Image.LANCZOS)
+    left = (rw - cw) // 2
+    top = (rh - ch) // 2
+    return enh.crop((left, top, left + cw, top + ch))
+
+
 def _cell_content_coverage(img: Image.Image) -> float:
     """估算 cell 中照片内容覆盖率（vs 对齐填充背景）。
 
@@ -632,10 +662,8 @@ def _make_slot_transform(case_layout, providers, prompt: str, stats: dict, *,
                 AI_CACHE_DIR.mkdir(parents=True, exist_ok=True)
                 cache_path.write_bytes(enhanced_raw)
 
-            enhanced_img = _bytes_to_pil(enhanced_raw)
-            if enhanced_img.size != (sq_side, sq_side):
-                enhanced_img = enhanced_img.resize((sq_side, sq_side), Image.LANCZOS)
-            enhanced_img = enhanced_img.crop(crop_box)
+            enhanced_img = _restore_content_geometry(
+                _bytes_to_pil(enhanced_raw), sq_side, crop_box, slot)
             elapsed = time.time() - t0
             logger.info("  [AI] %s: OK via %s (%.1fs)", slot, provider_name, elapsed)
 
@@ -971,10 +999,7 @@ def _enhance_manifest_sources(
                     AI_CACHE_DIR.mkdir(parents=True, exist_ok=True)
                     cache_path.write_bytes(raw)
 
-                enh = _bytes_to_pil(raw)
-                if enh.size != (sq, sq):
-                    enh = enh.resize((sq, sq), Image.LANCZOS)
-                enh = enh.crop(crop_box)
+                enh = _restore_content_geometry(_bytes_to_pil(raw), sq, crop_box, slot)
 
                 elapsed = time.time() - t0
                 logger.info("  [fullres] %s: OK via %s (%.1fs) %dx%d",
