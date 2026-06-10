@@ -150,6 +150,11 @@ def collect_protection_targets(manifest: dict, meta: dict) -> list[str]:
 
 
 def should_use_protected_alignment(slot: str, protection_targets: list[str]) -> bool:
+    # ⚠ 恒 True：render_aligned_pair 中本函数守卫的 if 分支永远命中，其后的
+    # elif（side_profile_contain）与 else（compute_pair_alignment_scales 配对缩放锁）
+    # 当前不可达。else 保留为 render_protected_pair 异常 fallback 的升级路径
+    # （现 fallback 走无 scale lock 的 render_prepared_cell）。若改本函数为条件判定，
+    # 需让其尊重空 targets（影响面大，见 handoff-enhance-pipeline-v5 步骤 5 评估）。
     return slot in {"front", "oblique", "side"}
 
 
@@ -224,66 +229,6 @@ def protection_box_from_face(
         min(float(width), x2 + box_w * pad_r),
         min(float(height), y2 + box_h * pad_b),
     )
-
-
-def pair_protected_scale(
-    before_shape: tuple[int, int],
-    after_shape: tuple[int, int],
-    before_box: tuple[float, float, float, float],
-    after_box: tuple[float, float, float, float],
-    size: tuple[int, int],
-    slot: str,
-    smart_crop_ratio: float | None = None,
-    before_eye_distance: float | None = None,
-    after_eye_distance: float | None = None,
-) -> float:
-    target_w, target_h = size
-    if slot == "front":
-        target_protection_h = target_h * 0.72
-    elif slot == "oblique":
-        target_protection_h = target_h * 0.70
-    else:
-        target_protection_h = target_h * 0.74
-
-    protection_heights = [before_box[3] - before_box[1], after_box[3] - after_box[1]]
-    protection_widths = [before_box[2] - before_box[0], after_box[2] - after_box[0]]
-    raw = target_protection_h / max(1.0, sum(protection_heights) / len(protection_heights))
-    before_h, before_w = before_shape
-    after_h, after_w = after_shape
-    contain = min(
-        target_w / max(before_w, 1),
-        target_h / max(before_h, 1),
-        target_w / max(after_w, 1),
-        target_h / max(after_h, 1),
-    )
-    protection_fit = min(
-        (target_w - 28) / max(1.0, max(protection_widths)),
-        (target_h - 28) / max(1.0, max(protection_heights)),
-    )
-    upper = min(contain * (1.10 if slot != "side" else 1.04), protection_fit)
-    base_scale = float(max(contain * 0.92, min(raw, upper)))
-
-    # smart crop 融合：用 eye_distance_ratio 计算标准对齐等效 scale。
-    # 部位越小 → ratio 越高 → 允许保护框 padding 被适度裁切
-    # （小部位在脸部中心，外围 padding 可牺牲）
-    _BASELINE_RATIO = 0.31
-    if smart_crop_ratio and smart_crop_ratio > _BASELINE_RATIO and before_eye_distance and after_eye_distance:
-        target_ted = target_w * smart_crop_ratio
-        smart_scale = min(
-            target_ted / max(before_eye_distance, 1.0),
-            target_ted / max(after_eye_distance, 1.0),
-        )
-        if smart_scale > base_scale:
-            shrink = min(0.70, (smart_crop_ratio - _BASELINE_RATIO) / _BASELINE_RATIO * 0.65)
-            eff_widths = [w * (1 - shrink) for w in protection_widths]
-            eff_heights = [h * (1 - shrink) for h in protection_heights]
-            relaxed_fit = min(
-                (target_w - 28) / max(1.0, max(eff_widths)),
-                (target_h - 28) / max(1.0, max(eff_heights)),
-            )
-            return float(min(smart_scale, relaxed_fit))
-
-    return base_scale
 
 
 def compute_protected_transform(
