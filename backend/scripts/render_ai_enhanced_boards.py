@@ -911,29 +911,65 @@ def _rembg_composite_on_black(pil_img: Image.Image) -> Image.Image:
     return Image.fromarray(out)
 
 
+# 肤色亮度对齐参数（2026-06-10 偏白根因标定，FLAG=黄婧/赵12.23 vs ctrl 8 案例）
+_LUM_SKIN_MIN_PIXELS = 500   # 肤色像素低于此回退全人物 mask（双方一致用同一种 mask）
+_LUM_GAIN_MIN = 0.75         # 压暗下限：赵12.23 最重槽实测 gain 0.764
+_LUM_GAIN_MAX = 1.3          # 提亮上限：沿用原值（AI+rembg 黑底压暗补偿）
+_LUM_GAIN_DEADBAND = 0.04    # ±4% 内不动，避免无意义微调
+
+
+def _skin_mask(arr) -> "object":
+    """肤色像素 mask：luma>60 且 R>B+10。
+
+    黑/白衣物（中性 R≈B）、头发（暗）、黑底全排除 → 亮度统计直击人脸/颈。
+    全人物 mask（max(RGB)>20）会被衣物占比稀释：黄婧黑毛衣案例全人物 Δ 只 +4.9，
+    人脸实际偏白被掩盖；且 before/after 衣物占比差会让 gain 系统性跑偏。
+    """
+    luma = arr.mean(axis=2)
+    return (luma > 60) & (arr[..., 0] > arr[..., 2] + 10)
+
+
 def _match_face_luminance(ref_img: Image.Image, target_img: Image.Image) -> Image.Image:
-    """术后人脸亮度对齐术前：AI 增强 + rembg 黑底合成会压暗术后，这里补偿回来。"""
+    """术后人脸亮度双向对齐术前（肤色像素统计，2026-06-10 偏白根因修复）。
+
+    - 术后偏暗（AI+rembg 黑底压暗）→ 提亮，gain ≤ 1.3（原有方向）
+    - 术后偏白 → 压暗，gain ≥ 0.75（新方向）。两种实锤偏白来源：
+      ① AI 增强直接漂白人脸（赵12.23：enh skin 160-184 vs 术前 128-133）
+      ② 旧全人物 mask 因 before/after 衣物占比差误判术后偏暗 → 1.3× boost
+        把脸打白（黄婧：源级 skin 已持平，板上仍偏白）
+    肤色 mask 任一侧不足 500px 时双方一起回退全人物 mask（禁止混用两种口径）。
+    """
     import numpy as np
 
     ref = np.array(ref_img, dtype=np.float64)
     tgt = np.array(target_img, dtype=np.float64)
 
-    ref_mask = ref.max(axis=2) > 20
-    tgt_mask = tgt.max(axis=2) > 20
+    ref_skin, tgt_skin = _skin_mask(ref), _skin_mask(tgt)
+    if int(ref_skin.sum()) >= _LUM_SKIN_MIN_PIXELS and int(tgt_skin.sum()) >= _LUM_SKIN_MIN_PIXELS:
+        ref_mask, tgt_mask, basis = ref_skin, tgt_skin, "skin"
+    else:
+        ref_mask = ref.max(axis=2) > 20
+        tgt_mask = tgt.max(axis=2) > 20
+        basis = "person"
 
     if not ref_mask.any() or not tgt_mask.any():
         return target_img
 
     ref_lum = float(ref[ref_mask].mean())
     tgt_lum = float(tgt[tgt_mask].mean())
-
-    if tgt_lum >= ref_lum or tgt_lum < 1:
+    if tgt_lum < 1:
         return target_img
 
-    gain = min(ref_lum / tgt_lum, 1.3)
+    gain = ref_lum / tgt_lum
+    if abs(gain - 1.0) < _LUM_GAIN_DEADBAND:
+        return target_img
+    gain = min(max(gain, _LUM_GAIN_MIN), _LUM_GAIN_MAX)
+
+    person = tgt.max(axis=2) > 20
     out = np.clip(tgt * gain, 0, 255).astype(np.uint8)
-    out[~tgt_mask] = 0
-    logger.info("  [lum-match] before=%.0f after=%.0f gain=%.2f", ref_lum, tgt_lum, gain)
+    out[~person] = 0
+    logger.info("  [lum-match] %s before=%.0f after=%.0f gain=%.2f",
+                basis, ref_lum, tgt_lum, gain)
     return Image.fromarray(out)
 
 
