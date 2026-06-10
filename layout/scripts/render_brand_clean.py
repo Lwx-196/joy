@@ -673,6 +673,35 @@ def crop_cell_bottom_to_background(cell: np.ndarray, from_y: int) -> np.ndarray:
     return cropped
 
 
+def bottom_valid_gap_px(valid_mask: np.ndarray) -> int:
+    rows_valid = np.asarray(valid_mask, dtype=bool).any(axis=1)
+    if not rows_valid.any():
+        return 0
+    last_valid = int(np.flatnonzero(rows_valid)[-1])
+    return int(rows_valid.shape[0] - 1 - last_valid)
+
+
+def shift_cell_bottom_edge_to_frame(
+    cell: np.ndarray,
+    valid_mask: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, int]:
+    # 源图 bottom edge 高于 cell 下边线时，底部 invalid 行被背景填充，到
+    # slot_transform（rembg 黑底化）阶段就成了人物截断边浮空 + 黑带。规范：
+    # 人像整体下移使截断边与下框线齐平；只 shift 有 gap 的一侧（眼对齐
+    # tradeoff owner 已接受）。顶部空出的行标 invalid，交由后续 conservative
+    # background policy 填充，与未 shift 路径口径一致。
+    gap = bottom_valid_gap_px(valid_mask)
+    if gap <= 0:
+        return cell, valid_mask, 0
+    h = cell.shape[0]
+    gap = min(int(gap), h - 1)
+    shifted_cell = shift_cell_down_with_background(cell, gap)
+    mask = np.asarray(valid_mask, dtype=bool)
+    shifted_mask = np.zeros_like(mask)
+    shifted_mask[gap:, :] = mask[: h - gap, :]
+    return shifted_cell, shifted_mask, gap
+
+
 def paste_resized_cell_with_background(
     cell: np.ndarray,
     scale: float,
@@ -1472,6 +1501,7 @@ def render_prepared_cell(
         target_eye_center,
         forced_effective_scale=forced_effective_scale,
     )
+    cell_arr, valid_mask, _bottom_shift = shift_cell_bottom_edge_to_frame(cell_arr, valid_mask)
     return CASE_LAYOUT.prepare_face_cell_for_board(
         image_path,
         cell_arr,
