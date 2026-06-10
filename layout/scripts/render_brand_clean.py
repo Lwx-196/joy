@@ -1434,29 +1434,40 @@ def render_protected_pair(
         target_w / max(before_image.shape[1], 1),
         target_h / max(before_image.shape[0], 1),
     )
+    # 对称 clamp：before 天花板与 after 同为 contain*2.50，允许放大术前裁切匹配术后
+    # 近景（旧 1.10 天花板把 before 压死在 contain 附近，板面术后脸恒大 ~2x，见
+    # handoff-enhance-pipeline-v5 探针实数）。owner 先例：放大裁切而非缩小。
     before_raw_scale = target_protection_h / before_protection_h
-    before_scale = float(max(before_contain * 0.92, min(before_raw_scale, before_contain * 1.10)))
+    before_scale = float(max(before_contain * 0.92, min(before_raw_scale, before_contain * 2.50)))
 
     after_contain = min(
         target_w / max(after_image.shape[1], 1),
         target_h / max(after_image.shape[0], 1),
     )
-    after_target_scale = before_scale * (before_protection_h / after_protection_h)
-    after_scale = float(max(after_contain * 0.92, min(after_target_scale, after_contain * 2.50)))
 
     if smart_crop_ratio:
         _BASELINE_RATIO = 0.31
         if smart_crop_ratio > _BASELINE_RATIO:
             before_eye_d = float(before_face.get("eye_distance", 0))
-            after_eye_d = float(after_face.get("eye_distance", 0))
-            if before_eye_d and after_eye_d:
+            if before_eye_d:
                 target_ted = target_w * smart_crop_ratio
                 smart_before = target_ted / max(before_eye_d, 1.0)
-                smart_after = target_ted / max(after_eye_d, 1.0)
                 if smart_before > before_scale:
-                    before_scale = float(min(smart_before, before_contain * 1.10))
-                if smart_after > after_scale:
-                    after_scale = float(min(smart_after, after_contain * 2.50))
+                    before_scale = float(min(smart_before, before_contain * 2.50))
+
+    # 面部匹配硬约束（板面 face_ratio→1.0±0.08）：smart 只推 before 定缩放档位，
+    # after 永远按保护框高度比反推跟随。旧逻辑 smart 按各自 eye_d 独立推两边，
+    # 斜/侧位前后转头角度不同时 eye_d 比 ≠ 保护框高度比 + 单边触 2.50 顶，
+    # 配对断裂（oblique 板面比 0.87）。after 触 clamp 时回拉 before 保持等大。
+    after_target_scale = before_scale * (before_protection_h / after_protection_h)
+    after_scale = float(max(after_contain * 0.92, min(after_target_scale, after_contain * 2.50)))
+    if abs(after_scale - after_target_scale) > 1e-9:
+        before_scale = float(
+            max(
+                before_contain * 0.92,
+                min(after_scale * (after_protection_h / before_protection_h), before_contain * 2.50),
+            )
+        )
 
     before_transform = compute_protected_transform(before_image.shape[:2], before_box, size, slot, before_scale)
     after_transform = compute_protected_transform(after_image.shape[:2], after_box, size, slot, after_scale)
