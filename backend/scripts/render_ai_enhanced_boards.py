@@ -1144,6 +1144,11 @@ def main() -> None:
 
         for treatment_dir in treatments:
             treatment = treatment_dir.name
+            # 品牌交付标题：客户 日期 项目（parse_case_meta 已剥客户名前缀/提日期）
+            _meta = render_mod.parse_case_meta(treatment_dir)
+            _title_date = _meta["date"] if _meta["date"] != treatment else ""
+            board_title = " ".join(
+                x for x in (customer, _title_date, _meta["project"]) if x)
             print(f"\n{'=' * 50}")
             print(f"  {customer} / {treatment}")
 
@@ -1156,7 +1161,7 @@ def main() -> None:
             except Exception as exc:
                 logger.warning("  build_manifest 失败: %s", exc)
                 results.append({
-                    "customer": customer, "treatment": treatment,
+                    "customer": customer, "treatment": treatment, "title": board_title,
                     "status": "MANIFEST_FAILED", "error": str(exc)[:200],
                 })
                 continue
@@ -1222,13 +1227,13 @@ def main() -> None:
                         logger.warning("  [D6-QA] 评估失败: %s", qa_exc)
                         qa_result = {"qa_verdict": "unavailable", "qa_held": True}
                 results.append({
-                    "customer": customer, "treatment": treatment,
+                    "customer": customer, "treatment": treatment, "title": board_title,
                     "status": status, "board": str(out_path), **stats, **qa_result,
                 })
             except Exception as exc:
                 logger.error("  ❌ 渲染失败: %s", exc)
                 results.append({
-                    "customer": customer, "treatment": treatment,
+                    "customer": customer, "treatment": treatment, "title": board_title,
                     "status": "RENDER_FAILED", "error": str(exc)[:200],
                 })
 

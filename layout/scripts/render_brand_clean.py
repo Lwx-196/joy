@@ -36,7 +36,7 @@ if _smart_crop_spec and _smart_crop_spec.loader:
 else:
     SMART_CROP = None
 
-DATE_RE = re.compile(r"^(\d{2,4}\.\d{1,2}\.\d{1,2})(.*)$")
+DATE_RE = re.compile(r"(\d{2,4}\.\d{1,2}\.\d{1,2})")
 
 
 def parse_case_meta(case_dir: Path) -> dict:
@@ -45,10 +45,16 @@ def parse_case_meta(case_dir: Path) -> dict:
     date = ""
     project = case_name
 
-    match = DATE_RE.match(case_name)
+    # 不锚定开头：treatment 目录名可能带客户名前缀（如「林方如2026.4.1盈致…」），
+    # 锚定开头会让日期解析整体 fallback → 日期 chip 被塞进整串目录名溢出画布
+    match = DATE_RE.search(case_name)
     if match:
         date = match.group(1)
-        project = match.group(2).strip(" _-，,")
+        project = (case_name[:match.start()] + case_name[match.end():]).strip(" _-，,")
+    if customer_name and project.startswith(customer_name):
+        stripped = project[len(customer_name):].strip(" _-，,")
+        if stripped:
+            project = stripped
 
     return {
         "date": date or case_name,
