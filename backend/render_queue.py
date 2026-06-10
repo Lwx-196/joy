@@ -44,6 +44,7 @@ from . import (
     ai_generation_adapter,
     audit,
     db,
+    face_frame_gate,
     render_executor,
     render_quality,
     scanner,
@@ -1152,6 +1153,25 @@ def _build_render_selection_context(
                     "source_aspect_ratio": ar,
                 }
                 continue
+            # 出框实时 gate：治疗床即刻近景半脸出框（VLM 置信度反而高，既有信号全失效），
+            # 实时算保护框未 clamp 越界比例剔除。fail-open 在 evaluate_face_frame 内部。
+            if not os.environ.get("SKIP_FACE_FRAME_GATE"):
+                rel = Path(str(filename))
+                if not rel.is_absolute() and ".." not in rel.parts:
+                    source_path = (Path(case_dir) / rel).resolve()
+                    if source_path.is_file():
+                        frame_verdict = face_frame_gate.evaluate_face_frame(source_path)
+                        if frame_verdict.get("exceeded"):
+                            LOGGER.info(
+                                "skipping face-frame-truncated image (trunc %.3f): case %s / %s",
+                                frame_verdict.get("truncation") or 0.0, case_id, filename,
+                            )
+                            overrides_by_render_name[render_filename] = {
+                                "render_excluded": True,
+                                "exclusion_reason": "face_frame_truncated",
+                                "face_frame_truncation": frame_verdict.get("truncation"),
+                            }
+                            continue
             _apply_layout_quality_evidence(candidate, layout_evidence_by_file)
             candidate.update(source_selection.candidate_quality(candidate, role, treatment_type=treatment_type))
             _apply_layout_reselect_bias(candidate)
