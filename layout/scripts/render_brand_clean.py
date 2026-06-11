@@ -1389,6 +1389,32 @@ def fill_dark_cell_edges(cell: np.ndarray) -> tuple[np.ndarray, dict]:
     return replace_studio_background(cell)
 
 
+def compute_pair_eye_signal(
+    before_face: dict,
+    after_face: dict,
+    before_scale: float,
+    after_scale: float,
+) -> dict:
+    """G2 配对眼距信号：终格眼距比 = 源图眼距 × 终格 scale 之比（解析零成本）。
+
+    供 board_pair_gate 灾难级兜底核对（front 槽阈值 [0.78, 1.30]，
+    2026-06-11 19+3 板标定）。失败 fail-open 返回 valid=False，永不抛。
+    """
+    try:
+        b = float(before_face.get("eye_distance") or 0)
+        a = float(after_face.get("eye_distance") or 0)
+        if b <= 0 or a <= 0:
+            return {"valid": False, "reason": "eye_distance_unavailable"}
+        return {
+            "valid": True,
+            "eye_ratio": round((b * before_scale) / max(a * after_scale, 1e-6), 4),
+            "before_final_eye": round(b * before_scale, 1),
+            "after_final_eye": round(a * after_scale, 1),
+        }
+    except Exception as exc:  # noqa: BLE001 — 信号永不让渲染崩溃
+        return {"valid": False, "reason": f"signal_error: {exc}"}
+
+
 def render_protected_pair(
     before_path: str,
     after_path: str,
@@ -1479,6 +1505,9 @@ def render_protected_pair(
             "targets": protection_targets,
             "before": Path(before_path).name,
             "after": Path(after_path).name,
+            "pair_eye_signal": compute_pair_eye_signal(
+                before_face, after_face, before_scale, after_scale
+            ),
             "before_scale": round(before_scale, 4),
             "after_scale": round(after_scale, 4),
             "face_ratio": round(face_ratio, 4),

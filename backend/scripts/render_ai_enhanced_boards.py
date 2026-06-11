@@ -1119,6 +1119,7 @@ def main() -> None:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
     from backend.services.image_providers import resolve_chain
     from backend.services import board_angle_gate
+    from backend.services import board_pair_gate
     from backend.services import procedure_region_mappings as prm
     providers = resolve_chain(env, explicit=provider_order)
     logger.info("就绪 providers: %s", [p.name for p in providers])
@@ -1269,6 +1270,25 @@ def main() -> None:
                     manifest, out_path, slot_transform=transform_fn,
                     scale=args.scale,
                 )
+
+                # G2 配对 gate（审核标准 v1 C 条灾难级兜底）：front 终格眼距比
+                # 出 [0.78, 1.30] → 板级 HELD 不交付（板文件保留供诊断）。
+                # 信号 = render_from_manifest 写回的 render_plan pair_eye_signal，
+                # 解析零成本；fail-open 不误杀（详见 board_pair_gate）。
+                pair_gate = board_pair_gate.evaluate_pair_coverage(
+                    manifest.get("render_plan"))
+                if pair_gate["verdict"] == board_pair_gate.VERDICT_HELD:
+                    _viol_desc = "；".join(
+                        f"{v['slot']} eye_ratio={v['eye_ratio']}（允许 {v['allowed']}）"
+                        for v in pair_gate["violations"])
+                    print(f"  🚫 PAIR_GATE_HELD: {_viol_desc}")
+                    results.append({
+                        "customer": customer, "treatment": treatment, "title": board_title,
+                        "status": "PAIR_GATE_HELD", "board": str(out_path),
+                        "pair_gate": pair_gate, "angle_gate": angle_gate,
+                    })
+                    continue
+
                 status = "OK" if stats["failed"] == 0 else "PARTIAL"
                 print(f"  ✅ {out_path} (增强 {stats['ok']}/{stats['total']})")
                 if args.case_dir is not None:
@@ -1288,7 +1308,7 @@ def main() -> None:
                 results.append({
                     "customer": customer, "treatment": treatment, "title": board_title,
                     "status": status, "board": str(out_path), **stats, **qa_result,
-                    "angle_gate": angle_gate,
+                    "angle_gate": angle_gate, "pair_gate": pair_gate,
                 })
             except Exception as exc:
                 logger.error("  ❌ 渲染失败: %s", exc)
