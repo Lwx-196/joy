@@ -1095,6 +1095,19 @@ def _enhance_manifest_sources(
     size_sig = _chain_size_sig(providers)
 
     for group in manifest.get("groups", []):
+        # defect① 修复（2026-06-11）：error 组跳过要 WARNING + skipped 计数，ok 组照常。
+        # 旧行为是 main() 按 manifest 顶级 status 整板静默跳增强——单组 blocking 把顶级
+        # status 拉成 error，连累全板零增强但板照常渲出、无任何痕迹（江佳慧空目录根因）。
+        g_status = group.get("status") or "ok"
+        if g_status != "ok":
+            n_slots = len(group.get("selected_slots") or {})
+            logger.warning(
+                "  [fullres] group %s status=%s（blocking=%d）→ 跳过该组 %d 槽增强（其余组照常）",
+                group.get("name", "?"), g_status,
+                len(group.get("blocking_issues") or []), n_slots,
+            )
+            stats["skipped"] += n_slots
+            continue
         for slot, selection in group.get("selected_slots", {}).items():
             after_info = selection["after"]
             src_path = after_info["path"]
@@ -1349,14 +1362,24 @@ def main() -> None:
                 focus_targets = prm.parse_procedures(treatment).get("all_regions", []) if args.mask_lock else []
                 if args.mask_lock:
                     print(f"  [lock] 治疗区 focus_targets = {focus_targets}")
-                if not args.dry_run and manifest.get("status") == "ok":
+                if not args.dry_run:
+                    # defect① 修复（2026-06-11）：manifest 顶级 status 不再整板拦增强——
+                    # 单组 blocking 即拉 error，旧条件整板静默跳过但板照常渲出（江佳慧
+                    # .fullres-enhance 空目录根因）。改组粒度：error 组在
+                    # _enhance_manifest_sources 内 WARNING + skipped 计数，ok 组照常。
+                    if manifest.get("status") != "ok":
+                        logger.warning(
+                            "  manifest 非 ok（%s，blocking=%d）→ 按组粒度增强，error 组跳过",
+                            manifest.get("status"),
+                            len(manifest.get("blocking_issues") or []),
+                        )
                     enhance_dir = args.output_dir / ".fullres-enhance" / customer
                     _enhance_manifest_sources(
                         manifest, providers, ENHANCE_PROMPT_V1, stats,
                         enhance_dir=enhance_dir, use_cache=not args.no_cache,
                         focus_targets=focus_targets, mask_lock=args.mask_lock,
                     )
-                elif args.dry_run:
+                else:
                     logger.info("  [DRY-RUN] 跳过全分辨率 AI 增强")
                 _cell_stats = {"total": 0, "ok": 0, "failed": 0, "skipped": 0, "locked": 0}
                 transform_fn = _make_matte_black_transform(case_layout, _cell_stats)
