@@ -32,6 +32,11 @@ class ImageProvider:
     timeout_ms: int = DEFAULT_TIMEOUT_MS
     project: str = ""   # vertex_generate_content 专用
     location: str = ""  # vertex_generate_content 专用
+    # 请求分辨率降级链（owner 2026-06-11 拍板 4K 优先）：依次尝试，被上游尺寸校验拒则降档，
+    # 末档恒为「不传 size」=旧行为。空 tuple = 该 provider 不传 size（模型自定分辨率）。
+    # rsta 实测边界：最长边 ≤3840 且总像素 ≤~8.3MP；方形输入安全最大 2560x2560（2880² 中转掐死）。
+    sizes: tuple[str, ...] = ()
+    quality: str = ""   # gpt-image 系 quality 参数（如 "high"）；空=不传，随 sizes 档一起发
 
     @property
     def ready(self) -> bool:
@@ -66,6 +71,7 @@ def _normalize_base(raw: str) -> str:
 
 def _seed_from_prefix(env: dict[str, str], name: str, prefix: str) -> ImageProvider:
     timeout = env.get(f"{prefix}_TIMEOUT_MS")
+    sizes = tuple(s.strip() for s in env.get(f"{prefix}_SIZES", "").split(",") if s.strip())
     return ImageProvider(
         name=name,
         base_url=_normalize_base(env.get(f"{prefix}_BASE_URL", "")),
@@ -73,6 +79,8 @@ def _seed_from_prefix(env: dict[str, str], name: str, prefix: str) -> ImageProvi
         model=(env.get(f"{prefix}_MODELS") or env.get(f"{prefix}_MODEL") or "").split(",")[0].strip(),
         api_format=(env.get(f"{prefix}_API_FORMAT", "images_edit") or "images_edit").strip().lower(),
         timeout_ms=int(timeout) if timeout and timeout.isdigit() else DEFAULT_TIMEOUT_MS,
+        sizes=sizes,
+        quality=env.get(f"{prefix}_QUALITY", "").strip(),
     )
 
 
@@ -279,28 +287,58 @@ def images_edit(provider: ImageProvider, image_bytes: bytes, prompt: str,
 
     import requests
 
-    files = {"image": ("input.jpg", image_bytes, mime)}
-    data = {"prompt": prompt, "model": provider.model, "n": "1"}
     # img2img 生图慢（gpt-image-2 实测 ~70-120s）→ 给 ≥180s，盖过 .env 里偏小的 chat 超时
     timeout_s = max(provider.timeout_ms, 180_000) / 1000.0
     session = requests.Session()
     session.trust_env = False
-    r = session.post(
-        f"{provider.base_url}/images/edits",
-        headers={"Authorization": f"Bearer {provider.api_key}"},
-        files=files, data=data, timeout=timeout_s,
-    )
-    if r.status_code != 200:
-        raise RuntimeError(f"{provider.name} images/edits HTTP {r.status_code}: {r.text[:300]}")
-    item = (r.json().get("data") or [{}])[0]
-    if item.get("b64_json"):
-        import base64
-        return base64.b64decode(item["b64_json"])
-    if item.get("url"):
-        dl = session.get(item["url"], timeout=60)
-        dl.raise_for_status()
-        return dl.content
-    raise RuntimeError(f"{provider.name} returned neither b64_json nor url")
+    last_size_err: RuntimeError | None = None
+    for extra in _size_rungs(provider):
+        files = {"image": ("input.jpg", image_bytes, mime)}
+        data = {"prompt": prompt, "model": provider.model, "n": "1", **extra}
+        r = session.post(
+            f"{provider.base_url}/images/edits",
+            headers={"Authorization": f"Bearer {provider.api_key}"},
+            files=files, data=data, timeout=timeout_s,
+        )
+        if r.status_code != 200:
+            err = RuntimeError(f"{provider.name} images/edits HTTP {r.status_code}: {r.text[:300]}")
+            # 尺寸被上游校验拒（image_generation_user_error）→ 降一档重试；
+            # 其它错误（鉴权/超时/5xx）直接抛给 generate_with_fallback 换 provider。
+            if extra and _is_size_rejection(r.status_code, r.text):
+                last_size_err = err
+                continue
+            raise err
+        item = (r.json().get("data") or [{}])[0]
+        if item.get("b64_json"):
+            import base64
+            return base64.b64decode(item["b64_json"])
+        if item.get("url"):
+            dl = session.get(item["url"], timeout=60)
+            dl.raise_for_status()
+            return dl.content
+        raise RuntimeError(f"{provider.name} returned neither b64_json nor url")
+    raise last_size_err or RuntimeError(f"{provider.name} images/edits: no size rung succeeded")
+
+
+def _size_rungs(provider: ImageProvider) -> list[dict[str, str]]:
+    """请求参数降级链（纯函数可单测）：每个显式 size 一档（带 quality），末档空 dict = 不传
+    size/quality 的旧行为，保证任何 sizes 配置下最终都能回到模型自定分辨率。"""
+    rungs: list[dict[str, str]] = []
+    for s in provider.sizes:
+        extra = {"size": s}
+        if provider.quality:
+            extra["quality"] = provider.quality
+        rungs.append(extra)
+    rungs.append({})
+    return rungs
+
+
+def _is_size_rejection(status_code: int, body: str) -> bool:
+    """上游尺寸校验拒（rsta 实测 400 + image_generation_user_error / Invalid size / pixel budget）。"""
+    if status_code != 400:
+        return False
+    t = (body or "").lower()
+    return "invalid size" in t or "pixel budget" in t or "image_generation_user_error" in t
 
 
 def generate_with_fallback(providers: list[ImageProvider], image_bytes: bytes, prompt: str,

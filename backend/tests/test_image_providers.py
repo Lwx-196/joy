@@ -70,3 +70,52 @@ def test_generate_with_fallback_no_providers_raises():
     import pytest
     with pytest.raises(RuntimeError, match="no ready image provider"):
         ip.generate_with_fallback([], b"x", "prompt")
+
+
+# ---------- 4K size/quality 接入（owner 2026-06-11 拍板：rsta 优先高分辨率） ----------
+
+
+def test_seed_sizes_and_quality_from_env():
+    env = dict(_env(),
+               TUZI_IMAGE_PRIMARY_SIZES="2560x2560, 2048x2048",
+               TUZI_IMAGE_PRIMARY_QUALITY="high")
+    p = ip.build_registry(env)["tuzi"]
+    assert p.sizes == ("2560x2560", "2048x2048")
+    assert p.quality == "high"
+
+
+def test_seed_sizes_default_empty():
+    p = ip.build_registry(_env())["tuzi"]
+    assert p.sizes == ()
+    assert p.quality == ""
+
+
+def test_size_rungs_ladder_ends_with_bare():
+    p = ip.build_registry(dict(_env(),
+                               TUZI_IMAGE_PRIMARY_SIZES="2560x2560",
+                               TUZI_IMAGE_PRIMARY_QUALITY="high"))["tuzi"]
+    assert ip._size_rungs(p) == [{"size": "2560x2560", "quality": "high"}, {}]
+
+
+def test_size_rungs_no_sizes_is_single_bare_rung():
+    # 无 sizes 配置 = 单档空 dict = 与旧行为字节一致
+    p = ip.build_registry(_env())["tuzi"]
+    assert ip._size_rungs(p) == [{}]
+
+
+def test_size_rungs_sizes_without_quality():
+    p = ip.build_registry(dict(_env(), TUZI_IMAGE_PRIMARY_SIZES="2048x2048"))["tuzi"]
+    assert ip._size_rungs(p) == [{"size": "2048x2048"}, {}]
+
+
+def test_is_size_rejection_matches_rsta_errors():
+    # rsta 实测三种拒绝文案（2026-06-11 探针）
+    assert ip._is_size_rejection(400, '{"code": "invalid_value", "message": "Invalid size \'4096x4096\'..."}')
+    assert ip._is_size_rejection(400, '{"message": "Requested resolution exceeds the current pixel budget."}')
+    assert ip._is_size_rejection(400, '{"type": "image_generation_user_error"}')
+
+
+def test_is_size_rejection_ignores_other_errors():
+    assert not ip._is_size_rejection(401, "invalid size")   # 非 400 = 鉴权类，走换 provider
+    assert not ip._is_size_rejection(400, '{"message": "invalid prompt"}')
+    assert not ip._is_size_rejection(500, "pixel budget")

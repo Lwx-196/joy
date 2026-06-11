@@ -171,12 +171,30 @@ def _bytes_to_pil(data: bytes) -> Image.Image:
 AI_CACHE_DIR = Path.home() / ".cache" / "case-workbench-ai-enhance-boards"
 
 
-def _ai_cache_key(png_bytes: bytes, prompt: str) -> str:
+def _ai_cache_key(png_bytes: bytes, prompt: str, size_sig: str = "") -> str:
     h = hashlib.sha256()
     h.update(png_bytes)
     h.update(b"\x00")
     h.update(prompt.encode("utf-8"))
+    if size_sig:
+        # 4K 接入（owner 2026-06-11 拍板）：请求分辨率配置掺进 key，否则旧低清缓存
+        # 恒命中、新 size 参数永不生效。空 sig = 与历史 key 完全一致（零重烧）。
+        h.update(b"\x00")
+        h.update(size_sig.encode("utf-8"))
     return h.hexdigest()
+
+
+def _chain_size_sig(providers) -> str:
+    """请求分辨率签名（掺进 AI cache key）：取链中首个配置了 sizes 的 provider。
+
+    注意：sig 表达的是「请求意图」——若链首 hi-res provider 失败 fallback 到无 size 配置
+    的备选腿，低清结果会缓存在 hi-res key 下（与今日混合分辨率缓存语义一致，不另区分）。
+    """
+    for p in providers:
+        sizes = getattr(p, "sizes", ()) or ()
+        if sizes:
+            return f"{','.join(sizes)}@{getattr(p, 'quality', '') or 'default'}"
+    return ""
 
 
 def _pad_to_square(img: Image.Image) -> tuple[Image.Image, tuple[int, int, int, int]]:
@@ -628,6 +646,7 @@ def _make_slot_transform(case_layout, providers, prompt: str, stats: dict, *,
     from backend.services.image_providers import generate_with_fallback
 
     focus_targets = focus_targets or []
+    size_sig = _chain_size_sig(providers)
 
     def transform(before_img: Image.Image, after_img: Image.Image, slot: str
                   ) -> tuple[Image.Image, Image.Image]:
@@ -652,7 +671,7 @@ def _make_slot_transform(case_layout, providers, prompt: str, stats: dict, *,
             padded_img, crop_box = _pad_to_square(after_img)
             png_bytes = _pil_to_png_bytes(padded_img)
             sq_side = padded_img.size[0]
-            cache_path = AI_CACHE_DIR / f"{_ai_cache_key(png_bytes, prompt)}.png"
+            cache_path = AI_CACHE_DIR / f"{_ai_cache_key(png_bytes, prompt, size_sig)}.png"
 
             if use_cache and cache_path.is_file():
                 enhanced_raw = cache_path.read_bytes()
@@ -767,6 +786,69 @@ def _audit_eye_preservation(orig_arr, out_arr, kept_mask):
         )
 
 
+def _alpha_defringe(arr_orig, alpha, *, edge_r: int | None = None,
+                    erode_alpha_below: float = 0.12):
+    """Matting 反解边缘去污染（defringe）+ alpha erosion（owner 6-11 实证 6 板白边/原色 halo）。
+
+    根因：rembg 边缘半透明像素的源色 C = αF + (1-α)B；黑底合成 C·α 把亮背景 B 的
+    (1-α)·B 份额留在输出 → 浅底案例人物边缘出现亮圈/原背景色 halo，与黑底形成两图层
+    割裂感（_guided_filter 只精修 alpha 形状，不去边缘色污染）。
+
+    修法（只动边缘带，人物实心内部与背景像素字节不变）：
+    - defringe：边缘带 ∩ α∈[0.2, 0.995) 内按 F = (C - (1-α)·B) / α 精确反解前景色。
+      B 取真背景像素大核归一化卷积的局部色场（影棚底有打光梯度，全局均值不够准），
+      窗口内无背景回退全局背景均值。α < 0.2 不反解（除法噪声放大）——该尾巴由
+      erosion + 下游 _BLACK_FLOOR 地板清理兜住（out ≤ 0.2·255 ≈ 51 ≈ 地板阈值）。
+    - per-channel min 保证：F 只在「背景比前景亮」的通道生效（去亮污染），永不提亮
+      —— 深底（B≈0）时 F≥C 恒取原值，存量深底板颜色字节恒等，零回归。
+    - alpha erosion：α < erode_alpha_below 的最外圈估计不可靠，直接归零。
+    - 边缘带 = support − erode(support, edge_r)，edge_r 取宽（默认 ≥17）以盖住
+      guided-filter 后的整个半透明 ramp；深处内部纹理的 α 轻微波动点不受影响。
+
+    Returns: (arr_fixed, alpha_fixed)；无背景可参考 / 无边界可修时原样返回输入。
+    """
+    import cv2
+    import numpy as np
+
+    h, w = alpha.shape
+    support = (alpha > 0.0).astype(np.uint8)
+    bg_mask = alpha < 0.02
+    if not bg_mask.any() or not support.any():
+        return arr_orig, alpha
+
+    if edge_r is None:
+        edge_r = max(17, min(h, w) // 50)
+    interior = cv2.erode(support, np.ones((edge_r, edge_r), np.uint8)) > 0
+    band = (support > 0) & ~interior & (alpha >= 0.2) & (alpha < 0.995)
+    if not band.any():
+        return arr_orig, alpha
+
+    # 真背景局部色场：归一化卷积（boxFilter 加权平均），窗口内无背景像素回退全局均值
+    k = max(31, (min(h, w) // 20) | 1)
+    bgf = bg_mask.astype(np.float32)
+    den = cv2.boxFilter(bgf, -1, (k, k), normalize=True)
+    num = cv2.boxFilter(arr_orig.astype(np.float32) * bgf[..., None], -1,
+                        (k, k), normalize=True)
+    bg_global = arr_orig[bg_mask].mean(axis=0)
+    bg_field = np.where(den[..., None] > 1e-3,
+                        num / np.maximum(den[..., None], np.float32(1e-6)),
+                        bg_global.astype(np.float32))
+
+    a_band = alpha[band][:, None]
+    c_band = arr_orig[band]
+    f_band = (c_band - (1.0 - a_band) * bg_field[band]) / a_band
+    f_band = np.minimum(np.clip(f_band, 0.0, 255.0), c_band)  # 只除亮污染，永不提亮
+
+    arr_fixed = arr_orig.copy()
+    arr_fixed[band] = f_band
+    alpha_fixed = np.where(alpha < erode_alpha_below, 0.0, alpha)
+    changed = int((np.abs(f_band - c_band).max(axis=1) > 1.0).sum())
+    if changed:
+        logger.info("  [defringe] band=%dpx changed=%dpx edge_r=%d erode<%.2f",
+                    int(band.sum()), changed, edge_r, erode_alpha_below)
+    return arr_fixed, alpha_fixed
+
+
 def _rembg_composite_on_black(pil_img: Image.Image) -> Image.Image:
     """rembg 语义抠图 → 纯黑底；不做 _fade_bottom_to_black 截断 / _strip_lower_white_clothing 剔除。
 
@@ -774,6 +856,7 @@ def _rembg_composite_on_black(pil_img: Image.Image) -> Image.Image:
     且 MediaPipe 前景 mask 留脏边——污染人物。rembg 人像分割完整保人物（含肩/领自然过渡），
     边缘干净、无截断，对 studio 深底/灰底都稳。
 
+    边缘 defringe + alpha erosion 见 _alpha_defringe（合成前最后一步，2026-06-11）。
     """
     import cv2
     import numpy as np
@@ -891,7 +974,9 @@ def _rembg_composite_on_black(pil_img: Image.Image) -> Image.Image:
                         "  [rembg-fringe] bg_L=%.0f offset=%.1f%% killed=%d safe_r=%d",
                         bg_brightness, centroid_offset * 100, killed, fringe_r,
                     )
-    out = np.clip(arr_orig * alpha[..., None], 0, 255).astype(np.uint8)
+    # Defringe + alpha erosion（owner 6-11 实证白边/原色 halo）：黑底合成前反解边缘背景污染
+    arr_fg, alpha = _alpha_defringe(arr_orig, alpha)
+    out = np.clip(arr_fg * alpha[..., None], 0, 255).astype(np.uint8)
     # 背景纯黑兜底①：erode person mask 建「安全区」——安全区内（瞳孔/虹膜/鼻孔/深色发根）
     # 保留所有暗像素，只在安全区外做地板清零灭 rembg 误留的暗背景缝。
     erode_r = max(10, out.shape[0] // 60)
@@ -1007,6 +1092,7 @@ def _enhance_manifest_sources(
 
     enhance_dir.mkdir(parents=True, exist_ok=True)
     ft = focus_targets or []
+    size_sig = _chain_size_sig(providers)
 
     for group in manifest.get("groups", []):
         for slot, selection in group.get("selected_slots", {}).items():
@@ -1024,7 +1110,7 @@ def _enhance_manifest_sources(
             padded, crop_box = _pad_to_square(orig_img)
             sq = padded.size[0]
             png = _pil_to_png_bytes(padded)
-            cache_key = _ai_cache_key(png, prompt)
+            cache_key = _ai_cache_key(png, prompt, size_sig)
             cache_path = AI_CACHE_DIR / f"{cache_key}.png"
 
             t0 = time.time()
