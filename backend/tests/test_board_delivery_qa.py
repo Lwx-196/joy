@@ -54,6 +54,7 @@ class StubProvider:
 
     def call_vision(self, prompt, images, *, timeout=30.0, purpose=None, max_dimension=None):
         self.calls += 1
+        self.last_prompt = prompt
         if self.down:
             raise VLMRequestError("stub provider down")
         parsed = {
@@ -410,3 +411,64 @@ def test_export_script_held_report_and_qa_default(monkeypatch, tmp_path: Path) -
     assert payload["boards"][0]["families"] == ["cutout_artifact"]
     # dry-run writes nothing
     assert eb._write_held_report(out, [held], dry_run=True) is None
+
+
+# ---------------------------------------------------------------------------
+# G3 近景行 prompt 扩展（v1 frozen 不动；带近景板走 v1+closeup 独立 cache）
+# ---------------------------------------------------------------------------
+
+
+def test_default_assess_prompt_is_frozen_v1(tmp_path: Path) -> None:
+    """缺省路径回归锚：prompt 与 frozen v1 字节相等，cache 行版本 = v1。"""
+    from backend.services.board_delivery_qa import PROMPT, PROMPT_VERSION
+
+    conn = _mem()
+    stub = StubProvider("clean")
+    qa = BoardDeliveryQA(stub, conn)
+    board = _board(tmp_path, "frozen.jpg", b"\xff\xd8frozen-v1")
+    qa.assess(board)
+    assert stub.last_prompt == PROMPT
+    row = conn.execute("SELECT prompt_version FROM board_delivery_qa").fetchone()
+    assert row["prompt_version"] == PROMPT_VERSION
+
+
+def test_closeup_assess_appends_note_and_version(tmp_path: Path) -> None:
+    """has_closeup_section=True → prompt = v1 + CLOSEUP_NOTE，版本带 +closeup 后缀。"""
+    from backend.services.board_delivery_qa import (
+        CLOSEUP_NOTE,
+        CLOSEUP_VERSION_SUFFIX,
+        PROMPT,
+        PROMPT_VERSION,
+    )
+
+    conn = _mem()
+    stub = StubProvider("clean")
+    qa = BoardDeliveryQA(stub, conn)
+    board = _board(tmp_path, "closeup.jpg", b"\xff\xd8with-closeup-row")
+    qa.assess(board, has_closeup_section=True)
+    assert stub.last_prompt == PROMPT + CLOSEUP_NOTE
+    assert stub.last_prompt.startswith(PROMPT)  # v1 前缀原样
+    row = conn.execute("SELECT prompt_version FROM board_delivery_qa").fetchone()
+    assert row["prompt_version"] == PROMPT_VERSION + CLOSEUP_VERSION_SUFFIX
+
+
+def test_closeup_and_default_cache_isolated(tmp_path: Path) -> None:
+    """同一板字节在两个 prompt 版本下各评各存：互不命中、各自缓存复用。"""
+    conn = _mem()
+    stub = StubProvider("clean")
+    qa = BoardDeliveryQA(stub, conn)
+    board = _board(tmp_path, "iso.jpg", b"\xff\xd8same-bytes")
+
+    first = qa.assess(board)
+    assert stub.calls == 1 and first.cached is False
+    # 同板换 closeup 路径 → 不命中 v1 cache，真打一次
+    second = qa.assess(board, has_closeup_section=True)
+    assert stub.calls == 2 and second.cached is False
+    # 各自重复 → 各命中各的 cache，调用数不再增长
+    assert qa.assess(board).cached is True
+    assert qa.assess(board, has_closeup_section=True).cached is True
+    assert stub.calls == 2
+    rows = conn.execute(
+        "SELECT prompt_version FROM board_delivery_qa ORDER BY prompt_version"
+    ).fetchall()
+    assert [r["prompt_version"] for r in rows] == ["v1", "v1+closeup"]

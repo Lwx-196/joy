@@ -1310,7 +1310,13 @@ def main() -> None:
                 qa_result = {}
                 if board_qa is not None:
                     try:
-                        v = board_qa.assess(out_path)
+                        # 带 G3 近景行的板走 v1+closeup prompt（近景行不参与配对评判，
+                        # 防 judge 把特写行当配对行误判 blocker —— 郭璟琳探针 3/3 实锤）
+                        v = board_qa.assess(
+                            out_path,
+                            has_closeup_section=bool(
+                                (manifest.get("closeup_section") or {}).get("regions")),
+                        )
                         qa_result = {"qa_verdict": v.verdict, "qa_defect": v.primary_defect,
                                      "qa_held": v.held}
                         _qa_icon = "🚫" if v.held else "✅"

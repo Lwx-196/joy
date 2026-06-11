@@ -54,6 +54,18 @@ PROMPT = (
     '"primary_defect":"最严重问题一句话，clean写无","families":["bg_letterbox|eye_align|cutout_artifact|title_text|none 适用的"]}'
 )
 
+# G3 近景特写行（render_brand_clean prepare_closeup_group 板尾追加，标题「××近景对比」）：
+# 左右两格为各自独立的治疗区特写裁剪，脸大小/取景天然不同 —— 按配对行评必误判
+# （2026-06-11 郭璟琳探针：同板像素一致，加近景行后 judge 3/3 blocker，其一显式把近景行
+# 当正面对比评配对）。纪律：PROMPT v1 frozen 字节不动；带近景行的板追加本说明并以
+# 「+closeup」版本后缀走独立 cache 行，不带近景行的板 v1 路径与标定零影响。
+CLOSEUP_NOTE = (
+    "\n补充：本板最后一行是治疗区近景特写行（行标题含「近景对比」），左右两格为各自独立的"
+    "局部特写裁剪，脸大小/取景/眼睛位置天然不同，该行不参与脸大小与眼睛对齐一致性评判；"
+    "该行只判脸部模糊涂抹/抠图蒙版撕裂白斑/灰色模糊团块这类工艺硬伤。其余各行仍按上述规则评。"
+)
+CLOSEUP_VERSION_SUFFIX = "+closeup"
+
 VALID_VERDICTS = frozenset({"blocker", "warning", "clean"})
 # verdicts that keep a board OUT of the auto-ship set (subject to human override)
 HELD_VERDICTS = frozenset({"blocker", "unavailable"})
@@ -179,7 +191,15 @@ class BoardDeliveryQA:
         *,
         case_id: int | None = None,
         job_id: int | None = None,
+        has_closeup_section: bool = False,
     ) -> BoardQAVerdict:
+        # 带 G3 近景行的板：v1 prompt 字节不动，追加近景说明 + 版本后缀（cache 独立行）。
+        prompt = self._prompt + CLOSEUP_NOTE if has_closeup_section else self._prompt
+        prompt_version = (
+            self._prompt_version + CLOSEUP_VERSION_SUFFIX
+            if has_closeup_section
+            else self._prompt_version
+        )
         try:
             content_hash = self.content_hash(board_path)
         except OSError as exc:
@@ -189,14 +209,14 @@ class BoardDeliveryQA:
                 error=f"board unreadable: {exc}",
             )
 
-        cached = self._cache_get(content_hash)
+        cached = self._cache_get(content_hash, prompt_version)
         if cached is not None:
             self._sync_render_quality_metrics(cached, case_id=case_id, job_id=job_id, source_path=str(board_path))
             return cached
 
         try:
             response = self._provider.call_vision(
-                self._prompt,
+                prompt,
                 [Path(board_path)],
                 timeout=self._timeout,
                 purpose=self._purpose,
@@ -237,7 +257,13 @@ class BoardDeliveryQA:
             latency_ms=int(getattr(response, "latency_ms", 0) or 0),
             assessed_at=assessed_at,
         )
-        self._cache_put(result, case_id=case_id, job_id=job_id, source_path=str(board_path))
+        self._cache_put(
+            result,
+            case_id=case_id,
+            job_id=job_id,
+            source_path=str(board_path),
+            prompt_version=prompt_version,
+        )
         return result
 
     # ------------------------------------------------------------------
@@ -305,12 +331,12 @@ class BoardDeliveryQA:
     # Cache plumbing
     # ------------------------------------------------------------------
 
-    def _cache_get(self, content_hash: str) -> BoardQAVerdict | None:
+    def _cache_get(self, content_hash: str, prompt_version: str | None = None) -> BoardQAVerdict | None:
         if self._conn is None:
             return None
         row = self._conn.execute(
             "SELECT * FROM board_delivery_qa WHERE content_hash = ? AND prompt_version = ?",
-            (content_hash, self._prompt_version),
+            (content_hash, prompt_version or self._prompt_version),
         ).fetchone()
         if row is None:
             return None
@@ -323,9 +349,11 @@ class BoardDeliveryQA:
         case_id: int | None,
         job_id: int | None,
         source_path: str,
+        prompt_version: str | None = None,
     ) -> None:
         if self._conn is None:
             return
+        prompt_version = prompt_version or self._prompt_version
         assessed_at = verdict.assessed_at or _now()
         self._conn.execute(
             """INSERT INTO board_delivery_qa
@@ -336,7 +364,7 @@ class BoardDeliveryQA:
                ON CONFLICT(content_hash, prompt_version) DO NOTHING""",
             (
                 verdict.content_hash,
-                self._prompt_version,
+                prompt_version,
                 case_id,
                 job_id,
                 source_path,
