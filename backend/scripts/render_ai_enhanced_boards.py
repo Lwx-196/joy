@@ -1118,6 +1118,7 @@ def main() -> None:
 
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
     from backend.services.image_providers import resolve_chain
+    from backend.services import board_angle_gate
     from backend.services import procedure_region_mappings as prm
     providers = resolve_chain(env, explicit=provider_order)
     logger.info("就绪 providers: %s", [p.name for p in providers])
@@ -1205,6 +1206,28 @@ def main() -> None:
             _log_manifest_pose_info(manifest)
             manifest = _hybrid_pose_revalidate(manifest, case_layout)
 
+            # G1 角度覆盖 gate（审核标准 v1 B 条）：项目部位必需角度缺失 → 板级 HELD 不出板。
+            # 零烧钱结构核对，在 AI 增强/渲染之前短路；fail-open 不误杀（详见 board_angle_gate）。
+            available_views = {
+                slot
+                for group in (manifest.get("groups") or [])
+                for slot, sel in (group.get("selected_slots") or {}).items()
+                if sel
+            }
+            angle_gate = board_angle_gate.evaluate_angle_coverage(treatment, available_views)
+            if angle_gate["verdict"] == board_angle_gate.VERDICT_HELD:
+                _missing_desc = "；".join(
+                    f"{m['region']}需{'|'.join(m['required_any_of'])}"
+                    for m in angle_gate["missing"])
+                print(f"  🚫 ANGLE_GATE_HELD: {_missing_desc}（板上实有 {sorted(available_views)}）")
+                results.append({
+                    "customer": customer, "treatment": treatment, "title": board_title,
+                    "status": "ANGLE_GATE_HELD", "angle_gate": angle_gate,
+                    # 区分「有素材但缺角度」vs「manifest 本身没选出槽」（avail=[] 类）
+                    "manifest_status": manifest.get("status"),
+                })
+                continue
+
             stats = {"total": 0, "ok": 0, "failed": 0, "skipped": 0, "locked": 0}
             if args.native_enhance:
                 print(f"  [native] focus = {[f['area'] for f in (native_focus or [])]}")
@@ -1265,6 +1288,7 @@ def main() -> None:
                 results.append({
                     "customer": customer, "treatment": treatment, "title": board_title,
                     "status": status, "board": str(out_path), **stats, **qa_result,
+                    "angle_gate": angle_gate,
                 })
             except Exception as exc:
                 logger.error("  ❌ 渲染失败: %s", exc)
