@@ -1767,6 +1767,37 @@ def whiten_background(img: Image.Image) -> Image.Image:
     return img
 
 
+def prepare_closeup_group(manifest: dict, size: tuple[int, int]) -> dict | None:
+    """G3 纹类近景对比区：manifest["closeup_section"] → 板尾 prepared group。
+
+    section 由 backend board_closeup_section 构建（front 源图 clarity 近景裁剪）。
+    cell 用 ImageOps.fit cover 到与角度行同尺寸（近景无需人脸眼距对齐）。
+    任何缺失/损坏 fail-open 返回 None，板照常出——近景是增益不是门槛。
+    """
+    section = manifest.get("closeup_section")
+    if not isinstance(section, dict):
+        return None
+    try:
+        cells = {}
+        for side in ("before", "after"):
+            p = Path(str(section[f"{side}_path"]))
+            with Image.open(p) as img:
+                cells[side] = ImageOps.fit(img.convert("RGB"), size, method=Image.LANCZOS)
+        label = str(section.get("label") or "").strip()
+        return {
+            "name": "closeup_section",
+            "slots": [{
+                "slot": "closeup",
+                "title": f"{label}近景对比" if label else "近景对比",
+                "before": cells["before"],
+                "after": cells["after"],
+            }],
+        }
+    except Exception as exc:  # noqa: BLE001 — fail-open，近景缺失不挡板
+        print(f"  ⚠️ closeup_section 渲染准备失败（跳过近景区）: {exc}")
+        return None
+
+
 def render_from_manifest(manifest: dict, out_path: Path, *, after_transform=None, slot_transform=None, scale: float = 1.0) -> Path:
     # body/颈纹 案例走专用渲染器（不依赖人脸眼距对齐）
     if manifest.get("case_mode") == "body":
@@ -1874,6 +1905,12 @@ def render_from_manifest(manifest: dict, out_path: Path, *, after_transform=None
             })
         if slots:
             prepared_groups.append({"name": group["name"], "slots": slots})
+
+    # G3 纹类近景对比区：manifest["closeup_section"] 存在则板尾追加一行。
+    # cell 与角度行同尺寸 → 高度公式零改动；fail-open 失败不挡板。
+    closeup_group = prepare_closeup_group(manifest, (image_w, image_h))
+    if closeup_group:
+        prepared_groups.append(closeup_group)
 
     if not prepared_groups:
         raise ValueError("没有可渲染的角度槽位")

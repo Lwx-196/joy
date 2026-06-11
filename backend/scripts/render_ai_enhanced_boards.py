@@ -1119,6 +1119,7 @@ def main() -> None:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
     from backend.services.image_providers import resolve_chain
     from backend.services import board_angle_gate
+    from backend.services import board_closeup_section
     from backend.services import board_pair_gate
     from backend.services import procedure_region_mappings as prm
     providers = resolve_chain(env, explicit=provider_order)
@@ -1264,6 +1265,18 @@ def main() -> None:
                 _cell_stats = {"total": 0, "ok": 0, "failed": 0, "skipped": 0, "locked": 0}
                 transform_fn = _make_matte_black_transform(case_layout, _cell_stats)
 
+            # G3 纹类近景对比区（审核标准 v1）：含真皱纹类项目（川字/额纹/法令纹）
+            # 板尾追加近景 before/after 行。源 = front 槽原始源图 + 古典 clarity
+            # （faithful-zoom arm A 产品化路径，零烧钱）。fail-open 不挡板。
+            if not args.dry_run:
+                closeup = board_closeup_section.build_for_manifest(
+                    manifest, treatment,
+                    args.output_dir / ".closeup-section" / f"{customer}_{treatment}",
+                )
+                if closeup:
+                    manifest["closeup_section"] = closeup
+                    print(f"  📸 近景对比区: {closeup['label']}（front 源图 clarity 裁剪）")
+
             out_path = args.output_dir / f"{customer}_{treatment}_ai_enhanced.jpg"
             try:
                 render_mod.render_from_manifest(
@@ -1309,6 +1322,7 @@ def main() -> None:
                     "customer": customer, "treatment": treatment, "title": board_title,
                     "status": status, "board": str(out_path), **stats, **qa_result,
                     "angle_gate": angle_gate, "pair_gate": pair_gate,
+                    "closeup_regions": (manifest.get("closeup_section") or {}).get("regions"),
                 })
             except Exception as exc:
                 logger.error("  ❌ 渲染失败: %s", exc)
