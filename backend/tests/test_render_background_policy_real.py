@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -57,7 +58,7 @@ print(json.dumps({{
     "white_ratio_central": float(central.mean()),
 }}, ensure_ascii=False))
 """
-    proc = subprocess.run(["python3", "-c", code], check=True, text=True, capture_output=True, timeout=60)
+    proc = subprocess.run([sys.executable, "-c", code], check=True, text=True, capture_output=True, timeout=60)
     metrics = json.loads(proc.stdout.strip().splitlines()[-1])
 
     assert metrics["white_ratio_central"] < 0.03
@@ -89,7 +90,7 @@ print(json.dumps({{
     "display_size": list(display.size),
 }}, ensure_ascii=False))
 """
-    proc = subprocess.run(["python3", "-c", code], check=True, text=True, capture_output=True, timeout=30)
+    proc = subprocess.run([sys.executable, "-c", code], check=True, text=True, capture_output=True, timeout=30)
     metrics = json.loads(proc.stdout.strip().splitlines()[-1])
     display_w, display_h = metrics["display_size"]
 
