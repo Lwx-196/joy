@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import os
 import re
 from pathlib import Path
 
@@ -70,6 +71,129 @@ def resolve_meta(manifest: dict) -> dict:
         if key in overrides:
             meta[key] = overrides[key]
     return meta
+
+
+# --- 标题结构化方案 B（CASE_TITLE_STYLE=b 启用，展示级纯文本重排）---
+# 纪律：每个字都来自原串，不增不减不猜医学绑定；解析失败 fail-open 回退原串单行。
+# 嵌入日期（多治疗合并目录名常嵌第二个日期）：支持 2026.4.1 / 2026年4月1日 两种
+TITLE_B_DATE_RE = re.compile(r"\d{2,4}[.年]\d{1,2}[.月]\d{1,2}日?")
+# 剂量：1支 / 250U / 1.0ml / 4组 / 20单位；裸小数限 1-2 位整数（1.0/0.5，防抓日期）
+TITLE_B_DOSE_RE = re.compile(r"\d+(?:\.\d+)?\s*(?:支|[uU]|ml|ML|毫升|单位|组)|\b\d{1,2}\.\d\b")
+# 展示级材料补充词（型号/变体，仅排版分组用，不做医学绑定——医学绑定唯一来源是
+# procedure_region_mappings.BRAND_TO_PROJECT 人工权威词典，本渲染器不写入不修改）
+TITLE_B_DISPLAY_EXTRA = [
+    "丰颜", "极致", "雅致", "质颜", "弗曼", "越致", "朔颜", "黑金",
+    "塑妍萃", "菲林普利", "菲林普丽", "海魅骨性", "海魅云境骨性", "海魅云境", "珂芮琦", "缇妍",
+]
+# 顶层分隔（括号内不切）
+_TITLE_B_SPLIT_CHARS = "、，,+➕ "
+_TITLE_B_MATERIALS: list[str] | None = None
+
+
+def _title_b_materials() -> list[str]:
+    """展示级材料词 = 医学词典品牌 ∪ 展示补充；词典加载失败 fail-open 只用补充词。
+
+    skill 副本场景 PROJECT_ROOT 不指向 case-workbench（parents 深度适配），
+    按候选根探测词典文件，与 render_ai_enhanced_boards.SKILL_ROOT 同款 Path.home() 锚定。
+    """
+    global _TITLE_B_MATERIALS
+    if _TITLE_B_MATERIALS is None:
+        brands: set[str] = set()
+        try:
+            import sys
+            candidates = (
+                PROJECT_ROOT,
+                Path.home() / "Desktop" / "案例生成器" / "case-workbench",
+            )
+            for root in candidates:
+                if (root / "backend" / "services" / "procedure_region_mappings.py").exists():
+                    if str(root) not in sys.path:
+                        sys.path.insert(0, str(root))
+                    from backend.services.procedure_region_mappings import BRAND_TO_PROJECT
+                    brands = set(BRAND_TO_PROJECT)
+                    break
+        except Exception:
+            brands = set()
+        _TITLE_B_MATERIALS = sorted(brands | set(TITLE_B_DISPLAY_EXTRA), key=len, reverse=True)
+    return _TITLE_B_MATERIALS
+
+
+def _title_b_split_protected(text: str) -> list[str]:
+    segs: list[str] = []
+    buf: list[str] = []
+    depth = 0
+    for ch in text:
+        if ch in "（(":
+            depth += 1
+        elif ch in "）)":
+            depth = max(0, depth - 1)
+        if depth == 0 and ch in _TITLE_B_SPLIT_CHARS:
+            if buf:
+                segs.append("".join(buf))
+                buf = []
+            continue
+        buf.append(ch)
+    if buf:
+        segs.append("".join(buf))
+    return segs
+
+
+def _title_b_find_material(seg: str) -> str | None:
+    for m in _title_b_materials():
+        if m in seg:
+            return m
+    return None
+
+
+def parse_title_b(raw: str, customer: str = "") -> list[str] | None:
+    """标题方案 B：材料分组多行 `材料 剂量 ▸ 部位 · 部位`。
+
+    返回结构化行列表；fail-open 返回 None（调用方回退原串单行）。
+    """
+    text = (raw or "").strip()
+    if not text:
+        return None
+    # 剥嵌入日期与客户名前缀（parse_case_meta 只剥开头，串中残留这里兜底）
+    text = TITLE_B_DATE_RE.sub(" ", text)
+    if customer:
+        text = text.replace(customer, " ")
+    text = text.strip(" _-，,")
+    segs = _title_b_split_protected(text)
+    groups: list[dict] = []
+    for seg in segs:
+        mat = _title_b_find_material(seg)
+        if mat is not None:
+            groups.append({"mat": mat, "segs": [seg]})
+        elif groups:
+            groups[-1]["segs"].append(seg)
+        else:
+            # 首段无材料词：独立组（如「丰唇」），材料留空
+            groups.append({"mat": None, "segs": [seg]})
+    if not any(g["mat"] for g in groups):
+        return None  # 全程无材料词 → 回退
+
+    lines: list[str] = []
+    for g in groups:
+        joined = "、".join(g["segs"])
+        if g["mat"] is None:
+            lines.append(joined)
+            continue
+        mat = g["mat"]
+        # 头 = 材料 + 剂量（剂量可能在材料前或后，从组文本里抓第一个）
+        dose_m = TITLE_B_DOSE_RE.search(joined)
+        dose = dose_m.group(0) if dose_m else ""
+        # 尾 = 组文本去掉材料词与剂量、清分隔残渣
+        rest = joined.replace(mat, "", 1)
+        if dose:
+            rest = rest.replace(dose, "", 1)
+        rest = re.sub(r"^[、，,+➕\s注射打]+|[、，,+➕\s]+$", "", rest)
+        # 整段括号包裹 → 剥外层括号（如 保妥适250U（A、B、C））
+        if rest.startswith(("（", "(")) and rest.endswith(("）", ")")):
+            rest = rest[1:-1]
+        rest = re.sub(r"[、，,]+", " · ", rest)
+        head = f"{mat} {dose}".strip()
+        lines.append(f"{head} ▸ {rest}" if rest else head)
+    return lines
 
 
 def detect_view_direction(image_path: str) -> str | None:
@@ -1828,6 +1952,15 @@ def render_from_manifest(manifest: dict, out_path: Path, *, after_transform=None
 
     s = lambda v: int(v * scale)
 
+    # 标题方案 B（owner 拍板 2026-06-11 默认启用）：多行结构化标题，header 高度随行数自适应。
+    # CASE_TITLE_STYLE=a 强制回退旧单行；解析失败 fail-open → title_lines=None 走原单行路径。
+    title_lines: list[str] | None = None
+    if os.environ.get("CASE_TITLE_STYLE", "").strip().lower() != "a" and meta["project"]:
+        try:
+            title_lines = parse_title_b(meta["project"], customer=meta["customer_name"])
+        except Exception:
+            title_lines = None  # fail-open 回退原串单行
+
     board_w = s(1920)
     pad = s(58)
     inner_gap = s(34)
@@ -1835,6 +1968,9 @@ def render_from_manifest(manifest: dict, out_path: Path, *, after_transform=None
     section_title_h = s(67)
     footer_h = s(106)
     header_h = s(216)
+    title_line_h = s(40)
+    if title_lines and len(title_lines) > 1:
+        header_h += (len(title_lines) - 1) * title_line_h
     image_w, image_h = s(516), s(624)
 
     name_font = CASE_LAYOUT.load_font(s(60), bold=True)
@@ -1951,13 +2087,26 @@ def render_from_manifest(manifest: dict, out_path: Path, *, after_transform=None
     project_x = name_x + name_w + s(24)
     project_y = name_y + s(13)
     max_project_w = card_x2 - s(30) - project_x
-    while True:
-        pb = CASE_LAYOUT.textbbox_with_fallback(draw, (0, 0), meta["project"], project_font, fill=ink)
-        if (pb[2] - pb[0]) <= max_project_w or project_font.size <= s(20):
-            break
-        project_font = CASE_LAYOUT.load_font(project_font.size - 1, bold=False)
-    if meta["project"]:
-        CASE_LAYOUT.draw_text_with_fallback(draw, (project_x, project_y), meta["project"], project_font, ink)
+    if title_lines:
+        # 方案 B：材料分组多行（行高 title_line_h 与 header_h 自适应公式一致），逐行缩字号适配
+        line_y = project_y
+        for line_text in title_lines:
+            line_font = CASE_LAYOUT.load_font(s(31), bold=False)
+            while True:
+                pb = CASE_LAYOUT.textbbox_with_fallback(draw, (0, 0), line_text, line_font, fill=ink)
+                if (pb[2] - pb[0]) <= max_project_w or line_font.size <= s(20):
+                    break
+                line_font = CASE_LAYOUT.load_font(line_font.size - 1, bold=False)
+            CASE_LAYOUT.draw_text_with_fallback(draw, (project_x, line_y), line_text, line_font, ink)
+            line_y += title_line_h
+    else:
+        while True:
+            pb = CASE_LAYOUT.textbbox_with_fallback(draw, (0, 0), meta["project"], project_font, fill=ink)
+            if (pb[2] - pb[0]) <= max_project_w or project_font.size <= s(20):
+                break
+            project_font = CASE_LAYOUT.load_font(project_font.size - 1, bold=False)
+        if meta["project"]:
+            CASE_LAYOUT.draw_text_with_fallback(draw, (project_x, project_y), meta["project"], project_font, ink)
 
     y = header_h + s(8)
     rendered_count = 0

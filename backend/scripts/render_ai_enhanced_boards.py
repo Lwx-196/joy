@@ -1188,6 +1188,13 @@ def main() -> None:
             _title_date = _meta["date"] if _meta["date"] != treatment else ""
             board_title = " ".join(
                 x for x in (customer, _title_date, _meta["project"]) if x)
+            # 标题方案 B（owner 拍板 2026-06-11）：结构化行同步进 manifest；
+            # 解析 fail-open → None（原串 title 字段不动，下游回退单行）
+            try:
+                board_title_lines = render_mod.parse_title_b(
+                    _meta["project"], customer=customer)
+            except Exception:
+                board_title_lines = None
             print(f"\n{'=' * 50}")
             print(f"  {customer} / {treatment}")
 
@@ -1326,6 +1333,7 @@ def main() -> None:
                         qa_result = {"qa_verdict": "unavailable", "qa_held": True}
                 results.append({
                     "customer": customer, "treatment": treatment, "title": board_title,
+                    "title_lines": board_title_lines,
                     "status": status, "board": str(out_path), **stats, **qa_result,
                     "angle_gate": angle_gate, "pair_gate": pair_gate,
                     "closeup_regions": (manifest.get("closeup_section") or {}).get("regions"),
