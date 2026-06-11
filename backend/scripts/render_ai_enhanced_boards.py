@@ -66,6 +66,7 @@ _SIBLING_TASKS_DIRS = [
 
 PROVIDER_ENV_FILES = {
     "ai_studio": "t52_vlm_judge.local.env",
+    "rsta": "rsta_image.local.env",
     "tuzi": "tuzi_image.local.env",
     "flashapi": "flashapi_image.local.env",
     "77code": "77code_image.local.env",
@@ -73,6 +74,7 @@ PROVIDER_ENV_FILES = {
 }
 
 PROVIDER_PREFIX_REMAP = {
+    "rsta": "PANEL_IMG_RSTA",
     "flashapi": "PANEL_IMG_FLASHAPI",
     "77code": "PANEL_IMG_77CODE",
 }
@@ -1062,8 +1064,9 @@ def main() -> None:
     parser.add_argument("--cases-root", type=Path, default=DEFAULT_CASES_ROOT)
     parser.add_argument("--output-dir", type=Path, default=Path("/tmp/ai-enhance-boards"))
     parser.add_argument("--brand", default="fumei")
-    parser.add_argument("--provider-order", default="tuzi,flashapi,77code",
-                        help="逗号分隔的 provider 优先级（默认: tuzi,flashapi,77code）")
+    parser.add_argument("--provider-order", default="rsta,tuzi,flashapi,77code",
+                        help="逗号分隔的 provider 优先级（默认: rsta,tuzi,flashapi,77code，"
+                             "owner 2026-06-11 拍板 rsta 升第一选择；rsta 实测 size/quality 透传 2048²）")
     parser.add_argument("--customers", default="",
                         help="逗号分隔的客户名筛选（空=全部）")
     parser.add_argument("--dry-run", action="store_true",
