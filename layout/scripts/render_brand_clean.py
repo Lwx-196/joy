@@ -1891,22 +1891,32 @@ def whiten_background(img: Image.Image) -> Image.Image:
     return img
 
 
-def prepare_closeup_group(manifest: dict, size: tuple[int, int]) -> dict | None:
+def prepare_closeup_group(manifest: dict, size: tuple[int, int], scale_fn=None) -> dict | None:
     """G3 纹类近景对比区：manifest["closeup_section"] → 板尾 prepared group。
 
     section 由 backend board_closeup_section 构建（front 源图 clarity 近景裁剪）。
-    cell 用 ImageOps.fit cover 到与角度行同尺寸（近景无需人脸眼距对齐）。
+    cell 尺寸优先用 section["cell_aspect"]（宽带纹类法令纹/额纹 = 横版 800x516，
+    owner 拍板 2026-06-11，与正面行视觉区分）；缺失/非法 fail-open 回退角度行
+    尺寸 size（旧 manifest 字节不变）。cell 用 ImageOps.fit cover（无需眼距对齐）。
     任何缺失/损坏 fail-open 返回 None，板照常出——近景是增益不是门槛。
     """
     section = manifest.get("closeup_section")
     if not isinstance(section, dict):
         return None
     try:
+        cell_size = size
+        ca = section.get("cell_aspect")
+        try:
+            if scale_fn is not None and isinstance(ca, (list, tuple)) and len(ca) == 2 \
+                    and int(ca[0]) > 0 and int(ca[1]) > 0:
+                cell_size = (scale_fn(int(ca[0])), scale_fn(int(ca[1])))
+        except Exception:
+            cell_size = size  # fail-open 回退角度行尺寸
         cells = {}
         for side in ("before", "after"):
             p = Path(str(section[f"{side}_path"]))
             with Image.open(p) as img:
-                cells[side] = ImageOps.fit(img.convert("RGB"), size, method=Image.LANCZOS)
+                cells[side] = ImageOps.fit(img.convert("RGB"), cell_size, method=Image.LANCZOS)
         label = str(section.get("label") or "").strip()
         return {
             "name": "closeup_section",
@@ -2043,17 +2053,23 @@ def render_from_manifest(manifest: dict, out_path: Path, *, after_transform=None
             prepared_groups.append({"name": group["name"], "slots": slots})
 
     # G3 纹类近景对比区：manifest["closeup_section"] 存在则板尾追加一行。
-    # cell 与角度行同尺寸 → 高度公式零改动；fail-open 失败不挡板。
-    closeup_group = prepare_closeup_group(manifest, (image_w, image_h))
+    # cell 尺寸由 section["cell_aspect"] 决定（宽带纹类横版），缺失回退角度行尺寸。
+    closeup_group = prepare_closeup_group(manifest, (image_w, image_h), s)
     if closeup_group:
         prepared_groups.append(closeup_group)
 
     if not prepared_groups:
         raise ValueError("没有可渲染的角度槽位")
 
-    total_sections = sum(len(group["slots"]) for group in prepared_groups)
-    section_body_h = image_h + s(78)
-    board_h = header_h + total_sections * (section_title_h + section_body_h) + section_gap * (total_sections - 1) + footer_h + pad * 2
+    # board_h 按 slot 实际高度累计（G3 横版近景 cell 比角度行矮）。全行同高时
+    # sum == total_sections * (image_h + s(78))，与旧公式恒等——角度行像素字节不变。
+    slot_body_hs = [
+        max(slot["before"].height, slot["after"].height) + s(78)
+        for group in prepared_groups
+        for slot in group["slots"]
+    ]
+    total_sections = len(slot_body_hs)
+    board_h = header_h + total_sections * section_title_h + sum(slot_body_hs) + section_gap * (total_sections - 1) + footer_h + pad * 2
     canvas = Image.new("RGB", (board_w, board_h), bg)
     draw = ImageDraw.Draw(canvas)
 

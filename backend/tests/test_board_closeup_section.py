@@ -50,6 +50,28 @@ def test_section_label_display_names():
     assert closeup.section_label(["川字", "法令纹"]) == "川字纹、法令纹"
 
 
+# ---------- cell_aspect_for（宽带纹类横版，owner 拍板 2026-06-11） ----------
+
+
+def test_cell_aspect_wide_for_faling_and_ewen():
+    assert closeup.cell_aspect_for(["法令纹"]) == closeup.CELL_ASPECT_WIDE
+    assert closeup.cell_aspect_for(["额纹"]) == closeup.CELL_ASPECT_WIDE
+
+
+def test_cell_aspect_vertical_for_chuanzi_only():
+    # 川字是小中央区，竖版已验可读（曾玲莉 e2e），保持现状
+    assert closeup.cell_aspect_for(["川字"]) == closeup.CELL_ASPECT
+
+
+def test_cell_aspect_mixed_goes_wide():
+    # union mask 含宽带区时 bbox 必然横宽
+    assert closeup.cell_aspect_for(["川字", "法令纹"]) == closeup.CELL_ASPECT_WIDE
+
+
+def test_cell_aspect_empty_defaults_vertical():
+    assert closeup.cell_aspect_for([]) == closeup.CELL_ASPECT
+
+
 # ---------- expand_to_aspect ----------
 
 
@@ -94,6 +116,16 @@ def test_expand_to_aspect_degenerate_raises():
         closeup.expand_to_aspect((100, 100, 100, 200), (1000, 1000))
 
 
+def test_expand_to_aspect_wide_keeps_band_local():
+    # G3 根因锚定（郭璟琳法令纹量纲）：宽带 bbox 1968x576 @ 图 3936x2624，
+    # 竖版 cell 高顶到全脸；横版 aspect 下高度收在局部带（< 图高 60%）
+    wide = closeup.CELL_ASPECT_WIDE
+    box = closeup.expand_to_aspect((984, 1024, 2952, 1600), (3936, 2624), aspect=wide)
+    left, top, right, bottom = box
+    assert abs(_aspect(box) - wide[0] / wide[1]) < 0.01
+    assert (bottom - top) < 2624 * 0.6  # 不再渲成全脸高
+
+
 # ---------- build_closeup_assets（重依赖 monkeypatch） ----------
 
 
@@ -133,11 +165,28 @@ def test_build_closeup_assets_happy_path(monkeypatch, tmp_path):
     assert got is not None
     assert got["regions"] == ["川字"]
     assert got["label"] == "川字纹"
+    assert got["cell_aspect"] == list(closeup.CELL_ASPECT)  # 川字竖版现状
     for side in ("before_path", "after_path"):
         crop_path = Path(got[side])
         assert crop_path.is_file()
         with Image.open(crop_path) as img:
             assert abs((img.width / img.height) - TARGET) < 0.02
+
+
+def test_build_closeup_assets_wide_region_horizontal_crop(monkeypatch, tmp_path):
+    # 法令纹 → 横版 cell_aspect 进 section dict，裁剪比例 ≈ 800/516
+    _patch_pipeline(monkeypatch, tmp_path, bbox=(100, 600, 1100, 900))
+    before = _make_src(tmp_path, "before.jpg")
+    after = _make_src(tmp_path, "after.jpg")
+
+    got = closeup.build_closeup_assets(before, after, ["法令纹"], tmp_path / "work")
+
+    assert got is not None
+    assert got["cell_aspect"] == list(closeup.CELL_ASPECT_WIDE)
+    wide_target = closeup.CELL_ASPECT_WIDE[0] / closeup.CELL_ASPECT_WIDE[1]
+    for side in ("before_path", "after_path"):
+        with Image.open(got[side]) as img:
+            assert abs((img.width / img.height) - wide_target) < 0.02
 
 
 def test_build_closeup_assets_missing_source_fail_open(monkeypatch, tmp_path):
