@@ -37,6 +37,10 @@ class ImageProvider:
     # rsta 实测边界：最长边 ≤3840 且总像素 ≤~8.3MP；方形输入安全最大 2560x2560（2880² 中转掐死）。
     sizes: tuple[str, ...] = ()
     quality: str = ""   # gpt-image 系 quality 参数（如 "high"）；空=不传，随 sizes 档一起发
+    # stream=true（SSE）破 rsta 反代 60s read timeout（2026-06-12 探针实锤：同步模式生成期
+    # 零字节 → 60.2-60.3s 整被掐；stream 模式首事件 12.9s、keepalive 每 10-30s 重置反代计时，
+    # 122s 拿到完整 2048² b64）。不进 AI cache key——只改传输方式，不影响产物语义。
+    stream: bool = False
 
     @property
     def ready(self) -> bool:
@@ -81,6 +85,7 @@ def _seed_from_prefix(env: dict[str, str], name: str, prefix: str) -> ImageProvi
         timeout_ms=int(timeout) if timeout and timeout.isdigit() else DEFAULT_TIMEOUT_MS,
         sizes=sizes,
         quality=env.get(f"{prefix}_QUALITY", "").strip(),
+        stream=env.get(f"{prefix}_STREAM", "").strip().lower() in ("1", "true", "yes"),
     )
 
 
@@ -295,10 +300,12 @@ def images_edit(provider: ImageProvider, image_bytes: bytes, prompt: str,
     for extra in _size_rungs(provider):
         files = {"image": ("input.jpg", image_bytes, mime)}
         data = {"prompt": prompt, "model": provider.model, "n": "1", **extra}
+        if provider.stream:
+            data["stream"] = "true"
         r = session.post(
             f"{provider.base_url}/images/edits",
             headers={"Authorization": f"Bearer {provider.api_key}"},
-            files=files, data=data, timeout=timeout_s,
+            files=files, data=data, timeout=timeout_s, stream=provider.stream,
         )
         if r.status_code != 200:
             err = RuntimeError(f"{provider.name} images/edits HTTP {r.status_code}: {r.text[:300]}")
@@ -308,6 +315,13 @@ def images_edit(provider: ImageProvider, image_bytes: bytes, prompt: str,
                 last_size_err = err
                 continue
             raise err
+        if provider.stream and "text/event-stream" in (r.headers.get("content-type") or ""):
+            b64 = _sse_collect_b64(r.iter_lines())
+            if b64:
+                import base64
+                return base64.b64decode(b64)
+            raise RuntimeError(f"{provider.name} images/edits stream ended without b64_json")
+        # stream 开但上游忽略参数返 JSON（或 stream 关）→ 走原同步解析
         item = (r.json().get("data") or [{}])[0]
         if item.get("b64_json"):
             import base64
@@ -339,6 +353,36 @@ def _is_size_rejection(status_code: int, body: str) -> bool:
         return False
     t = (body or "").lower()
     return "invalid size" in t or "pixel budget" in t or "image_generation_user_error" in t
+
+
+def _sse_collect_b64(lines) -> str | None:
+    """从 SSE 字节行流收集最终图 b64（纯函数可单测）。
+
+    rsta stream=true 实测形态（2026-06-12 探针）：keepalive 注释行 b":" 维持连接；data 行
+    兼容两形态——顶层 b64_json（partial/final chat 风格）或 type=*completed 事件。
+    completed / [DONE] 提前收口；流自然结束取最后一次见到的 b64。无图返回 None。
+    """
+    import json
+
+    final_b64: str | None = None
+    for line in lines:
+        if not line or not line.startswith(b"data:"):
+            continue  # 空行 / b":" keepalive / event: 行
+        payload = line[len(b"data:"):].strip()
+        if payload == b"[DONE]":
+            break
+        try:
+            obj = json.loads(payload)
+        except ValueError:
+            continue
+        if not isinstance(obj, dict):
+            continue
+        if obj.get("b64_json"):
+            final_b64 = obj["b64_json"]
+        if str(obj.get("type", "")).endswith("completed"):
+            final_b64 = obj.get("b64_json") or final_b64
+            break
+    return final_b64
 
 
 def generate_with_fallback(providers: list[ImageProvider], image_bytes: bytes, prompt: str,
