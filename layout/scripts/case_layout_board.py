@@ -3592,7 +3592,7 @@ def render_body_board(manifest: dict, out_path: Path) -> Path:
         raise ValueError("身体/颈纹案例缺少可渲染 section")
 
     args = [
-        "python3",
+        sys.executable,
         str(BODY_RENDER_SCRIPT),
         "--brand",
         manifest["brand"]["id"],
