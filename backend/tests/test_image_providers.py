@@ -172,3 +172,25 @@ def test_sse_collect_b64_skips_malformed_json():
 
 def test_sse_collect_b64_no_image_returns_none():
     assert ip._sse_collect_b64([b":", b"", b'data: {"type": "ping"}']) is None
+
+
+def test_sse_collect_b64_deadline_exceeded_raises():
+    # keepalive 重置 read timeout → 墙钟是唯一兜底；deadline 已过 + 流还在吐 keepalive = 必须抛
+    import itertools, pytest
+    endless_keepalives = itertools.repeat(b":")
+    with pytest.raises(TimeoutError, match="wall-clock cap"):
+        ip._sse_collect_b64(endless_keepalives, deadline=-1.0)
+
+
+def test_sse_collect_b64_within_deadline_ok():
+    import time
+    lines = [b":", b'data: {"type": "image_edit.completed", "b64_json": "FFF"}']
+    assert ip._sse_collect_b64(lines, deadline=time.monotonic() + 60) == "FFF"
+
+
+def test_sse_collect_b64_error_event_raises_with_detail():
+    # rsta 实测：上游错误以 SSE error 事件透传（2026-06-12 探针 server_error）→ 浮出详情
+    import pytest
+    lines = [b":", b'data: {"type": "error", "error": {"type": "server_error", "message": "boom"}}']
+    with pytest.raises(RuntimeError, match="server_error"):
+        ip._sse_collect_b64(lines)
