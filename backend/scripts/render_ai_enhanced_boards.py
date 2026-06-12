@@ -40,7 +40,10 @@ logger = logging.getLogger(__name__)
 SKILL_ROOT = Path.home() / "Desktop" / "飞书Claude" / "skills" / "case-layout-board" / "scripts"
 DEFAULT_CASES_ROOT = Path.home() / "Desktop" / "案例生成器" / "incoming" / "无创案例库" / "无创注射案例库"
 
-ENHANCE_PROMPT_V1 = (
+# v2（2026-06-12，defect③(c) owner 拍板 a+b+c）：曾玲莉 front 增强坐实局部重绘色块
+# （低频 diff>25 占 9.5% 像素遍布全脸）→ 新增禁局部重绘/重着色/肤色漂移条款。
+# 注意：prompt 文本进 _ai_cache_key，改文本 = 换 key = 全量重烧，勿随意微调措辞。
+ENHANCE_PROMPT_V2 = (
     "CRITICAL: Preserve patient identity exactly. The output must look like a REAL photograph "
     "of the SAME PERSON, not an AI-generated portrait.\n\n"
     "Task: Subtle quality enhancement for this post-treatment clinical photo.\n"
@@ -52,6 +55,10 @@ ENHANCE_PROMPT_V1 = (
     "- Maintain iPhone-native photo realism — the result should look like "
     "a better-lit version of the same photo, not an AI render\n"
     "- Keep natural skin redness, blood color undertones, pore visibility\n"
+    "- Keep the OVERALL skin tone and lighting IDENTICAL to the source photo — "
+    "no tone shift, no local color patches\n"
+    "- Apply all adjustments GLOBALLY and uniformly across the frame; NEVER locally "
+    "repaint, re-render, or recolor any region of the face or skin\n"
     "- Only adjust: subtle fill-light on shadow side, minor color temperature normalization\n"
     "Output a photograph indistinguishable from a real clinical photo taken with better lighting."
 )
@@ -1375,7 +1382,7 @@ def main() -> None:
                         )
                     enhance_dir = args.output_dir / ".fullres-enhance" / customer
                     _enhance_manifest_sources(
-                        manifest, providers, ENHANCE_PROMPT_V1, stats,
+                        manifest, providers, ENHANCE_PROMPT_V2, stats,
                         enhance_dir=enhance_dir, use_cache=not args.no_cache,
                         focus_targets=focus_targets, mask_lock=args.mask_lock,
                     )

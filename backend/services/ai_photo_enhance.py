@@ -23,7 +23,9 @@ from .image_providers import (
 
 logger = logging.getLogger(__name__)
 
-ENHANCE_PROMPT_V1 = (
+# v2（2026-06-12，defect③(c) owner 拍板）：与 render_ai_enhanced_boards.py 同步升级，
+# 新增禁局部重绘/重着色/肤色漂移条款。prompt 文本进 AI cache key，勿随意微调措辞。
+ENHANCE_PROMPT_V2 = (
     "CRITICAL: Preserve patient identity exactly. The output must look like a REAL photograph "
     "of the SAME PERSON, not an AI-generated portrait.\n\n"
     "Task: Subtle quality enhancement for this post-treatment clinical photo.\n"
@@ -35,6 +37,10 @@ ENHANCE_PROMPT_V1 = (
     "- Maintain iPhone-native photo realism — the result should look like "
     "a better-lit version of the same photo, not an AI render\n"
     "- Keep natural skin redness, blood color undertones, pore visibility\n"
+    "- Keep the OVERALL skin tone and lighting IDENTICAL to the source photo — "
+    "no tone shift, no local color patches\n"
+    "- Apply all adjustments GLOBALLY and uniformly across the frame; NEVER locally "
+    "repaint, re-render, or recolor any region of the face or skin\n"
     "- Only adjust: subtle fill-light on shadow side, minor color temperature normalization\n"
     "Output a photograph indistinguishable from a real clinical photo taken with better lighting."
 )
@@ -68,7 +74,7 @@ def enhance_after_photo(
     image_path: Path,
     env: dict[str, str] | None = None,
     *,
-    prompt: str = ENHANCE_PROMPT_V1,
+    prompt: str = ENHANCE_PROMPT_V2,
     max_long_edge: int = MAX_LONG_EDGE,
     provider_order: list[str] | None = None,
 ) -> tuple[bytes, str]:
@@ -100,7 +106,7 @@ def enhance_after_photo(
 
 
 __all__ = [
-    "ENHANCE_PROMPT_V1",
+    "ENHANCE_PROMPT_V2",
     "MAX_LONG_EDGE",
     "prepare_image",
     "enhance_after_photo",
