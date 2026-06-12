@@ -32,7 +32,7 @@ import time
 from io import BytesIO
 from pathlib import Path
 
-from PIL import Image
+from PIL import Image, ImageFilter
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -205,10 +205,18 @@ def _chain_size_sig(providers) -> str:
 
 
 def _pad_to_square(img: Image.Image) -> tuple[Image.Image, tuple[int, int, int, int]]:
-    """把非正方形图 pad 成正方形（居中，黑色填充）。
+    """把非正方形图 pad 成正方形（居中，模糊背景填充）。
 
     gpt-image-2 会把输出强制为正方形，如果输入非正方形，内容会被缩放嵌入导致
     人物变小。pad 成正方形后输入输出尺寸一致，避免内容缩放。
+
+    填充改进（owner 2026-06-12 拍板 d，根治构图漂移）：纯黑 letterbox 会被模型
+    当"非内容"吃掉并重新构图——曾玲莉 front rsta 2560²+V2 两次重烧均人物放大
+    +提亮（dL +19~27）实锤；6-12 批量 57 槽中横版 18 槽同机制暴露。改用源图
+    cover 缩放 + 强高斯模糊填充，模型视为自然背景延续、保持原构图。pad 区在
+    _restore_content_geometry 裁回时丢弃，不进最终像素。
+    ⚠️ 填充字节变 = _ai_cache_key 变：非方形源图旧缓存全部失效（方形不受影响），
+    重烧需 owner 算账拍板后执行。
 
     返回 (padded_img, crop_box)，crop_box 用于增强后裁回原始尺寸。
     """
@@ -216,7 +224,16 @@ def _pad_to_square(img: Image.Image) -> tuple[Image.Image, tuple[int, int, int, 
     if w == h:
         return img, (0, 0, w, h)
     side = max(w, h)
-    padded = Image.new("RGB", (side, side), (0, 0, 0))
+    # 模糊底在 256² 小图上构造再放大（大半径模糊的降采样近似，快一个数量级）：
+    # cover 缩放到 256² → 高斯模糊 → 放大到 side²
+    bg_s = 256
+    scale = bg_s / min(w, h)
+    sw, sh = max(bg_s, round(w * scale)), max(bg_s, round(h * scale))
+    small = img.resize((sw, sh), Image.BILINEAR)
+    left, top = (sw - bg_s) // 2, (sh - bg_s) // 2
+    small = small.crop((left, top, left + bg_s, top + bg_s))
+    small = small.filter(ImageFilter.GaussianBlur(radius=8))
+    padded = small.resize((side, side), Image.BILINEAR).convert("RGB")
     offset_x = (side - w) // 2
     offset_y = (side - h) // 2
     padded.paste(img, (offset_x, offset_y))

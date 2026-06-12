@@ -83,3 +83,39 @@ def test_landscape_source_nonsquare_return():
 
     assert out.size == (400, 300)
     assert abs(_stripe_width_frac(out) - 0.25) < 0.03
+
+
+# ---- letterbox 填充改进（2026-06-12 owner 拍板 d：纯黑→模糊背景，根治构图漂移） ----
+
+
+def test_pad_fill_is_blurred_content_not_black():
+    """pad 区 = 模糊背景延续（非纯黑），内容区像素逐字节不变。"""
+    src = Image.new("RGB", (400, 300), (200, 120, 80))
+    padded, crop_box = _pad_to_square(src)
+
+    assert padded.size == (400, 400)
+    # 内容区像素逐字节不变（送 AI 的内容保真）
+    assert padded.crop(crop_box).tobytes() == src.tobytes()
+    # pad 区（上条带）不再是纯黑，且色调接近内容（模糊延续）
+    top_band = padded.crop((0, 0, 400, crop_box[1]))
+    px = list(top_band.getdata())
+    assert not any(p == (0, 0, 0) for p in px), "pad 区出现纯黑像素 = 回退旧行为"
+    avg = tuple(sum(c[i] for c in px) / len(px) for i in range(3))
+    assert abs(avg[0] - 200) < 30 and abs(avg[1] - 120) < 30 and abs(avg[2] - 80) < 30, (
+        f"pad 区色调偏离内容: avg={avg}")
+
+
+def test_pad_fill_deterministic():
+    """同输入 → pad 后字节逐位相同（_ai_cache_key 稳定性前提）。"""
+    src = _vstripe(300, 400)
+    p1, _ = _pad_to_square(src)
+    p2, _ = _pad_to_square(src)
+    assert p1.tobytes() == p2.tobytes()
+
+
+def test_square_input_passthrough_zero_rebake():
+    """方形输入原样返回（字节不变 = cache key 不变 = 零重烧）。"""
+    src = _vstripe(400, 400)
+    padded, crop_box = _pad_to_square(src)
+    assert padded is src
+    assert crop_box == (0, 0, 400, 400)
