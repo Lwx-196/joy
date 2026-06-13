@@ -39,6 +39,14 @@ CELL_ASPECT: tuple[int, int] = (516, 624)
 CELL_ASPECT_WIDE: tuple[int, int] = (800, 516)
 WIDE_REGION_KEYS: tuple[str, ...] = ("法令纹", "额纹")
 
+# 窄中央纹近景带（owner 拍板 2026-06-14）：川字类收紧到 800×420（占源高 ~29%），
+# 有效孤立治疗区与其他部位。比 WIDE 更扁，配合下移对中（见 NARROW_CENTER_SHIFT_FRAC）。
+CELL_ASPECT_NARROW: tuple[int, int] = (800, 420)
+NARROW_STRIP_KEYS: tuple[str, ...] = ("川字",)
+# 川字 mask 椭圆含上中线点 9 → 质心偏额头（探针实测 bbox 中心在眉间之上）；
+# 裁剪中心向下偏 = 占crop高的比例，把眉间真川字从底边拉回画面（探针 variant C 验证 0.10 framing 正确）
+NARROW_CENTER_SHIFT_FRAC = 0.10
+
 # bbox 外扩比例：纹是细长区域，留足上下文（额头/眉/鼻周）近景才可定位部位
 CROP_PAD_FRAC = 0.35
 
@@ -69,17 +77,30 @@ def cell_aspect_for(regions: list[str]) -> tuple[int, int]:
     """
     if any(r in WIDE_REGION_KEYS for r in regions):
         return CELL_ASPECT_WIDE
+    if any(r in NARROW_STRIP_KEYS for r in regions):
+        return CELL_ASPECT_NARROW
     return CELL_ASPECT
+
+
+def center_shift_for(regions: list[str]) -> float:
+    """近景裁剪中心下移比例（占 crop 高）。宽版优先不偏；川字类下移到眉间真纹。"""
+    if any(r in WIDE_REGION_KEYS for r in regions):
+        return 0.0
+    if any(r in NARROW_STRIP_KEYS for r in regions):
+        return NARROW_CENTER_SHIFT_FRAC
+    return 0.0
 
 
 def expand_to_aspect(
     bbox: tuple[int, int, int, int],
     image_size: tuple[int, int],
     aspect: tuple[int, int] = CELL_ASPECT,
+    center_shift_frac: float = 0.0,
 ) -> tuple[int, int, int, int]:
     """把 bbox 外扩成目标宽高比并 clamp 进图界（保中心、不变形）。
 
     超界时收缩另一边保比例，再平移中心进界——输出恒为合法 crop box。
+    center_shift_frac>0 把裁剪中心按 crop 高的该比例向下偏（消 mask 质心偏高，见川字）。
     """
     left, top, right, bottom = bbox
     img_w, img_h = image_size
@@ -103,7 +124,7 @@ def expand_to_aspect(
         w = h * target
 
     cx = (left + right) / 2.0
-    cy = (top + bottom) / 2.0
+    cy = (top + bottom) / 2.0 + h * center_shift_frac
     new_left = min(max(0.0, cx - w / 2.0), img_w - w)
     new_top = min(max(0.0, cy - h / 2.0), img_h - h)
     return (
@@ -139,6 +160,7 @@ def build_closeup_assets(
 
         work_dir = Path(work_dir)
         aspect = cell_aspect_for(regions)
+        shift = center_shift_for(regions)
         out: dict[str, str] = {}
         for side, src in (("before", Path(before_path)), ("after", Path(after_path))):
             side_dir = work_dir / side
@@ -154,7 +176,7 @@ def build_closeup_assets(
                 # L-145：EXIF 朝向先归一再裁剪（增强产物 PNG 无 EXIF = no-op；
                 # K-1 回退原 JPEG 时归一到与 mask 同一坐标系）
                 img = ImageOps.exif_transpose(img)
-                crop_box = expand_to_aspect(tuple(bbox), img.size, aspect=aspect)
+                crop_box = expand_to_aspect(tuple(bbox), img.size, aspect=aspect, center_shift_frac=shift)
                 crop = img.convert("RGB").crop(crop_box)
             crop_path = side_dir / "closeup.png"
             crop.save(crop_path)
