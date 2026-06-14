@@ -1576,7 +1576,7 @@ export const simulateCaseGroupAfter = (
 
 // ---------- Phase 3: render queue ----------
 
-export type RenderStatus = "queued" | "running" | "done" | "done_with_issues" | "blocked" | "failed" | "cancelled" | "undone";
+export type RenderStatus = "queued" | "running" | "done" | "done_with_issues" | "blocked" | "needs_confirmation" | "failed" | "cancelled" | "undone";
 export type RenderQualityStatus = "done" | "done_with_issues" | "blocked";
 
 export type Brand = "fumei" | "shimei";
@@ -1611,6 +1611,12 @@ export interface RenderJob {
      * held_gate=angle|pair → 「质量保留」而非渲染失败；held_reason=门级原因（后端协议串，不抽 i18n）。 */
     held_gate?: string;
     held_reason?: string;
+    /** F2 frugal-cache-guard：status='needs_confirmation' 时，cache-miss 缺槽数/总槽数 +
+     * 预估烧钱($)/耗时(s)，前端弹确认卡，用户「确认出图」后带 confirm_burn 重烧。 */
+    cache_miss_count?: number;
+    cache_miss_total?: number;
+    cache_miss_est_cost_usd?: number | null;
+    cache_miss_est_seconds?: number | null;
 	    composition_alerts?: CompositionAlert[];
 	    run_id?: string | null;
 	    code_version?: Record<string, unknown>;
@@ -1728,6 +1734,9 @@ export interface EnqueueRenderPayload {
     enhance_direction?: string;
     enhance_model?: string;
   };
+  /** F2 frugal-cache-guard：cache-miss 确认卡点「确认出图」时带 true → 后端授权真烧 API。
+   * 默认省略（false）→ cache-miss 走预判护栏返 needs_confirmation 不静默烧钱。 */
+  confirm_burn?: boolean;
 }
 
 export const enqueueRender = (id: number, payload: EnqueueRenderPayload = {}) =>

@@ -5,6 +5,7 @@
     "done": "已完成",
     "doneWithIssues": "完成需复核",
     "blocked": "质量阻塞",
+    "needsConfirmation": "待确认",
     "failed": "失败",
     "cancelled": "已取消",
     "undone": "已撤销"
@@ -36,6 +37,16 @@
       "angle": "角度覆盖门",
       "pair": "配对一致性门"
     }
+  },
+  "cacheMiss": {
+    "title": "首次出图需调用 API",
+    "hint": "该案例尚无可复用的增强缓存：本次需调用图像 API 生成 {{count}}/{{total}} 个槽位，预计花费 ~{{cost}}、耗时 ~{{time}}。确认出图将真实消耗 API 额度。",
+    "minutes": "{{n}} 分钟",
+    "seconds": "{{n}} 秒",
+    "confirmButton": "确认出图",
+    "confirmTitle": "确认后调用图像 API 生成缺失槽位（消耗额度）",
+    "cancelButton": "取消",
+    "dismissed": "已取消本次出图（未消耗 API 额度）"
   },
   "composition": {
     "title": "构图提示",

@@ -43,6 +43,7 @@ const STATUS_BG: Record<string, { bg: string; fg: string }> = {
   done: { bg: "var(--ok-50, #DCFCE7)", fg: "var(--ok)" },
   done_with_issues: { bg: "var(--amber-50)", fg: "var(--amber-ink)" },
   blocked: { bg: "var(--err-50)", fg: "var(--err)" },
+  needs_confirmation: { bg: "var(--amber-50)", fg: "var(--amber-ink)" },
   failed: { bg: "var(--err-50)", fg: "var(--err)" },
   cancelled: { bg: "var(--bg-2)", fg: "var(--ink-3)" },
   undone: { bg: "var(--bg-2)", fg: "var(--ink-3)" },
@@ -102,6 +103,9 @@ export function RenderStatusCard({ caseId, brand: brandOverride, caseAbsPath }: 
   const [previewOpen, setPreviewOpen] = useState(false);
   const [failedPreviewUrl, setFailedPreviewUrl] = useState<string | null>(null);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
+  // F2 frugal-cache-guard：cache-miss 确认卡「取消」= 本地消解。该 job 是终态且零烧钱
+  // （预判护栏未调 API），后端无可取消状态；用户确认后才以 confirm_burn 重烧。
+  const [cacheMissDismissed, setCacheMissDismissed] = useState(false);
 
   const statusLabelMap: Record<string, string> = {
     queued: t("status.queued"),
@@ -109,6 +113,7 @@ export function RenderStatusCard({ caseId, brand: brandOverride, caseAbsPath }: 
     done: t("status.done"),
     done_with_issues: t("status.doneWithIssues"),
     blocked: t("status.blocked"),
+    needs_confirmation: t("status.needsConfirmation"),
     failed: t("status.failed"),
     cancelled: t("status.cancelled"),
     undone: t("status.undone"),
@@ -121,6 +126,11 @@ export function RenderStatusCard({ caseId, brand: brandOverride, caseAbsPath }: 
     const t = setInterval(() => setTick((n) => n + 1), 1000);
     return () => clearInterval(t);
   }, [job?.status]);
+
+  // F2：换 job（确认重烧后产生新 job / 切 case）时重置 cache-miss 消解态。
+  useEffect(() => {
+    setCacheMissDismissed(false);
+  }, [job?.id]);
 
   // SSE: when a `done` event arrives for THIS case, open undo toast.
   // We track which job ids we've already toasted to avoid double-toasting on
@@ -173,6 +183,18 @@ export function RenderStatusCard({ caseId, brand: brandOverride, caseAbsPath }: 
   const heldReason = job.meta?.held_reason || job.error_message || null;
   const heldPreviewUrl =
     heldGate && job.output_path ? renderJobOutputUrl(caseId, job, caseAbsPath) : null;
+  // F2 frugal-cache-guard：cache-miss 缺槽/预估烧钱与耗时（来自后端 meta 透传）。
+  const cacheMissCount = job.meta?.cache_miss_count ?? 0;
+  const cacheMissTotal = job.meta?.cache_miss_total ?? 0;
+  const cacheMissCostUsd = job.meta?.cache_miss_est_cost_usd ?? null;
+  const cacheMissSeconds = job.meta?.cache_miss_est_seconds ?? null;
+  const cacheMissCostLabel = cacheMissCostUsd != null ? `$${cacheMissCostUsd.toFixed(2)}` : "—";
+  const cacheMissTimeLabel =
+    cacheMissSeconds == null
+      ? "—"
+      : cacheMissSeconds >= 60
+        ? t("cacheMiss.minutes", { n: Math.round(cacheMissSeconds / 60) })
+        : t("cacheMiss.seconds", { n: Math.round(cacheMissSeconds) });
   const heldImageFailed = heldPreviewUrl != null && failedPreviewUrl === heldPreviewUrl;
   const copyText = async (text: string, message: string) => {
     await navigator.clipboard.writeText(text);
@@ -561,6 +583,79 @@ export function RenderStatusCard({ caseId, brand: brandOverride, caseAbsPath }: 
             {t("actions.visionRetry")}
           </button>
           <RenderBlockingDetail job={job} />
+        </div>
+      )}
+
+      {/* F2 frugal-cache-guard: cache-miss 待确认烧钱 → amber 确认卡 */}
+      {status === "needs_confirmation" && (
+        <div style={{ fontSize: 12 }} data-testid="render-cache-miss">
+          {cacheMissDismissed ? (
+            <div style={{ color: "var(--ink-3)" }} data-testid="render-cache-miss-dismissed">
+              {t("cacheMiss.dismissed")}
+            </div>
+          ) : (
+            <>
+              <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", marginBottom: 6 }}>
+                <span
+                  className="badge"
+                  data-testid="render-cache-miss-badge"
+                  style={{ background: "var(--amber-50)", color: "var(--amber-ink)" }}
+                >
+                  {t("cacheMiss.title")}
+                </span>
+              </div>
+              <div
+                data-testid="render-cache-miss-hint"
+                style={{
+                  fontSize: 12,
+                  padding: 8,
+                  background: "var(--amber-50)",
+                  borderRadius: 4,
+                  color: "var(--amber-ink)",
+                  lineHeight: 1.5,
+                }}
+              >
+                {t("cacheMiss.hint", {
+                  count: cacheMissCount,
+                  total: cacheMissTotal,
+                  cost: cacheMissCostLabel,
+                  time: cacheMissTimeLabel,
+                })}
+              </div>
+              <div style={{ marginTop: 8, display: "flex", gap: 8, flexWrap: "wrap" }}>
+                <button
+                  type="button"
+                  className="btn sm primary"
+                  data-testid="render-cache-miss-confirm"
+                  onClick={() =>
+                    renderMut.mutate({
+                      caseId,
+                      payload: {
+                        brand: job.brand,
+                        template: job.template,
+                        semantic_judge: job.semantic_judge === "auto" ? "auto" : "off",
+                        confirm_burn: true,
+                      },
+                    })
+                  }
+                  disabled={renderMut.isPending}
+                  title={t("cacheMiss.confirmTitle")}
+                >
+                  <Ico name="image" size={11} />
+                  {t("cacheMiss.confirmButton")}
+                </button>
+                <button
+                  type="button"
+                  className="btn sm"
+                  data-testid="render-cache-miss-cancel"
+                  onClick={() => setCacheMissDismissed(true)}
+                  disabled={renderMut.isPending}
+                >
+                  {t("cacheMiss.cancelButton")}
+                </button>
+              </div>
+            </>
+          )}
         </div>
       )}
 

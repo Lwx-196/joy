@@ -5,6 +5,7 @@
     "done": "Done",
     "doneWithIssues": "Done with issues",
     "blocked": "Quality blocked",
+    "needsConfirmation": "Needs confirmation",
     "failed": "Failed",
     "cancelled": "Cancelled",
     "undone": "Undone"
@@ -36,6 +37,16 @@
       "angle": "Angle coverage gate",
       "pair": "Pairing consistency gate"
     }
+  },
+  "cacheMiss": {
+    "title": "First render calls the API",
+    "hint": "No reusable enhancement cache for this case: rendering will call the image API for {{count}}/{{total}} slots, est. ~{{cost}} and ~{{time}}. Confirming consumes real API quota.",
+    "minutes": "{{n}} min",
+    "seconds": "{{n}}s",
+    "confirmButton": "Render anyway",
+    "confirmTitle": "Call the image API to generate the missing slots (consumes quota)",
+    "cancelButton": "Cancel",
+    "dismissed": "Render cancelled (no API quota used)"
   },
   "composition": {
     "title": "Composition note",
