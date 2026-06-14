@@ -49,11 +49,12 @@ REGION_CLOSEUP_LAYOUT: dict[str, tuple[tuple[int, int], float]] = {
     "川字": (CELL_ASPECT_NARROW, NARROW_CENTER_SHIFT_FRAC),
     "额纹": (CELL_ASPECT_WIDE, 0.0),
     "法令纹": (CELL_ASPECT_WIDE, 0.0),
-    "泪沟": (CELL_ASPECT_UNDEREYE, 0.0),
-    "卧蚕": (CELL_ASPECT_UNDEREYE, 0.0),
-    "眼袋": (CELL_ASPECT_UNDEREYE, 0.0),
-    "苹果肌": (CELL_ASPECT_MIDFACE, 0.0),
-    "面颊": (CELL_ASPECT_MIDFACE, 0.0),
+    # 负 shift = 上移裁剪中心 = 头顶留白（owner 06-14：眼下/中脸带原本头顶顶格 → 居中）。
+    "泪沟": (CELL_ASPECT_UNDEREYE, -0.03),
+    "卧蚕": (CELL_ASPECT_UNDEREYE, -0.03),
+    "眼袋": (CELL_ASPECT_UNDEREYE, -0.03),
+    "苹果肌": (CELL_ASPECT_MIDFACE, -0.08),
+    "面颊": (CELL_ASPECT_MIDFACE, -0.08),
     "下巴": (CELL_ASPECT_LOWER, -0.05),
     "下颌线": (CELL_ASPECT_LOWER, -0.05),
     "唇": (CELL_ASPECT_LOWER, 0.0),
@@ -64,9 +65,11 @@ CLOSEUP_ELIGIBLE_FRONT: frozenset[str] = frozenset(REGION_CLOSEUP_LAYOUT)
 
 # aspect 解析优先序：紧凑 union 内若跨组，取最宽带的一档（expand_to_aspect 恒含 bbox，
 # 选宽带只决定追加上下文方向，不会切掉任何合格区）。
+# 苹果肌/面颊 排在 泪沟/卧蚕 之前：泪沟+苹果肌 同区时 union 由中脸带（更高/更低）主导，
+# 取中脸 aspect+headroom 才容得下并居中（owner 06-14 陈艺琼 居中）。
 _ASPECT_PRIORITY: tuple[str, ...] = (
-    "法令纹", "额纹", "川字", "泪沟", "卧蚕", "眼袋",
-    "苹果肌", "面颊", "下巴", "下颌线", "唇",
+    "法令纹", "额纹", "苹果肌", "面颊", "川字", "泪沟", "卧蚕", "眼袋",
+    "下巴", "下颌线", "唇",
 )
 
 # 近景 gate 阈值（owner 拍板 2026-06-14，覆盖率自动判，边界靠真实案例标定）：

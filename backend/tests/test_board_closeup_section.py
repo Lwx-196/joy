@@ -117,8 +117,20 @@ def test_center_shift_xiaba_up():
     assert closeup.center_shift_for(["下巴"]) < 0
 
 
-def test_center_shift_undereye_neutral():
-    assert closeup.center_shift_for(["泪沟"]) == 0.0
+def test_center_shift_undereye_headroom():
+    # 眼下带轻微上移留头顶白（owner 06-14 居中）
+    assert closeup.center_shift_for(["泪沟"]) < 0
+
+
+def test_center_shift_midface_more_headroom():
+    # 苹果肌/面颊 头顶留白更多（更高/更低带，陈艺琼 居中）
+    assert closeup.center_shift_for(["苹果肌"]) <= -0.08
+
+
+def test_pingguoji_dominates_undereye_for_aspect_and_shift():
+    # 泪沟+苹果肌 同区 → 中脸带主导（容得下 + 居中）
+    assert closeup.cell_aspect_for(["泪沟", "苹果肌"]) == closeup.CELL_ASPECT_MIDFACE
+    assert closeup.center_shift_for(["泪沟", "苹果肌"]) <= -0.08
 
 
 # ---------- expand_to_aspect ----------
