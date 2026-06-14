@@ -204,6 +204,65 @@ def _chain_size_sig(providers) -> str:
     return ""
 
 
+# gpt-image-2 原生尺寸约束（2026-04 规格，联网核实）：最长边 ≤3840、宽高均 16 的倍数、
+# 宽高比 ≤3:1、总像素 655,360–8,294,400。>2560×1440 官方标 experimental。
+GPT_IMAGE2_MAX_EDGE = 3840
+GPT_IMAGE2_MAX_PIXELS = 8_294_400
+GPT_IMAGE2_MIN_PIXELS = 655_360
+GPT_IMAGE2_MAX_AR = 3.0
+_ADAPTIVE_FALLBACK_SIZE = "2560x2560"
+
+
+def _adaptive_4k_enabled() -> bool:
+    """自适应 4K 开关（owner 翻开才生效）。默认 off = 旧 pad_to_square + 固定 size 行为字节一致。"""
+    return os.environ.get("CASE_WORKBENCH_ADAPTIVE_4K", "").strip().lower() in ("1", "true", "yes")
+
+
+def _adaptive_target_size(w: int, h: int) -> str:
+    """按源图比例取「贴 4K 预算上限」的合法 gpt-image-2 尺寸（同比例，不强制方形）。
+
+    横版源得横版 size、竖版得竖版——根治「固定竖版 size 把横版拉伸」。退化输入回退安全方形。
+    """
+    import math
+    if w <= 0 or h <= 0:
+        return _ADAPTIVE_FALLBACK_SIZE
+    # 1) 钳宽高比到 [1/3, 3]
+    if w / h > GPT_IMAGE2_MAX_AR:
+        h = round(w / GPT_IMAGE2_MAX_AR)
+    elif h / w > GPT_IMAGE2_MAX_AR:
+        w = round(h / GPT_IMAGE2_MAX_AR)
+    # 2) 放大到「最长边=3840」或「像素=预算」的较紧约束
+    scale = min(GPT_IMAGE2_MAX_EDGE / max(w, h),
+                math.sqrt(GPT_IMAGE2_MAX_PIXELS / (w * h)))
+    tw = max(16, int(round(w * scale / 16)) * 16)
+    th = max(16, int(round(h * scale / 16)) * 16)
+    # 3) 16 取整可能越界 → 收边长再收预算
+    tw = min(tw, GPT_IMAGE2_MAX_EDGE)
+    th = min(th, GPT_IMAGE2_MAX_EDGE)
+    while tw * th > GPT_IMAGE2_MAX_PIXELS:
+        if tw >= th:
+            tw -= 16
+        else:
+            th -= 16
+    # 4) 极小源图低于像素下限 → 回退安全方形
+    if tw < 16 or th < 16 or tw * th < GPT_IMAGE2_MIN_PIXELS:
+        return _ADAPTIVE_FALLBACK_SIZE
+    return f"{tw}x{th}"
+
+
+def _restore_to_original(enh: Image.Image, orig_size: tuple[int, int]) -> Image.Image:
+    """自适应路径复原：模型返回比例与请求基本一致，cover 缩放 + 居中裁回原始尺寸，绝不拉伸。"""
+    ow, oh = orig_size
+    ew, eh = enh.size
+    if (ew, eh) == (ow, oh):
+        return enh
+    scale = max(ow / ew, oh / eh)
+    rw, rh = max(ow, round(ew * scale)), max(oh, round(eh * scale))
+    enh = enh.resize((rw, rh), Image.LANCZOS)
+    left, top = (rw - ow) // 2, (rh - oh) // 2
+    return enh.crop((left, top, left + ow, top + oh))
+
+
 def _pad_to_square(img: Image.Image) -> tuple[Image.Image, tuple[int, int, int, int]]:
     """把非正方形图 pad 成正方形（居中，模糊背景填充）。
 
@@ -1150,6 +1209,12 @@ def _enhance_manifest_sources(
     enhance_dir.mkdir(parents=True, exist_ok=True)
     ft = focus_targets or []
     size_sig = _chain_size_sig(providers)
+    adaptive_4k = _adaptive_4k_enabled()
+    # 自适应路径的 cache sig 用链中 hi-res quality（与 _chain_size_sig 同源），保证可复现
+    adaptive_quality = next((getattr(p, "quality", "") for p in providers
+                             if getattr(p, "quality", "")), "default")
+    if adaptive_4k:
+        logger.info("  [fullres] 自适应 4K 已启用（按源图比例动态 size，原图直送不 pad）")
 
     for group in manifest.get("groups", []):
         # defect① 修复（2026-06-11）：error 组跳过要 WARNING + skipped 计数，ok 组照常。
@@ -1177,10 +1242,19 @@ def _enhance_manifest_sources(
             orig_img = ImageOps.exif_transpose(Image.open(src_path)).convert("RGB")
             logger.info("  [fullres] %s: 源图 %dx%d → AI 增强", slot, *orig_img.size)
 
-            padded, crop_box = _pad_to_square(orig_img)
-            sq = padded.size[0]
-            png = _pil_to_png_bytes(padded)
-            cache_key = _ai_cache_key(png, prompt, size_sig)
+            if adaptive_4k:
+                # 自适应 4K：按源图比例算合法 4K size，原图直送（不 pad），size_override 透传。
+                # cache key 掺 per-image size（adaptive: 前缀，与旧方形 key 永不碰撞）。
+                target_size = _adaptive_target_size(*orig_img.size)
+                png = _pil_to_png_bytes(orig_img)
+                cache_key = _ai_cache_key(png, prompt, f"adaptive:{target_size}@{adaptive_quality}")
+                size_override = target_size
+            else:
+                padded, crop_box = _pad_to_square(orig_img)
+                sq = padded.size[0]
+                png = _pil_to_png_bytes(padded)
+                cache_key = _ai_cache_key(png, prompt, size_sig)
+                size_override = None
             cache_path = AI_CACHE_DIR / f"{cache_key}.png"
 
             t0 = time.time()
@@ -1189,11 +1263,15 @@ def _enhance_manifest_sources(
                     raw = cache_path.read_bytes()
                     prov = "cache"
                 else:
-                    raw, prov = generate_with_fallback(providers, png, prompt, mime="image/png")
+                    raw, prov = generate_with_fallback(providers, png, prompt,
+                                                       mime="image/png", size_override=size_override)
                     AI_CACHE_DIR.mkdir(parents=True, exist_ok=True)
                     cache_path.write_bytes(raw)
 
-                enh = _restore_content_geometry(_bytes_to_pil(raw), sq, crop_box, slot)
+                if adaptive_4k:
+                    enh = _restore_to_original(_bytes_to_pil(raw), orig_img.size)
+                else:
+                    enh = _restore_content_geometry(_bytes_to_pil(raw), sq, crop_box, slot)
 
                 elapsed = time.time() - t0
                 logger.info("  [fullres] %s: OK via %s (%.1fs) %dx%d",

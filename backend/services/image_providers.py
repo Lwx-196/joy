@@ -287,8 +287,12 @@ def ai_studio_generate_content(provider: ImageProvider, image_bytes: bytes, prom
 
 
 def images_edit(provider: ImageProvider, image_bytes: bytes, prompt: str,
-                *, mime: str = "image/jpeg") -> bytes:
-    """单次生图调用，返回生成图字节。失败抛异常。按 api_format 分派。"""
+                *, mime: str = "image/jpeg", size_override: str | None = None) -> bytes:
+    """单次生图调用，返回生成图字节。失败抛异常。按 api_format 分派。
+
+    size_override：每图动态尺寸（自适应 4K 用）。给定时忽略 provider.sizes，只发该尺寸
+    （仍带 provider.quality）+ 末档无 size 兜底。默认 None = 沿用 provider.sizes 旧行为。
+    """
     if provider.api_format == "ai_studio_generate_content":
         return ai_studio_generate_content(provider, image_bytes, prompt, mime=mime)
     if provider.api_format == "vertex_generate_content":
@@ -301,7 +305,7 @@ def images_edit(provider: ImageProvider, image_bytes: bytes, prompt: str,
     session = requests.Session()
     session.trust_env = False
     last_size_err: RuntimeError | None = None
-    for extra in _size_rungs(provider):
+    for extra in _size_rungs(provider, size_override):
         files = {"image": ("input.jpg", image_bytes, mime)}
         data = {"prompt": prompt, "model": provider.model, "n": "1", **extra}
         if provider.stream:
@@ -341,11 +345,15 @@ def images_edit(provider: ImageProvider, image_bytes: bytes, prompt: str,
     raise last_size_err or RuntimeError(f"{provider.name} images/edits: no size rung succeeded")
 
 
-def _size_rungs(provider: ImageProvider) -> list[dict[str, str]]:
+def _size_rungs(provider: ImageProvider, size_override: str | None = None) -> list[dict[str, str]]:
     """请求参数降级链（纯函数可单测）：每个显式 size 一档（带 quality），末档空 dict = 不传
-    size/quality 的旧行为，保证任何 sizes 配置下最终都能回到模型自定分辨率。"""
+    size/quality 的旧行为，保证任何 sizes 配置下最终都能回到模型自定分辨率。
+
+    size_override 给定时只用该尺寸（忽略 provider.sizes），用于自适应 4K 每图动态尺寸。
+    """
+    sizes = (size_override,) if size_override else provider.sizes
     rungs: list[dict[str, str]] = []
-    for s in provider.sizes:
+    for s in sizes:
         extra = {"size": s}
         if provider.quality:
             extra["quality"] = provider.quality
@@ -407,8 +415,11 @@ def _sse_collect_b64(lines, *, deadline: float | None = None) -> str | None:
 
 
 def generate_with_fallback(providers: list[ImageProvider], image_bytes: bytes, prompt: str,
-                           *, mime: str = "image/jpeg") -> tuple[bytes, str]:
-    """按链 fallback；返回 (图字节, provider 名)。全失败抛最后异常。"""
+                           *, mime: str = "image/jpeg", size_override: str | None = None) -> tuple[bytes, str]:
+    """按链 fallback；返回 (图字节, provider 名)。全失败抛最后异常。
+
+    size_override 透传给 images_edit（自适应 4K 每图动态尺寸）。默认 None = 旧行为。
+    """
     if not providers:
         raise RuntimeError("no ready image provider (check env: TUZI_IMAGE_PRIMARY_* / PANEL_IMG_*)")
     last: Exception | None = None
@@ -416,7 +427,7 @@ def generate_with_fallback(providers: list[ImageProvider], image_bytes: bytes, p
         for attempt in (1, 2):   # 瞬时网络/代理错误重试一次再换 provider
             t0 = time.time()
             try:
-                return images_edit(p, image_bytes, prompt, mime=mime), p.name
+                return images_edit(p, image_bytes, prompt, mime=mime, size_override=size_override), p.name
             except Exception as e:  # noqa: BLE001 — 逐家试，记下最后一个；
                 # 失败必留痕（2026-06-12：刘亦卿槽 648s 静默降级 flashapi 低清，无日志无法归因）
                 last = e
