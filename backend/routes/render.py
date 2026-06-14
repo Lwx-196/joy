@@ -57,6 +57,10 @@ class RenderRequest(BaseModel):
     model: str | None = None
     system_prompt: str | None = None
     options: dict[str, Any] | None = None
+    # F2（frugal-cache-guard）：cache-miss 需用户确认烧 API。前端确认卡点「确认出图」
+    # 时带 confirm_burn=true → 注入 options.allow_burn=True → 执行器子进程带
+    # --allow-cache-miss-burn 授权真烧。默认 False 走预判护栏（cache-miss 不静默烧）。
+    confirm_burn: bool = False
 
 
 class RenderBatchRequest(BaseModel):
@@ -828,6 +832,12 @@ def enqueue_single(case_id: int, payload: RenderRequest) -> dict:
             },
         )
     effective_template = _effective_template_from_gate(payload.template, gate_result)
+    # F2：confirm_burn=true（确认卡点「确认出图」）→ options.allow_burn=True，下游执行器
+    # 授权 cache-miss 真烧；默认不动 options（cache-miss 走预判护栏返 needs_confirmation）。
+    enqueue_options = payload.options
+    if payload.confirm_burn:
+        enqueue_options = dict(payload.options or {})
+        enqueue_options["allow_burn"] = True
     try:
         job_id = RENDER_QUEUE.enqueue(
             case_id=case_id,
@@ -837,7 +847,7 @@ def enqueue_single(case_id: int, payload: RenderRequest) -> dict:
             draft_preview=payload.draft_preview,
             model=payload.model,
             system_prompt=payload.system_prompt,
-            options=payload.options,
+            options=enqueue_options,
         )
     except ValueError as e:
         raise HTTPException(404, str(e))
@@ -1044,7 +1054,9 @@ def latest_case_job(case_id: int) -> dict:
         return {"job": None}
 
     latest = _row_to_job(latest_row)
-    if latest["status"] in {"queued", "running"}:
+    # F2：needs_confirmation = cache-miss 待用户确认的「在途」决策点，必须像 queued/running
+    # 一样优先展示确认卡；否则会被旧 done 板（output_row）盖住，用户永远看不到烧钱确认提示。
+    if latest["status"] in {"queued", "running", "needs_confirmation"}:
         job = latest
     elif output_row is not None:
         job = _row_to_job(output_row)

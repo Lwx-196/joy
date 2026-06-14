@@ -2287,6 +2287,10 @@ class RenderQueue:
             if not ai_enhance_direction and render_mode == "ai":
                 ai_enhance_direction = "heal"
             ai_enhance_model = str(_job_options.get("enhance_model") or "").strip()
+            # F2（frugal-cache-guard）：用户在确认卡点「确认出图」后，路由把 confirm_burn 译成
+            # options.allow_burn=True 存进 meta_json。这里读出后透传给执行器子进程 → 授权
+            # cache-miss 真烧；默认 False 时执行器走预判护栏，cache-miss 返 needs_confirmation。
+            ai_allow_burn = bool(_job_options.get("allow_burn"))
             batch_id = row["batch_id"]
             customer_raw = row["case_customer_raw"]
             case_date, case_project = scanner.extract_case_date_project(Path(case_dir), scanner.DEFAULT_ROOTS)
@@ -2568,6 +2572,7 @@ class RenderQueue:
                     template=template,
                     enhance_direction=ai_enhance_direction,
                     enhance_model=ai_enhance_model or "gemini-3-pro-image",
+                    allow_burn=ai_allow_burn,
                 )
             else:
                 result = render_executor.run_render(
@@ -2702,6 +2707,10 @@ class RenderQueue:
 	                                        "render_error",
 	                                        "held_gate",
 	                                        "held_reason",
+	                                        "cache_miss_count",
+	                                        "cache_miss_total",
+	                                        "cache_miss_est_cost_usd",
+	                                        "cache_miss_est_seconds",
 	                                        "blocking_issues",
 	                                        "warnings",
 	                                        "composition_alerts",

@@ -248,6 +248,145 @@ def test_latest_job_prefers_visible_output_over_newer_failed_job(client, seed_ca
     assert body["job"]["output_mtime"] is not None
 
 
+def test_confirm_burn_injects_allow_burn_into_options(client, seed_case, no_job_pool):
+    """F2（frugal-cache-guard）：确认卡点「确认出图」→ confirm_burn=true →
+    enqueue 把 options.allow_burn=True 落进 meta_json；下游执行器据此授权 cache-miss 真烧。
+    不带 confirm_burn 时 options 里没有 allow_burn（走预判护栏）。"""
+    case_id = seed_case()
+    # 确认烧钱 → allow_burn 进 options
+    confirmed = client.post(
+        f"/api/cases/{case_id}/render",
+        json={"brand": "fumei", "force": True, "confirm_burn": True},
+    )
+    assert confirmed.status_code == 200
+    detail = client.get(f"/api/render/jobs/{confirmed.json()['job_id']}").json()
+    assert detail["meta"]["options"]["allow_burn"] is True
+
+    # 默认（未确认）→ options 不含 allow_burn
+    default = client.post(
+        f"/api/cases/{case_id}/render",
+        json={"brand": "fumei", "force": True},
+    )
+    assert default.status_code == 200
+    detail2 = client.get(f"/api/render/jobs/{default.json()['job_id']}").json()
+    assert "allow_burn" not in (detail2["meta"].get("options") or {})
+
+
+def test_latest_job_prefers_needs_confirmation_over_older_done(client, seed_case, tmp_path, no_job_pool):
+    """F2：needs_confirmation = cache-miss 待用户确认的在途决策点，必须优先于旧 done 板展示，
+    否则确认卡被旧成品盖住，用户永远看不到烧钱确认提示。"""
+    case_dir = tmp_path / "case-needs-confirm"
+    case_dir.mkdir()
+    out_dir = case_dir / ".case-layout-output" / "fumei" / "tri-compare" / "render"
+    out_dir.mkdir(parents=True)
+    output_path = out_dir / "final-board.jpg"
+    output_path.write_bytes(b"fake-jpg")
+    now = datetime.now(timezone.utc).isoformat()
+    case_id = seed_case(abs_path=str(case_dir))
+    with db.connect() as conn:
+        done_id = conn.execute(
+            """
+            INSERT INTO render_jobs
+              (case_id, brand, template, status, batch_id, enqueued_at, started_at, finished_at,
+               output_path, manifest_path, error_message, semantic_judge, meta_json)
+            VALUES (?, 'fumei', 'tri-compare', 'done', NULL, ?, ?, ?,
+                    ?, NULL, NULL, 'auto', ?)
+            """,
+            (case_id, now, now, now, str(output_path), json.dumps({"status": "ok"})),
+        ).lastrowid
+        # 同 enqueued_at（与 done 同格式串），靠 id DESC 决出 confirm 为 latest_row —
+        # 避免 SQLite datetime() 改写时间串格式（'T'→空格）破坏字典序排序。
+        confirm_id = conn.execute(
+            """
+            INSERT INTO render_jobs
+              (case_id, brand, template, status, batch_id, enqueued_at, started_at, finished_at,
+               output_path, manifest_path, error_message, semantic_judge, meta_json)
+            VALUES (?, 'fumei', 'tri-compare', 'needs_confirmation', NULL, ?, ?, ?,
+                    NULL, NULL, NULL, 'auto', ?)
+            """,
+            (
+                case_id, now, now, now,
+                json.dumps({
+                    "status": "needs_confirmation",
+                    "cache_miss_count": 2,
+                    "cache_miss_total": 3,
+                    "cache_miss_est_cost_usd": 0.114,
+                    "cache_miss_est_seconds": 300,
+                }),
+            ),
+        ).lastrowid
+    assert confirm_id > done_id
+
+    body = client.get(f"/api/cases/{case_id}/render/latest").json()
+    assert body["job"]["id"] == confirm_id
+    assert body["job"]["status"] == "needs_confirmation"
+    assert body["job"]["meta"]["cache_miss_count"] == 2
+    assert body["job"]["meta"]["cache_miss_est_cost_usd"] == 0.114
+
+
+def test_render_queue_ai_path_passes_allow_burn_and_surfaces_cache_miss(seed_case, tmp_path, monkeypatch):
+    """F2：render_mode='ai' job 的 meta.options.allow_burn 透传到执行器 allow_burn 形参；
+    执行器返回 status='needs_confirmation' → job.status=needs_confirmation +
+    cache_miss_* 进 meta_json（前端确认卡数据源）。"""
+    from backend import db, render_queue
+
+    case_dir = tmp_path / "case-ai-cache-miss"
+    case_dir.mkdir()
+    case_id = seed_case(abs_path=str(case_dir))
+    now = datetime.now(timezone.utc).isoformat()
+    with db.connect() as conn:
+        job_id = conn.execute(
+            """
+            INSERT INTO render_jobs
+                (case_id, brand, template, status, enqueued_at, semantic_judge, render_mode, meta_json)
+            VALUES (?, 'fumei', 'tri-compare', 'queued', ?, 'off', 'ai', ?)
+            """,
+            (
+                case_id, now,
+                json.dumps({"options": {"enhance_direction": "heal", "allow_burn": True}}),
+            ),
+        ).lastrowid
+
+    captured: dict = {}
+
+    def fake_run_ai_enhanced_render(case_dir_arg, **kwargs):
+        captured.update(kwargs)
+        return {
+            "output_path": None,
+            "manifest_path": None,
+            "status": "needs_confirmation",
+            "case_mode": "ai_enhanced_board",
+            "enhance": {"direction": "heal", "model": "gemini-3-pro-image"},
+            "blocking_issue_count": 0,
+            "warning_count": 0,
+            "effective_templates": {},
+            "manual_overrides_applied": [],
+            "cache_miss_count": 2,
+            "cache_miss_total": 3,
+            "cache_miss_est_cost_usd": 0.114,
+            "cache_miss_est_seconds": 300,
+        }
+
+    monkeypatch.setattr(
+        render_queue.render_executor, "run_ai_enhanced_render", fake_run_ai_enhanced_render
+    )
+    worker = render_queue.RenderQueue()
+    worker._execute_render(job_id)
+
+    assert captured.get("allow_burn") is True
+    with db.connect() as conn:
+        row = conn.execute(
+            "SELECT status, meta_json FROM render_jobs WHERE id = ?", (job_id,)
+        ).fetchone()
+    assert row["status"] == "needs_confirmation"
+    meta = json.loads(row["meta_json"])
+    assert meta["status"] == "needs_confirmation"
+    assert meta["cache_miss_count"] == 2
+    assert meta["cache_miss_total"] == 3
+    assert meta["cache_miss_est_cost_usd"] == 0.114
+    assert meta["cache_miss_est_seconds"] == 300
+
+
 def test_get_job_404(client, no_job_pool):
     resp = client.get("/api/render/jobs/9999")
     assert resp.status_code == 404
