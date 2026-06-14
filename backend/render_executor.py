@@ -35,12 +35,24 @@ from . import stress
 SKILL_ROOT = Path.home() / "Desktop" / "飞书Claude" / "skills" / "case-layout-board"
 SKILL_SCRIPT = SKILL_ROOT / "scripts" / "case_layout_board.py"
 RENDER_SCRIPT = SKILL_ROOT / "scripts" / "render_brand_clean.py"
-SKILL_PYTHON = (
-    os.environ.get("CASE_LAYOUT_SKILL_PYTHON")
-    or shutil.which("python3.12")
-    or shutil.which("python3")
-    or "/usr/bin/python3"
-)
+def _resolve_skill_python() -> str:
+    """选 skill 子进程解释器：按优先级取第一个**真实存在**的候选，跳过失效项
+    （2026-06-07 实测：python3.12 临时缺席时旧链会放行不存在的命名解释器 →
+    `skill python missing: python3.12` 9 次失败）。最终兜底 sys.executable（后端
+    .venv，已含 cv2/mediapipe/rembg/PIL），保证永不落到缺依赖的裸 python3。"""
+    candidates = [
+        os.environ.get("CASE_LAYOUT_SKILL_PYTHON"),
+        shutil.which("python3.12"),
+        shutil.which("python3"),
+        "/usr/bin/python3",
+    ]
+    for cand in candidates:
+        if cand and Path(cand).exists():
+            return cand
+    return sys.executable
+
+
+SKILL_PYTHON = _resolve_skill_python()
 
 DEFAULT_RENDER_TIMEOUT_SEC = int(os.environ.get("CASE_WORKBENCH_RENDER_TIMEOUT_SEC", "240"))
 # AI 增强板出图慢（3 角度 gemini@~85s + planner + matte）→ 单独大超时。
