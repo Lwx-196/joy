@@ -125,6 +125,29 @@ class TestMaskGenerator:
         with Image.open(result) as m:
             assert m.getpixel((500, 520)) > 200    # 单一 bbox 覆盖中脸
 
+    def test_to_pixel_bbox_face_relative_vs_whole_image(self):
+        # face_bbox 给定 → 分数相对人脸 bbox；None → 相对整图（向后兼容）。
+        from backend.services.focal_mask_generator import _to_pixel_bbox
+
+        # region 中心 (0.5,0.5) 半宽 0.5 → 相对 face(200,100,600,500)：
+        # 中心 (200+0.5*400, 100+0.5*400)=(400,300)，半 (100,100) → (300,200,500,400)
+        assert _to_pixel_bbox((0.5, 0.5, 0.5, 0.5), 1000, 1000, (200, 100, 600, 500)) == (
+            300, 200, 500, 400
+        )
+        # None → 整图：中心 (500,500) 半 (250,250)
+        assert _to_pixel_bbox((0.5, 0.5, 0.5, 0.5), 1000, 1000) == (250, 250, 750, 750)
+
+    def test_face_bbox_places_region_in_face_not_image_center(self, tmp_path: Path):
+        # ③ 修复核心：face_bbox 在左侧窄条 → 川字落在人脸内（x≈150）而非整图中心（x=500）。
+        src = _make_test_jpg(tmp_path, size=(1000, 1000))
+        out = tmp_path / "m.png"
+        generate_focus_mask(src, ["川字"], output_path=out, face_bbox=(0, 0, 300, 1000))
+        with Image.open(out) as m:
+            # 川字 cx=0.5,cy=0.33 of face(0,0,300,1000) → (150, 330) 白
+            assert m.getpixel((150, 330)) > 200
+            # 整图中心（旧行为会白）现应为黑
+            assert m.getpixel((500, 330)) < 50
+
 
 # ---------------------------------------------------------------------------
 # focal_prompt_library

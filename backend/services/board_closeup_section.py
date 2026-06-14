@@ -194,6 +194,67 @@ def expand_to_aspect(
     )
 
 
+def _build_focus_mask(
+    norm_src: Path,
+    regions: list[str],
+    face_bbox: tuple[int, int, int, int] | None,
+    use_face: bool,
+    side_dir: Path,
+) -> Path:
+    """近景 region mask（统一输出 ``side_dir/closeup_mask.png``）。
+
+    分流（③ 修复核心）：
+    - 有真实 landmark 的部位（眉间/颏/唇/额 → ``precise_region_for``）用
+      ``generate_precise_mask`` 按 MediaPipe landmark 锚定解剖位置（川字精准居中眉间，
+      无需 shift 猜测）。
+    - 无 landmark 的部位（泪沟/卧蚕/眼袋/苹果肌/面颊/法令纹）用
+      ``generate_focus_mask`` 相对**真实人脸 bbox** 放置粗椭圆。
+    - 一组里两类都有 → 各出一张 union（np.maximum），裁剪框恒含两者。
+
+    ``use_face=False``（任一侧未检到脸）→ 全部走整图相对粗椭圆（face_bbox=None，
+    等价旧行为，保 before/after 同口径）。precise 失败 → 该组整体退 coarse。
+    """
+    from PIL import Image
+
+    from backend.services.focal_mask_generator import generate_focus_mask
+    from backend.services.precise_face_mask import generate_precise_mask, precise_region_for
+
+    out_path = side_dir / "closeup_mask.png"
+    if not use_face:
+        return generate_focus_mask(norm_src, list(regions), output_path=out_path, face_bbox=None)
+
+    precise = [r for r in regions if precise_region_for(r)]
+    coarse = [r for r in regions if not precise_region_for(r)]
+    layers: list[Path] = []
+    if precise:
+        try:
+            layers.append(generate_precise_mask(norm_src, precise, side_dir / "precise_mask.png"))
+        except Exception as exc:  # noqa: BLE001 — precise 失败该组整体退 coarse face_bbox
+            logger.info("closeup precise mask 失败，%s 退 coarse: %s", precise, exc)
+            coarse = list(regions)
+    if coarse:
+        layers.append(
+            generate_focus_mask(
+                norm_src, coarse, output_path=side_dir / "coarse_mask.png", face_bbox=face_bbox
+            )
+        )
+
+    if len(layers) == 1:
+        with Image.open(layers[0]) as im:
+            im.convert("L").save(out_path, format="PNG", optimize=True)
+        return out_path
+
+    import numpy as np
+
+    union = None
+    for m in layers:
+        with Image.open(m) as im:
+            arr = np.array(im.convert("L"))
+        union = arr if union is None else np.maximum(union, arr)
+    Image.fromarray(union, mode="L").save(out_path, format="PNG", optimize=True)
+    return out_path
+
+
 def build_closeup_assets(
     before_path: str | Path,
     after_path: str | Path,
@@ -205,8 +266,16 @@ def build_closeup_assets(
     每侧管线（faithful-zoom arm A 产品化路径，零烧钱）：
     1. ``unsharp_focal_enhance(preset="clarity")`` 全图保真增强
        （K-1 契约：失败返回原图，裁剪照常）
-    2. ``generate_focus_mask`` 源图 region mask → ``_focal_crop_bbox`` 像素 bbox
+    2. ``_build_focus_mask`` 源图 region mask（精确 landmark / 真实人脸 bbox 锚定）
+       → ``_focal_crop_bbox`` 像素 bbox
     3. bbox 扩到 cell 宽高比 → 裁剪存 PNG
+
+    ③ 修复（before/after 对齐）：region mask 锚定**真实人脸解剖**（有 landmark 的
+    部位用 MediaPipe landmark，其余相对真实人脸 bbox）而非整图，使术前/术后即便人脸
+    在画面中位置/尺度不同，近景也按解剖对齐（根治川字术后偏上）。landmark 锚定的部位
+    天然居中、shift 置 0（不再靠固定 shift 猜）；纯 coarse 部位保留标定 shift 留头顶白。
+    两侧都检到人脸才启用对齐；任一侧检测失败 → 两侧都回退整图相对放置
+    （保持 before/after 同口径，等价旧行为，绝不半对齐）。
 
     返回渲染端 ``closeup_section`` dict；任何失败返回 None（fail-open 不挡板）。
     """
@@ -215,28 +284,51 @@ def build_closeup_assets(
 
         from backend.ai_generation_adapter import _focal_crop_bbox
         from backend.services.classical_enhance import unsharp_focal_enhance
-        from backend.services.focal_mask_generator import generate_focus_mask
+        from backend.services.precise_face_mask import detect_face_bbox, precise_region_for
 
         work_dir = Path(work_dir)
         aspect = cell_aspect_for(regions)
-        shift = center_shift_for(regions)
-        out: dict[str, str] = {}
-        for side, src in (("before", Path(before_path)), ("after", Path(after_path))):
+        sides = (("before", Path(before_path)), ("after", Path(after_path)))
+
+        # ── Pass 1：EXIF 朝向先归一一次 + 检测真实人脸 bbox ──
+        # L-145：generate_focus_mask 不做 exif_transpose（按 raw 像素放椭圆），而 unsharp 内部
+        # 把输出归一到 display → 二者坐标系不一致：对 EXIF 旋转的手机竖拍源 mask bbox 会落到
+        # 旋转前坐标 → 裁错。先归一一次喂 enhance+mask+detect 三方同坐标系。
+        # orientation=1 源（如曾玲莉）归一=no-op，字节不变。detect_face_bbox 用 cv2.imread
+        # 读 raw（不应用 EXIF），故必须喂已归一的 norm_src。
+        norm: dict[str, Path] = {}
+        faces: dict[str, tuple[int, int, int, int] | None] = {}
+        for side, src in sides:
             side_dir = work_dir / side
             side_dir.mkdir(parents=True, exist_ok=True)
-            # L-145 升级：EXIF 朝向**先归一一次**再喂 enhance + mask。
-            # generate_focus_mask 不做 exif_transpose（按 raw 像素放椭圆），而 unsharp 内部
-            # 把输出归一到 display → 二者坐标系不一致：对 EXIF 旋转的手机竖拍源（新增部位主力）
-            # mask bbox 会落到旋转前坐标 → 裁错。orientation=1 源（如曾玲莉）归一=no-op，字节不变。
             norm_src = side_dir / "src_exif_norm.png"
             with Image.open(src) as _im:
                 ImageOps.exif_transpose(_im).convert("RGB").save(norm_src, format="PNG")
+            norm[side] = norm_src
+            faces[side] = detect_face_bbox(norm_src)
+
+        use_face = all(faces[s] is not None for s, _ in sides)
+        if not use_face:
+            logger.info(
+                "closeup: 人脸 bbox 缺失（before=%s after=%s），回退整图相对放置（两侧同口径）",
+                faces["before"], faces["after"],
+            )
+
+        # landmark 锚定的部位天然居中 → shift 置 0；纯 coarse（无 landmark）才用标定 shift
+        # 留头顶白（owner ② 居中）。两侧同一 shift，保 before/after 同口径。
+        landmark_anchored = use_face and any(precise_region_for(r) for r in regions)
+        shift = 0.0 if landmark_anchored else center_shift_for(regions)
+
+        # ── Pass 2：clarity 增强 + 解剖锚定 region mask + 裁剪 ──
+        out: dict[str, str] = {}
+        for side, _src in sides:
+            side_dir = work_dir / side
+            norm_src = norm[side]
+            face_bbox = faces[side] if use_face else None
             enhanced = unsharp_focal_enhance(
                 norm_src, focus_targets=list(regions), output_dir=side_dir, preset="clarity"
             )
-            mask = generate_focus_mask(
-                norm_src, list(regions), output_path=side_dir / "closeup_mask.png"
-            )
+            mask = _build_focus_mask(norm_src, list(regions), face_bbox, use_face, side_dir)
             bbox = _focal_crop_bbox(mask, pad_frac=CROP_PAD_FRAC)
             with Image.open(enhanced) as img:
                 # norm_src/enhanced 均 display 朝向；exif_transpose 兜底（PNG 无 EXIF = no-op）

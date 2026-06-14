@@ -121,12 +121,30 @@ def union_region_height(targets: Iterable[str]) -> float | None:
 
 
 def _to_pixel_bbox(
-    region: tuple[float, float, float, float], w: int, h: int
+    region: tuple[float, float, float, float],
+    w: int,
+    h: int,
+    face_bbox: tuple[int, int, int, int] | None = None,
 ) -> tuple[int, int, int, int]:
-    """Convert a normalised ``(cx, cy, fw, fh)`` region to a clamped pixel bbox."""
+    """Convert a normalised ``(cx, cy, fw, fh)`` region to a clamped pixel bbox.
+
+    ``face_bbox`` None (default) → fractions map relative to the **whole image**
+    (legacy: 整图当人脸 bbox; correct for the SAM-refined ComfyUI route and tuned
+    by-eye where the face roughly fills the frame).
+
+    When a detected face bbox ``(l, t, r, b)`` is given, fractions map relative
+    to **it** — the ROI lands at the right anatomical place regardless of where
+    or how big the face sits in the frame. This is what makes before/after
+    closeups align by face position+scale (board_closeup_section ③ 修复).
+    """
     cx, cy, fw, fh = region
-    px_cx, px_cy = int(cx * w), int(cy * h)
-    px_w, px_h = int(fw * w), int(fh * h)
+    if face_bbox is None:
+        ox, oy, rw, rh = 0, 0, w, h
+    else:
+        fl, ft, fr, fb = face_bbox
+        ox, oy, rw, rh = fl, ft, fr - fl, fb - ft
+    px_cx, px_cy = int(ox + cx * rw), int(oy + cy * rh)
+    px_w, px_h = int(fw * rw), int(fh * rh)
     return (
         max(0, px_cx - px_w // 2),
         max(0, px_cy - px_h // 2),
@@ -141,6 +159,7 @@ def generate_focus_mask(
     *,
     output_path: Path | None = None,
     separate_ellipses: bool = False,
+    face_bbox: tuple[int, int, int, int] | None = None,
 ) -> Path:
     """Generate a coarse single-channel focus mask PNG.
 
@@ -160,6 +179,12 @@ def generate_focus_mask(
         for the gpt-image-2 mask-anchor route (no SAM refine downstream), so
         spread治疗区 (额纹+川字+唇+下巴) don't collapse into a whole-face box —
         enforces precise-correspondence (只锁实际治疗区，不外扩).
+
+    ``face_bbox`` (default None): when a detected face bbox ``(l, t, r, b)`` is
+    passed, the ``_FOCAL_REGIONS`` fractions map relative to it instead of the
+    whole image — anatomically placed regardless of face position/scale. Used by
+    the closeup before/after-alignment path; None keeps the legacy whole-image
+    behaviour for every existing caller.
 
     If PIL is unavailable, raises ``ImportError`` (no silent fail here —
     caller is expected to wrap in its own try/except).
@@ -181,10 +206,10 @@ def generate_focus_mask(
     recognised = [t for t in focus_targets if t in _FOCAL_REGIONS] if focus_targets else []
     if separate_ellipses and recognised:
         for target in recognised:
-            draw.ellipse(_to_pixel_bbox(_FOCAL_REGIONS[target], w, h), fill=255)
+            draw.ellipse(_to_pixel_bbox(_FOCAL_REGIONS[target], w, h, face_bbox), fill=255)
         LOGGER.info(
-            "focal_mask: %dx%d separate-ellipse union for %s → %s",
-            w, h, recognised, output_path,
+            "focal_mask: %dx%d separate-ellipse union for %s (face_bbox=%s) → %s",
+            w, h, recognised, face_bbox, output_path,
         )
     else:
         region = _union_regions(focus_targets) if focus_targets else None
@@ -195,7 +220,7 @@ def generate_focus_mask(
                 "focal_mask: no recognised targets in %s; falling back to full-face ellipse",
                 focus_targets,
             )
-        bbox = _to_pixel_bbox(region, w, h)
+        bbox = _to_pixel_bbox(region, w, h, face_bbox)
         draw.ellipse(bbox, fill=255)
         LOGGER.info(
             "focal_mask: generated %dx%d mask for targets=%s region_bbox=%s → %s",

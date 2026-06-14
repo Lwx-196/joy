@@ -51,6 +51,58 @@ def test_unknown_region_key_raises_clear_error(tmp_path: Path):
         )
 
 
+def test_precise_region_for_maps_landmark_and_coarse_keys():
+    # closeup 分流 SSoT：有 landmark 的部位返回 precise region 名，其余 None（走 coarse）。
+    precise_face_mask = _precise_face_mask_module()
+    pr = precise_face_mask.precise_region_for
+    assert pr("川字") == "glabella"
+    assert pr("下巴") == "chin"
+    assert pr("下颌线") == "chin"
+    assert pr("唇") == "lips"
+    assert pr("额纹") == "forehead"
+    # 无精确 landmark 的 closeup 合格部位 → None（face_bbox 相对粗椭圆）
+    assert pr("泪沟") is None
+    assert pr("苹果肌") is None
+    assert pr("法令纹") is None
+    assert pr("unknown_xyz") is None
+
+
+def test_detect_face_bbox_unreadable_returns_none(tmp_path: Path):
+    # fail-open：读不出图 → None（近景永不挡板）
+    precise_face_mask = _precise_face_mask_module()
+    assert precise_face_mask.detect_face_bbox(tmp_path / "does_not_exist.png") is None
+
+
+_REAL_FACE_CANDIDATES = [
+    CASE45_PREOP,
+    Path(
+        "/Users/a1234/Desktop/案例生成器/incoming/无创案例库/无创注射案例库/"
+        "曾玲莉/2025.10.29熊猫针1支+海魅云境骨性1支注射川字纹/术前1.JPG"
+    ),
+]
+
+
+def test_detect_face_bbox_real_image_within_bounds(tmp_path: Path):
+    src = next((p for p in _REAL_FACE_CANDIDATES if p.exists()), None)
+    if src is None:
+        pytest.skip("no real face smoke image available")
+    from PIL import ImageOps
+
+    precise_face_mask = _precise_face_mask_module()
+    norm = tmp_path / "norm.png"
+    with Image.open(src) as im:
+        disp = ImageOps.exif_transpose(im).convert("RGB")
+        disp.save(norm)
+        w, h = disp.size
+    bbox = precise_face_mask.detect_face_bbox(norm)
+    assert bbox is not None
+    left, top, right, bottom = bbox
+    assert 0 <= left < right <= w and 0 <= top < bottom <= h
+    # 人脸占画面合理比例（非退化点、非整图）
+    assert 0.05 * w < (right - left) < w
+    assert 0.05 * h < (bottom - top) < h
+
+
 def test_case45_four_region_union_matches_phase0_coverage(tmp_path: Path):
     if not CASE45_PREOP.exists():
         pytest.skip(f"real smoke image unavailable: {CASE45_PREOP}")

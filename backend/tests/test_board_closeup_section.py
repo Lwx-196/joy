@@ -196,9 +196,9 @@ def test_expand_to_aspect_negative_shift_moves_up():
 
 
 def _patch_pipeline(monkeypatch, tmp_path, bbox=(100, 100, 300, 500)):
-    """unsharp_focal_enhance=identity / mask=占位 PNG / bbox=固定值。"""
+    """unsharp_focal_enhance=identity / mask=占位 PNG / bbox=固定值 / 无脸（coarse 路径）。"""
     import backend.ai_generation_adapter as adapter
-    from backend.services import classical_enhance, focal_mask_generator
+    from backend.services import classical_enhance, focal_mask_generator, precise_face_mask
 
     monkeypatch.setattr(classical_enhance, "unsharp_focal_enhance", lambda src, **kw: src)
 
@@ -209,6 +209,8 @@ def _patch_pipeline(monkeypatch, tmp_path, bbox=(100, 100, 300, 500)):
 
     monkeypatch.setattr(focal_mask_generator, "generate_focus_mask", _fake_mask)
     monkeypatch.setattr(adapter, "_focal_crop_bbox", lambda mask_path, pad_frac=0.15: bbox)
+    # 默认无脸：走整图 coarse 路径（不触发真 mediapipe），保留旧 build 测语义。
+    monkeypatch.setattr(precise_face_mask, "detect_face_bbox", lambda *a, **k: None)
 
 
 def _make_src(tmp_path, name, size=(1200, 1600)):
@@ -327,3 +329,165 @@ def test_build_for_manifest_single_region_happy_path(monkeypatch, tmp_path):
 def test_build_for_manifest_empty_groups_fail_open(tmp_path):
     assert closeup.build_for_manifest({"groups": []}, "川字纹", tmp_path) is None
     assert closeup.build_for_manifest({}, "川字纹", tmp_path) is None
+
+
+# ---------- _build_focus_mask：precise/coarse 分流 + union（③ 修复核心） ----------
+
+
+def _patch_mask_generators(monkeypatch):
+    """precise=左上白块 / coarse=右下白块，各自记录被调 regions + face_bbox。"""
+    from backend.services import focal_mask_generator, precise_face_mask
+
+    seen = {"precise": None, "coarse": None, "coarse_face_bbox": "unset"}
+
+    def _fake_precise(image_path, regions, output_path):
+        seen["precise"] = list(regions)
+        m = Image.new("L", (100, 100), 0)
+        m.paste(255, (5, 5, 25, 25))  # 左上块
+        m.save(output_path)
+        return Path(output_path)
+
+    def _fake_coarse(image_path, focus_targets, *, output_path=None, face_bbox=None, **kw):
+        seen["coarse"] = list(focus_targets)
+        seen["coarse_face_bbox"] = face_bbox
+        m = Image.new("L", (100, 100), 0)
+        m.paste(255, (70, 70, 95, 95))  # 右下块
+        m.save(output_path)
+        return Path(output_path)
+
+    monkeypatch.setattr(precise_face_mask, "generate_precise_mask", _fake_precise)
+    monkeypatch.setattr(focal_mask_generator, "generate_focus_mask", _fake_coarse)
+    return seen
+
+
+def test_build_focus_mask_no_face_uses_whole_image_coarse(monkeypatch, tmp_path):
+    seen = _patch_mask_generators(monkeypatch)
+    src = _make_src(tmp_path, "n.png", size=(100, 100))
+    sd = tmp_path / "sd"; sd.mkdir()
+    out = closeup._build_focus_mask(src, ["川字"], None, use_face=False, side_dir=sd)
+    assert Path(out).is_file()
+    # use_face=False → 不走 precise，coarse 用整图（face_bbox=None）
+    assert seen["precise"] is None
+    assert seen["coarse"] == ["川字"]
+    assert seen["coarse_face_bbox"] is None
+
+
+def test_build_focus_mask_precise_for_landmark_region(monkeypatch, tmp_path):
+    seen = _patch_mask_generators(monkeypatch)
+    src = _make_src(tmp_path, "n.png", size=(100, 100))
+    sd = tmp_path / "sd"; sd.mkdir()
+    closeup._build_focus_mask(src, ["川字"], (10, 10, 90, 90), use_face=True, side_dir=sd)
+    # 川字 有 landmark → precise，不调 coarse
+    assert seen["precise"] == ["川字"]
+    assert seen["coarse"] is None
+
+
+def test_build_focus_mask_coarse_for_non_landmark_region(monkeypatch, tmp_path):
+    seen = _patch_mask_generators(monkeypatch)
+    src = _make_src(tmp_path, "n.png", size=(100, 100))
+    sd = tmp_path / "sd"; sd.mkdir()
+    fb = (10, 10, 90, 90)
+    closeup._build_focus_mask(src, ["泪沟"], fb, use_face=True, side_dir=sd)
+    # 泪沟 无 landmark → coarse，相对真实人脸 bbox
+    assert seen["precise"] is None
+    assert seen["coarse"] == ["泪沟"]
+    assert seen["coarse_face_bbox"] == fb
+
+
+def test_build_focus_mask_mixed_unions_precise_and_coarse(monkeypatch, tmp_path):
+    seen = _patch_mask_generators(monkeypatch)
+    src = _make_src(tmp_path, "n.png", size=(100, 100))
+    sd = tmp_path / "sd"; sd.mkdir()
+    out = closeup._build_focus_mask(src, ["川字", "泪沟"], (10, 10, 90, 90), use_face=True, side_dir=sd)
+    assert seen["precise"] == ["川字"]
+    assert seen["coarse"] == ["泪沟"]
+    # union：precise 左上块 + coarse 右下块 都在
+    with Image.open(out) as m:
+        assert m.getpixel((15, 15)) > 200   # precise 块
+        assert m.getpixel((82, 82)) > 200   # coarse 块
+
+
+def test_build_focus_mask_precise_failure_falls_back_to_coarse(monkeypatch, tmp_path):
+    from backend.services import focal_mask_generator, precise_face_mask
+
+    seen = {"coarse": None}
+
+    def _boom(image_path, regions, output_path):
+        raise RuntimeError("no face for precise")
+
+    def _fake_coarse(image_path, focus_targets, *, output_path=None, face_bbox=None, **kw):
+        seen["coarse"] = list(focus_targets)
+        Image.new("L", (50, 50), 255).save(output_path)
+        return Path(output_path)
+
+    monkeypatch.setattr(precise_face_mask, "generate_precise_mask", _boom)
+    monkeypatch.setattr(focal_mask_generator, "generate_focus_mask", _fake_coarse)
+    src = _make_src(tmp_path, "n.png", size=(50, 50))
+    sd = tmp_path / "sd"; sd.mkdir()
+    out = closeup._build_focus_mask(src, ["川字"], (5, 5, 45, 45), use_face=True, side_dir=sd)
+    # precise 抛错 → 整组退 coarse
+    assert seen["coarse"] == ["川字"]
+    assert Path(out).is_file()
+
+
+# ---------- build_closeup_assets：landmark 锚定时 shift 置 0 ----------
+
+
+def test_build_closeup_shift_zero_when_landmark_anchored(monkeypatch, tmp_path):
+    # 检到脸 + 川字（有 landmark）→ shift 应为 0（不再靠固定 shift），而非表里的 0.10。
+    import backend.ai_generation_adapter as adapter
+    from backend.services import classical_enhance, focal_mask_generator, precise_face_mask
+
+    captured = {}
+    real_expand = closeup.expand_to_aspect
+
+    def _spy_expand(bbox, image_size, aspect=closeup.CELL_ASPECT, center_shift_frac=0.0):
+        captured["shift"] = center_shift_frac
+        return real_expand(bbox, image_size, aspect, center_shift_frac)
+
+    monkeypatch.setattr(closeup, "expand_to_aspect", _spy_expand)
+    monkeypatch.setattr(classical_enhance, "unsharp_focal_enhance", lambda src, **kw: src)
+    monkeypatch.setattr(precise_face_mask, "detect_face_bbox", lambda *a, **k: (50, 50, 250, 450))
+
+    def _fake_precise(image_path, regions, output_path):
+        Image.new("L", (300, 500), 255).save(output_path)
+        return Path(output_path)
+
+    monkeypatch.setattr(precise_face_mask, "generate_precise_mask", _fake_precise)
+    monkeypatch.setattr(adapter, "_focal_crop_bbox", lambda mp, pad_frac=0.15: (100, 100, 200, 200))
+
+    before = _make_src(tmp_path, "b.png", size=(300, 500))
+    after = _make_src(tmp_path, "a.png", size=(300, 500))
+    got = closeup.build_closeup_assets(before, after, ["川字"], tmp_path / "w")
+    assert got is not None
+    assert captured["shift"] == 0.0  # landmark 锚定 → 不施加固定 shift
+
+
+def test_build_closeup_keeps_shift_for_coarse_only_with_face(monkeypatch, tmp_path):
+    # 检到脸但纯 coarse 部位（泪沟，无 landmark）→ 保留标定 shift 留头顶白。
+    import backend.ai_generation_adapter as adapter
+    from backend.services import classical_enhance, focal_mask_generator, precise_face_mask
+
+    captured = {}
+    real_expand = closeup.expand_to_aspect
+
+    def _spy_expand(bbox, image_size, aspect=closeup.CELL_ASPECT, center_shift_frac=0.0):
+        captured["shift"] = center_shift_frac
+        return real_expand(bbox, image_size, aspect, center_shift_frac)
+
+    monkeypatch.setattr(closeup, "expand_to_aspect", _spy_expand)
+    monkeypatch.setattr(classical_enhance, "unsharp_focal_enhance", lambda src, **kw: src)
+    monkeypatch.setattr(precise_face_mask, "detect_face_bbox", lambda *a, **k: (50, 50, 250, 450))
+
+    def _fake_coarse(image_path, focus_targets, *, output_path=None, face_bbox=None, **kw):
+        Image.new("L", (300, 500), 255).save(output_path)
+        return Path(output_path)
+
+    monkeypatch.setattr(focal_mask_generator, "generate_focus_mask", _fake_coarse)
+    monkeypatch.setattr(adapter, "_focal_crop_bbox", lambda mp, pad_frac=0.15: (100, 100, 200, 200))
+
+    before = _make_src(tmp_path, "b.png", size=(300, 500))
+    after = _make_src(tmp_path, "a.png", size=(300, 500))
+    got = closeup.build_closeup_assets(before, after, ["泪沟"], tmp_path / "w")
+    assert got is not None
+    assert captured["shift"] == closeup.center_shift_for(["泪沟"])  # 保留 coarse 标定 shift

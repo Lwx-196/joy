@@ -199,6 +199,58 @@ def generate_precise_mask(
     return out_path
 
 
+def precise_region_for(key: str) -> str | None:
+    """closeup region key → precise landmark region 名（无精确 landmark 支持则 None）。
+
+    用于近景分流：有 landmark 的部位（眉间/颏/唇/额）用真实 landmark mask 锚定，
+    无的（泪沟/苹果肌/法令纹…）走 face_bbox 相对粗椭圆。映射表 = ``_REGION_ALIASES``
+    （唯一 SSoT，避免在 board_closeup_section 重复维护一份硬编码集）。
+    """
+    lookup = str(key).strip().lower().replace("-", "_").replace(" ", "_")
+    return _REGION_ALIASES.get(lookup)
+
+
+def detect_face_bbox(image_path: str | Path) -> tuple[int, int, int, int] | None:
+    """检测人脸包围盒（像素 ``left, top, right, bottom``），失败一律返回 None。
+
+    用 MediaPipe FaceLandmarker 478 点取 min/max 包围盒并 clamp 进图界。
+
+    用途：把人脸归一的 ROI 分数（``focal_mask_generator._FOCAL_REGIONS``）映射到
+    **真实人脸位置/尺度**而非整图——使 before/after 近景按人脸解剖对齐，根治
+    closeup 各自独立裁剪导致的术前/术后错位（③ 川字术后偏上）。
+
+    注意：用 ``cv2.imread`` 读 raw 像素（**不**应用 EXIF）。调用方须传**已 EXIF
+    归一**的图（如 board_closeup_section 的 norm_src），与 ``generate_focus_mask``
+    同坐标系。fail-open：依赖缺失 / 读图失败 / 无脸 / 任何异常都返回 None
+    （近景是增益不是门槛，永不挡板）。
+    """
+    try:
+        mp, mp_python, mp_vision = _lazy_import_mediapipe()
+        import cv2
+        import numpy as np
+    except ImportError:
+        return None
+
+    try:
+        img_bgr = cv2.imread(str(Path(image_path)), cv2.IMREAD_COLOR)
+        if img_bgr is None:
+            return None
+        h, w = img_bgr.shape[:2]
+        landmarks = _landmarks_px(img_bgr, mp, mp_python, mp_vision, cv2, np)
+        if landmarks is None or len(landmarks) == 0:
+            return None
+        xs, ys = landmarks[:, 0], landmarks[:, 1]
+        left = int(max(0, np.floor(float(xs.min()))))
+        top = int(max(0, np.floor(float(ys.min()))))
+        right = int(min(w, np.ceil(float(xs.max()))))
+        bottom = int(min(h, np.ceil(float(ys.max()))))
+        if right <= left or bottom <= top:
+            return None
+        return (left, top, right, bottom)
+    except Exception:  # noqa: BLE001 — fail-open
+        return None
+
+
 def _normalise_region_keys(region_keys: Iterable[str]) -> list[str]:
     regions: list[str] = []
     unknown: list[str] = []
@@ -329,4 +381,4 @@ def _region_mask(shape, landmarks, indices, dilate_frac, face_w, cv2, np):
     return cv2.dilate(mask, kernel)
 
 
-__all__ = ["generate_precise_mask"]
+__all__ = ["generate_precise_mask", "detect_face_bbox", "precise_region_for"]
