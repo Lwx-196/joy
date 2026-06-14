@@ -932,6 +932,72 @@ def _alpha_defringe(arr_orig, alpha, *, edge_r: int | None = None,
     return arr_fixed, alpha_fixed
 
 
+def _blue_spill_suppress(arr, alpha, *, spill_r: int | None = None,
+                         tol: float = 8.0):
+    """边缘带蓝 spill 中和（2026-06-14 owner 选 A，临床蓝手术铺巾染发缘）。
+
+    根因（cell repro harness 探针实锤，vs 旧 handoff hypothesis 修正）：蓝铺巾的
+    环境光把人物发缘染上 teal tint，这些像素 α 中位≈1.0（较实心发缘，非低 α 漏网
+    细发）、源色本就偏蓝（B≫R）。_alpha_defringe 用「背景色」反解 F=(C-(1-α)B)/α
+    治的是半透明边混入的背景污染；但此处蓝是前景自带 tint，且本地背景恰是暗中性区
+    （bg_field B-R≈0）→ reverse-solve 几乎不动蓝 → teal 撕裂带残留。
+
+    修法（只压蓝、永不提亮 → 深底零回归）：
+    - 只作用于「边缘带」= support − erode(support, spill_r)；实心内部与背景字节不变。
+    - 参照「本地 interior 干净前景色场」fg_field（interior 像素色归一化卷积向外蔓延）：
+      navy 上衣内部本就蓝 → 其边缘 fg_spill 高 → excess≈0 不动（保护衣服 / 任何
+      合法蓝色边缘）；发/肤内部中性 → 发缘异常蓝被识别并压回本地前景蓝量。
+    - blue spill 度量 = B − max(R,G)；excess = max(spill − max(fg_spill,0) − tol, 0)；
+      out_B = B − excess。只减蓝通道 → out ≤ in 逐通道 → 合成后只会变暗，深底
+      （边缘 spill≈0）excess≈0 字节恒等。
+    - 局限（已知，归 owner scope）：离边 >spill_r 的深层实心蓝发（整片侧发被铺巾
+      染色，源照灯光问题）不在边缘带内，本函数不强治——de-blue 实心前景会误伤
+      navy 衣，超出 edge-fringe 清理范畴。
+
+    Returns: arr_fixed（band 蓝被压的副本）；无边界 / 无参照可用时原样返回输入。
+    """
+    import cv2
+    import numpy as np
+
+    h, w = alpha.shape
+    support = (alpha > 0.0).astype(np.uint8)
+    if not support.any():
+        return arr
+    if spill_r is None:
+        spill_r = max(24, min(h, w) // 22)
+    interior = cv2.erode(support, np.ones((spill_r, spill_r), np.uint8)) > 0
+    band = (support > 0) & ~interior
+    if not band.any() or not interior.any():
+        return arr
+
+    # 本地 interior 干净前景色场：归一化卷积向外蔓延盖住 band
+    k = max(31, (min(h, w) // 15) | 1)
+    intf = interior.astype(np.float32)
+    den = cv2.boxFilter(intf, -1, (k, k), normalize=True)
+    num = cv2.boxFilter(arr.astype(np.float32) * intf[..., None], -1,
+                        (k, k), normalize=True)
+    fg_field = num / np.maximum(den[..., None], np.float32(1e-6))
+
+    bm = band & (den > 1e-3)
+    if not bm.any():
+        return arr
+    c = arr[bm].astype(np.float64)
+    f = fg_field[bm].astype(np.float64)
+    spill = c[:, 2] - np.maximum(c[:, 0], c[:, 1])        # 边缘像素蓝超量
+    fg_spill = f[:, 2] - np.maximum(f[:, 0], f[:, 1])     # 本地干净前景自带蓝量
+    excess = np.maximum(spill - np.maximum(fg_spill, 0.0) - tol, 0.0)
+
+    arr_fixed = arr.copy()
+    nb = arr_fixed[bm]
+    nb[:, 2] = np.clip(c[:, 2] - excess, 0.0, 255.0)
+    arr_fixed[bm] = nb
+    changed = int((excess > 1.0).sum())
+    if changed:
+        logger.info("  [blue-spill] band=%dpx changed=%dpx spill_r=%d tol=%.0f maxΔB=%.0f",
+                    int(bm.sum()), changed, spill_r, tol, float(excess.max()))
+    return arr_fixed
+
+
 def _rembg_composite_on_black(pil_img: Image.Image) -> Image.Image:
     """rembg 语义抠图 → 纯黑底；不做 _fade_bottom_to_black 截断 / _strip_lower_white_clothing 剔除。
 
@@ -1059,6 +1125,9 @@ def _rembg_composite_on_black(pil_img: Image.Image) -> Image.Image:
                     )
     # Defringe + alpha erosion（owner 6-11 实证白边/原色 halo）：黑底合成前反解边缘背景污染
     arr_fg, alpha = _alpha_defringe(arr_orig, alpha)
+    # 蓝铺巾 spill 中和（2026-06-14 owner 选 A）：临床蓝手术铺巾环境光把发缘染蓝，
+    # defringe 用背景色反解治不了前景自带蓝 tint → 边缘带按本地干净前景参照压蓝。
+    arr_fg = _blue_spill_suppress(arr_fg, alpha)
     out = np.clip(arr_fg * alpha[..., None], 0, 255).astype(np.uint8)
     # 背景纯黑兜底①：erode person mask 建「安全区」——安全区内（瞳孔/虹膜/鼻孔/深色发根）
     # 保留所有暗像素，只在安全区外做地板清零灭 rembg 误留的暗背景缝。
