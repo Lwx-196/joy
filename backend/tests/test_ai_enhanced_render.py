@@ -308,6 +308,27 @@ def test_run_ai_enhanced_render_allow_burn_passes_flag(tmp_path, monkeypatch):
     assert "--allow-cache-miss-burn" in seen["args"]
 
 
+def test_evaluate_render_result_needs_confirmation_maps_through(tmp_path):
+    """F2：执行器 status='needs_confirmation' → quality_status 同名（非 blocked/done），
+    且 cache_miss_* 进 metrics 供前端确认卡展示。"""
+    quality = render_quality.evaluate_render_result(
+        {
+            "status": "needs_confirmation",
+            "output_path": None,
+            "blocking_issue_count": 0,
+            "cache_miss_count": 2,
+            "cache_miss_total": 3,
+            "cache_miss_est_cost_usd": 0.114,
+            "cache_miss_est_seconds": 300,
+        }
+    )
+    assert quality["quality_status"] == "needs_confirmation"
+    assert quality["can_publish"] is False
+    assert quality["metrics"]["cache_miss_count"] == 2
+    assert quality["metrics"]["cache_miss_est_cost_usd"] == 0.114
+    assert quality["metrics"]["cache_miss_est_seconds"] == 300
+
+
 def test_evaluate_render_result_held_maps_to_blocked_even_with_board(tmp_path):
     """render_quality：held_gate 存在 → quality_status='blocked'，即使诊断板 output 存在（G2）。"""
     board = tmp_path / "final-board.jpg"

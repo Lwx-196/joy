@@ -267,6 +267,12 @@ def evaluate_render_result(result: dict[str, Any]) -> dict[str, Any]:
     # WP2（aligned-render-pipeline）：AI 增强板的 G1/G2 质量门 HELD 信号。
     held_gate = str(result.get("held_gate") or "").strip()
     held_reason = str(result.get("held_reason") or "").strip()
+    # F2：cache-miss 待用户确认烧 API（执行器返回 status='needs_confirmation' + 缺槽/预估）。
+    needs_confirmation = str(result.get("status") or "") == "needs_confirmation"
+    cache_miss_count = int(result.get("cache_miss_count") or 0)
+    cache_miss_total = int(result.get("cache_miss_total") or 0)
+    cache_miss_est_cost_usd = result.get("cache_miss_est_cost_usd")
+    cache_miss_est_seconds = result.get("cache_miss_est_seconds")
     blocking_issues = [str(item) for item in (result.get("blocking_issues") or [])]
     raw_warning_items = [str(item) for item in (result.get("warnings") or [])]
     # Transient API errors (HTTP 403/429, quota, rate limit) are upstream
@@ -298,7 +304,11 @@ def evaluate_render_result(result: dict[str, Any]) -> dict[str, Any]:
     score -= max(0.0, float(pixel_metrics.get("cv_penalty") or 0.0))
     score = max(0.0, round(score, 1))
 
-    if held_gate:
+    if needs_confirmation:
+        # F2：cache-miss 待用户确认烧钱 = 独立终态，≠ blocked/failed/done。前端弹确认卡，
+        # 用户确认后以 allow_burn=True 重入即真烧。无诊断板（output_path=None）。
+        quality_status = "needs_confirmation"
+    elif held_gate:
         # WP2：质量门 HELD = 质量保留态，即使保留了诊断板（output 存在）也判 blocked，
         # 区别于 done_with_issues（出板可复核）与 failed（真渲染异常）。
         quality_status = "blocked"
@@ -329,6 +339,10 @@ def evaluate_render_result(result: dict[str, Any]) -> dict[str, Any]:
             "render_error": render_error,
             "held_gate": held_gate,
             "held_reason": held_reason,
+            "cache_miss_count": cache_miss_count,
+            "cache_miss_total": cache_miss_total,
+            "cache_miss_est_cost_usd": cache_miss_est_cost_usd,
+            "cache_miss_est_seconds": cache_miss_est_seconds,
             "blocking_issues": blocking_issues,
             "warnings": display_warnings,
             "display_warnings": display_warnings,
