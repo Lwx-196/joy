@@ -255,6 +255,59 @@ def test_run_ai_enhanced_render_angle_held_blocks_without_board(tmp_path, monkey
     assert not (out_root / "final-board.jpg").exists()
 
 
+def test_run_ai_enhanced_render_cache_miss_needs_confirmation(tmp_path, monkeypatch):
+    """F2：cache-miss 未授权 → status='needs_confirmation' + 缺槽/预估，不真烧、output_path=None。"""
+    case_dir = tmp_path / "case"
+    case_dir.mkdir()
+    out_root = tmp_path / "outroot"
+    miss_line = json.dumps(
+        {"miss_slots": ["front", "side"], "miss_count": 2, "total_slots": 3,
+         "est_cost_usd": 0.114, "est_seconds": 300, "board": None},
+        ensure_ascii=False,
+    )
+    seen = {}
+
+    def fake_sub(args, timeout, extra_env=None):
+        seen["args"] = args
+        return _fake_proc(f"chatter\nAI_BOARD_CACHE_MISS: {miss_line}\n")
+
+    monkeypatch.setattr(render_executor, "_run_render_subprocess", fake_sub)
+    monkeypatch.setattr(render_executor.stress, "render_output_root", lambda *a, **k: out_root)
+
+    result = render_executor.run_ai_enhanced_render(case_dir)
+
+    assert result["status"] == "needs_confirmation"
+    assert result["cache_miss_count"] == 2
+    assert result["cache_miss_total"] == 3
+    assert result["cache_miss_est_cost_usd"] == 0.114
+    assert result["cache_miss_est_seconds"] == 300
+    assert result["output_path"] is None
+    # 默认未授权 → 不带烧钱 flag
+    assert "--allow-cache-miss-burn" not in seen["args"]
+
+
+def test_run_ai_enhanced_render_allow_burn_passes_flag(tmp_path, monkeypatch):
+    """F2：用户确认 allow_burn=True → 子进程带 --allow-cache-miss-burn 授权真烧。"""
+    case_dir = tmp_path / "case"
+    case_dir.mkdir()
+    out_root = tmp_path / "outroot"
+    produced = tmp_path / "board.jpg"
+    produced.write_bytes(b"final")
+    seen = {}
+
+    def fake_sub(args, timeout, extra_env=None):
+        seen["args"] = args
+        return _fake_proc(f"AI_BOARD_RESULT: {produced}\n")
+
+    monkeypatch.setattr(render_executor, "_run_render_subprocess", fake_sub)
+    monkeypatch.setattr(render_executor.stress, "render_output_root", lambda *a, **k: out_root)
+
+    result = render_executor.run_ai_enhanced_render(case_dir, allow_burn=True)
+
+    assert result["status"] == "done"
+    assert "--allow-cache-miss-burn" in seen["args"]
+
+
 def test_evaluate_render_result_held_maps_to_blocked_even_with_board(tmp_path):
     """render_quality：held_gate 存在 → quality_status='blocked'，即使诊断板 output 存在（G2）。"""
     board = tmp_path / "final-board.jpg"

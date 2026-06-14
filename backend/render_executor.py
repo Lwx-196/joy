@@ -1949,6 +1949,22 @@ def _parse_ai_board_held(stdout: str) -> dict[str, Any] | None:
     return None
 
 
+def _parse_ai_board_cache_miss(stdout: str) -> dict[str, Any] | None:
+    """解析 'AI_BOARD_CACHE_MISS: <json>'（F2）：前端单案例路径 cache-miss、未授权烧 API
+    时由脚本打印，含 miss_slots/miss_count/est_cost_usd/est_seconds。无则 None。"""
+    for line in (stdout or "").splitlines():
+        if line.startswith("AI_BOARD_CACHE_MISS:"):
+            payload = line.split("AI_BOARD_CACHE_MISS:", 1)[1].strip()
+            try:
+                parsed = json.loads(payload)
+            except (json.JSONDecodeError, ValueError):
+                return None
+            if isinstance(parsed, dict):
+                return parsed
+            return None
+    return None
+
+
 def run_ai_enhanced_render(
     case_dir: Path | str,
     brand: str = "fumei",
@@ -1956,6 +1972,7 @@ def run_ai_enhanced_render(
     enhance_direction: str = "heal",
     enhance_model: str = "gemini-3-pro-image",
     timeout: int = DEFAULT_AI_ENHANCE_TIMEOUT_SEC,
+    allow_burn: bool = False,
 ) -> dict[str, Any]:
     """术后 AI 增强板：spawn `render_ai_enhanced_boards.py --case-dir`（仿 run_render 子进程隔离），
     把增强板放到标准 `final-board.jpg` 位置，前端零改即可像普通板轮询+展示。
@@ -2001,6 +2018,8 @@ def run_ai_enhanced_render(
                 "--enhance-model", enhance_model,
                 "--output-dir", tmp,
                 "--no-board-qa",
+                # F2：用户确认烧钱后 allow_burn=True → 授权 cache-miss 真烧；默认 off 走预判护栏。
+                *(["--allow-cache-miss-burn"] if allow_burn else []),
             ],
             timeout,
             extra_env={
@@ -2058,6 +2077,27 @@ def run_ai_enhanced_render(
                 "held_gate": gate,
                 "held_reason": reason,
                 "render_error": reason or f"{gate} gate held",
+            }
+
+        # F2：cache-miss 需用户确认（未授权烧 API）≠ 渲染失败。返回 status='needs_confirmation'
+        # + 缺槽/预估 $/耗时，由 render_quality/render_queue 映射成待确认态，前端弹确认卡；
+        # 用户确认后以 allow_burn=True 重入即真烧。
+        cache_miss = _parse_ai_board_cache_miss(proc.stdout)
+        if cache_miss is not None:
+            return {
+                "output_path": None,
+                "manifest_path": None,
+                "status": "needs_confirmation",
+                "case_mode": "ai_enhanced_board",
+                "enhance": {"direction": enhance_direction, "model": enhance_model},
+                "blocking_issue_count": 0,
+                "warning_count": 0,
+                "effective_templates": {},
+                "manual_overrides_applied": [],
+                "cache_miss_count": int(cache_miss.get("miss_count") or 0),
+                "cache_miss_total": int(cache_miss.get("total_slots") or 0),
+                "cache_miss_est_cost_usd": cache_miss.get("est_cost_usd"),
+                "cache_miss_est_seconds": cache_miss.get("est_seconds"),
             }
 
         # 既无成品板也无 HELD 信号 = 真失败。

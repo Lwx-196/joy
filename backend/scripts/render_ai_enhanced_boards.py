@@ -1192,6 +1192,61 @@ def _make_matte_black_transform(case_layout, stats: dict):
     return transform
 
 
+# cache-miss 烧钱预估（F2，前端确认卡展示）：真 4K rsta 实测单槽 ~$0.057、生图 ~150s（NOW.md 6-12）。
+_EST_BURN_USD_PER_SLOT = 0.057
+_EST_BURN_SEC_PER_SLOT = 150
+
+
+def _slot_cache_plan(orig_img, providers: list, prompt: str):
+    """单槽 cache 计划：算 cache_path + 送 AI 的 png + size_override + 复原 callable。
+
+    **实际增强（_enhance_manifest_sources）与前端预判（_check_cache_coverage）共用此函数**，
+    保证「预测命中」与「实际查找」用同一把 key，杜绝 cache-miss 护栏自己产生预测漂移。
+    restore(raw_pil, slot) 封装 adaptive（按比例复原）/ 非adaptive（去方形 pad 裁回）差异。
+    """
+    adaptive_quality = next((getattr(p, "quality", "") for p in providers
+                             if getattr(p, "quality", "")), "default")
+    if _adaptive_4k_enabled():
+        target_size = _adaptive_target_size(*orig_img.size)
+        png = _pil_to_png_bytes(orig_img)
+        cache_key = _ai_cache_key(png, prompt, f"adaptive:{target_size}@{adaptive_quality}")
+        def restore(raw_pil, _slot, _osize=orig_img.size):
+            return _restore_to_original(raw_pil, _osize)
+        return AI_CACHE_DIR / f"{cache_key}.png", png, target_size, restore
+    padded, crop_box = _pad_to_square(orig_img)
+    sq = padded.size[0]
+    png = _pil_to_png_bytes(padded)
+    cache_key = _ai_cache_key(png, prompt, _chain_size_sig(providers))
+    def restore(raw_pil, slot, _sq=sq, _cb=crop_box):
+        return _restore_content_geometry(raw_pil, _sq, _cb, slot)
+    return AI_CACHE_DIR / f"{cache_key}.png", png, None, restore
+
+
+def _check_cache_coverage(manifest: dict, providers: list, prompt: str) -> dict:
+    """零成本预判前端单案例的 cache 覆盖（不调 API、不写盘，纯 ls）：用与实际增强相同的
+    _slot_cache_plan 算每个待增强 after 槽的 cache_path，统计命中/未命中。
+
+    与 _enhance_manifest_sources 同口径跳过 error 组（那些槽不会烧，故不计 miss）。
+    返回 {total_slots, miss_count, miss_slots: [slot...]}。
+    """
+    from PIL import ImageOps
+    total = 0
+    miss: list[str] = []
+    for group in manifest.get("groups", []):
+        if (group.get("status") or "ok") != "ok":
+            continue
+        for slot, selection in (group.get("selected_slots") or {}).items():
+            src_path = ((selection or {}).get("after") or {}).get("path")
+            if not src_path or not Path(src_path).is_file():
+                continue
+            total += 1
+            orig_img = ImageOps.exif_transpose(Image.open(src_path)).convert("RGB")
+            cache_path, _png, _so, _restore = _slot_cache_plan(orig_img, providers, prompt)
+            if not cache_path.is_file():
+                miss.append(slot)
+    return {"total_slots": total, "miss_count": len(miss), "miss_slots": miss}
+
+
 def _enhance_manifest_sources(
     manifest: dict, providers: list, prompt: str,
     stats: dict, *, enhance_dir: Path, use_cache: bool = True,
@@ -1208,12 +1263,7 @@ def _enhance_manifest_sources(
 
     enhance_dir.mkdir(parents=True, exist_ok=True)
     ft = focus_targets or []
-    size_sig = _chain_size_sig(providers)
-    adaptive_4k = _adaptive_4k_enabled()
-    # 自适应路径的 cache sig 用链中 hi-res quality（与 _chain_size_sig 同源），保证可复现
-    adaptive_quality = next((getattr(p, "quality", "") for p in providers
-                             if getattr(p, "quality", "")), "default")
-    if adaptive_4k:
+    if _adaptive_4k_enabled():
         logger.info("  [fullres] 自适应 4K 已启用（按源图比例动态 size，原图直送不 pad）")
 
     for group in manifest.get("groups", []):
@@ -1242,20 +1292,10 @@ def _enhance_manifest_sources(
             orig_img = ImageOps.exif_transpose(Image.open(src_path)).convert("RGB")
             logger.info("  [fullres] %s: 源图 %dx%d → AI 增强", slot, *orig_img.size)
 
-            if adaptive_4k:
-                # 自适应 4K：按源图比例算合法 4K size，原图直送（不 pad），size_override 透传。
-                # cache key 掺 per-image size（adaptive: 前缀，与旧方形 key 永不碰撞）。
-                target_size = _adaptive_target_size(*orig_img.size)
-                png = _pil_to_png_bytes(orig_img)
-                cache_key = _ai_cache_key(png, prompt, f"adaptive:{target_size}@{adaptive_quality}")
-                size_override = target_size
-            else:
-                padded, crop_box = _pad_to_square(orig_img)
-                sq = padded.size[0]
-                png = _pil_to_png_bytes(padded)
-                cache_key = _ai_cache_key(png, prompt, size_sig)
-                size_override = None
-            cache_path = AI_CACHE_DIR / f"{cache_key}.png"
+            # cache_path/png/size_override/restore 与 _check_cache_coverage 同源（_slot_cache_plan）：
+            # 自适应 4K=按比例动态 size 原图直送；非adaptive=方形 pad。adaptive key 掺 per-image
+            # size（adaptive: 前缀，与旧方形 key 永不碰撞）。
+            cache_path, png, size_override, restore = _slot_cache_plan(orig_img, providers, prompt)
 
             t0 = time.time()
             try:
@@ -1268,10 +1308,7 @@ def _enhance_manifest_sources(
                     AI_CACHE_DIR.mkdir(parents=True, exist_ok=True)
                     cache_path.write_bytes(raw)
 
-                if adaptive_4k:
-                    enh = _restore_to_original(_bytes_to_pil(raw), orig_img.size)
-                else:
-                    enh = _restore_content_geometry(_bytes_to_pil(raw), sq, crop_box, slot)
+                enh = restore(_bytes_to_pil(raw), slot)
 
                 elapsed = time.time() - t0
                 logger.info("  [fullres] %s: OK via %s (%.1fs) %dx%d",
@@ -1330,6 +1367,10 @@ def main() -> None:
     parser.add_argument("--case-dir", type=Path, default=None,
                         help="单案例入口（server 集成用）：直接渲染指定的治疗目录，绕过 --cases-root 遍历。"
                              "成功后 stdout 打印 'AI_BOARD_RESULT: <board.jpg>' 供父进程解析")
+    parser.add_argument("--allow-cache-miss-burn", action="store_true",
+                        help="授权 cache-miss 烧 API（F2）。默认 off：--case-dir 前端路径遇 cache-miss 不烧、"
+                             "打印 'AI_BOARD_CACHE_MISS: <json>' 等用户确认。用户确认后父进程带此 flag 重入即真烧。"
+                             "batch（--customers）不受此门约束（args.case_dir is None 直接放行）")
     args = parser.parse_args()
 
     if args.native_enhance:
@@ -1508,6 +1549,30 @@ def main() -> None:
                 focus_targets = prm.parse_procedures(treatment).get("all_regions", []) if args.mask_lock else []
                 if args.mask_lock:
                     print(f"  [lock] 治疗区 focus_targets = {focus_targets}")
+                # F2 cache-miss 烧钱护栏（仅 --case-dir 前端单案例路径，batch 不受约束）：
+                # 烧 API 前零成本预判 cache 覆盖，miss 且未授权 → 不烧、发 AI_BOARD_CACHE_MISS
+                # 信号 + 预估 $/耗时给前端弹确认卡。用户确认后父进程带 --allow-cache-miss-burn 重入即真烧。
+                if (args.case_dir is not None and not args.dry_run
+                        and not args.allow_cache_miss_burn):
+                    cov = _check_cache_coverage(manifest, providers, ENHANCE_PROMPT_V2)
+                    if cov["miss_count"] > 0:
+                        est_cost = round(cov["miss_count"] * _EST_BURN_USD_PER_SLOT, 3)
+                        est_seconds = cov["miss_count"] * _EST_BURN_SEC_PER_SLOT
+                        print("AI_BOARD_CACHE_MISS: " + json.dumps({
+                            "miss_slots": cov["miss_slots"],
+                            "miss_count": cov["miss_count"],
+                            "total_slots": cov["total_slots"],
+                            "est_cost_usd": est_cost,
+                            "est_seconds": est_seconds,
+                            "board": None,
+                        }, ensure_ascii=False))
+                        print(f"  💸 CACHE_MISS_HOLD: {cov['miss_count']}/{cov['total_slots']} 槽未命中 cache"
+                              f"（预估 ${est_cost} / ~{est_seconds}s）→ 不烧，等前端确认")
+                        results.append({
+                            "customer": customer, "treatment": treatment, "title": board_title,
+                            "status": "CACHE_MISS_HELD", "cache_miss": cov,
+                        })
+                        continue
                 if not args.dry_run:
                     # defect① 修复（2026-06-11）：manifest 顶级 status 不再整板拦增强——
                     # 单组 blocking 即拉 error，旧条件整板静默跳过但板照常渲出（江佳慧
