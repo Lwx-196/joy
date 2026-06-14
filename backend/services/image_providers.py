@@ -414,29 +414,92 @@ def _sse_collect_b64(lines, *, deadline: float | None = None) -> str | None:
     return final_b64
 
 
+class ProviderOutageError(RuntimeError):
+    """所有 provider 都因 outage-class 错误（HTTP 5xx / SSE server_error / 墙钟 cap timeout）
+    失败 → 上浮给执行器/前端展示「服务商暂不可用」清晰提示，而非泛化「all providers failed」。"""
+
+
+# provider outage 短路守卫（2026-06-14 F3）：rsta 拥塞高峰时单 provider 每槽 attempt×2 各 ~150s
+# 空跑，一批 N 槽 = N×~300s 死等。模块级计数（单进程 run 内有效，跨 generate_with_fallback 调用
+# 累积）：某 provider 连续 outage-class 失败达阈值 → 后续槽直接跳过它走 fallback；成功即清零；
+# 最近失败超出窗口自动失效（不毒化后续健康期）。零行为改变 = provider 健康时与旧逻辑完全一致。
+_PROVIDER_OUTAGE: dict[str, dict[str, float]] = {}
+_OUTAGE_FAIL_THRESHOLD = 2      # 连续 outage 失败次数达此值 → 短路跳过
+_OUTAGE_WINDOW_S = 120.0        # 最近一次 outage 失败须在此窗口内才算「仍 outage」
+
+
+def _is_outage_error(exc: Exception) -> bool:
+    """outage-class 错误（provider 侧不可用）：HTTP 5xx / SSE server_error 事件 / 墙钟 cap
+    timeout。区别于尺寸校验拒（4xx，images_edit 内部换档不外抛）与瞬时网络抖动（值得重试一次）。"""
+    if isinstance(exc, TimeoutError):
+        return True  # SSE 墙钟 cap = 连接活着但上游永不出图
+    s = str(exc).lower()
+    return ("server_error" in s
+            or "http 500" in s or "http 502" in s or "http 503" in s or "http 504" in s
+            or "wall-clock cap" in s)
+
+
+def _mark_outage(name: str, now: float) -> None:
+    rec = _PROVIDER_OUTAGE.get(name)
+    if rec and now - rec["last_ts"] <= _OUTAGE_WINDOW_S:
+        rec["count"] += 1
+        rec["last_ts"] = now
+    else:
+        _PROVIDER_OUTAGE[name] = {"count": 1.0, "last_ts": now}
+
+
+def _is_outaged(name: str, now: float) -> bool:
+    rec = _PROVIDER_OUTAGE.get(name)
+    return bool(rec and rec["count"] >= _OUTAGE_FAIL_THRESHOLD
+               and now - rec["last_ts"] <= _OUTAGE_WINDOW_S)
+
+
+def _clear_outage(name: str) -> None:
+    _PROVIDER_OUTAGE.pop(name, None)
+
+
 def generate_with_fallback(providers: list[ImageProvider], image_bytes: bytes, prompt: str,
                            *, mime: str = "image/jpeg", size_override: str | None = None) -> tuple[bytes, str]:
     """按链 fallback；返回 (图字节, provider 名)。全失败抛最后异常。
 
     size_override 透传给 images_edit（自适应 4K 每图动态尺寸）。默认 None = 旧行为。
+    outage 短路（F3）：近期连续 outage-class 失败的 provider 整段跳过；全 outage 抛 ProviderOutageError。
     """
     if not providers:
         raise RuntimeError("no ready image provider (check env: TUZI_IMAGE_PRIMARY_* / PANEL_IMG_*)")
     last: Exception | None = None
+    saw_outage = False
     for p in providers:
+        if _is_outaged(p.name, time.time()):
+            # circuit-breaker：近窗口内已连续 outage → 不再每槽空跑 ~300s，直接换 provider。
+            logger.warning("images_edit %s 跳过（outage 短路：近 %.0fs 内连续 ≥%d 次 outage 失败）",
+                           p.name, _OUTAGE_WINDOW_S, _OUTAGE_FAIL_THRESHOLD)
+            last = last or ProviderOutageError(f"{p.name} skipped (outage circuit-breaker)")
+            saw_outage = True
+            continue
         for attempt in (1, 2):   # 瞬时网络/代理错误重试一次再换 provider
             t0 = time.time()
             try:
-                return images_edit(p, image_bytes, prompt, mime=mime, size_override=size_override), p.name
+                result = images_edit(p, image_bytes, prompt, mime=mime, size_override=size_override), p.name
+                _clear_outage(p.name)   # 成功 = provider 恢复，清零毒化计数
+                return result
             except Exception as e:  # noqa: BLE001 — 逐家试，记下最后一个；
                 # 失败必留痕（2026-06-12：刘亦卿槽 648s 静默降级 flashapi 低清，无日志无法归因）
                 last = e
                 logger.warning("images_edit %s attempt %d 失败 (%.1fs): %s",
                                p.name, attempt, time.time() - t0, str(e)[:200])
+                if _is_outage_error(e):
+                    # outage 类（5xx/server_error/墙钟）重试 2nd attempt 也是死等 ~150s → 记账后立刻换 provider。
+                    saw_outage = True
+                    _mark_outage(p.name, time.time())
+                    break
+    if saw_outage:
+        raise ProviderOutageError(f"all providers unavailable (outage); last={last}")
     raise RuntimeError(f"all providers failed; last={last}")
 
 
 __all__ = [
     "ImageProvider", "load_env_file", "build_registry", "resolve_chain",
     "images_edit", "vertex_generate_content", "generate_with_fallback", "DEFAULT_ENV_FILE",
+    "ProviderOutageError",
 ]
