@@ -64,6 +64,9 @@ _FOCAL_REGIONS: dict[str, tuple[float, float, float, float]] = {
     "鼻尖": (0.5, 0.55, 0.18, 0.18),
     "鼻基底": (0.5, 0.62, 0.30, 0.10),
     "鼻翼": (0.5, 0.60, 0.28, 0.15),
+    # 鼻背 / 鼻梁 / 山根 / 隆鼻 — 鼻中线竖向高光带（atlas 把 鼻子/鼻梁/山根/隆鼻 归一到 鼻背，
+    # 此前无 entry → 全脸 fallback；补竖向窄椭圆 radix(眉间下)→tip 才能定位近景/局部增强）
+    "鼻背": (0.5, 0.48, 0.16, 0.40),
     "nose": (0.5, 0.55, 0.25, 0.30),
     # Forehead horizontal lines / 额纹 / 抬头纹 (frontalis) — AI 术后模拟新增
     "额纹": (0.5, 0.20, 0.55, 0.16),
@@ -103,6 +106,18 @@ def _union_regions(targets: Iterable[str]) -> tuple[float, float, float, float] 
     w = x_max - x_min
     h = y_max - y_min
     return (cx, cy, w, h)
+
+
+def union_region_height(targets: Iterable[str]) -> float | None:
+    """治疗区 union 纵向高度（占人脸 bbox 高度的分数 [0,1]）；无可定位区返回 None。
+
+    用于近景 gate（board_closeup_section）：高度小 = 治疗区紧凑集中（单区/同区相邻），
+    高度大 = 多部位纵向铺开（≈整脸）。纯算术、零图像处理、与具体图像/朝向无关。
+    全脸 fallback key（face/面部）不计入可定位区。
+    """
+    located = [t for t in targets if t in _FOCAL_REGIONS and t not in ("face", "面部")]
+    u = _union_regions(located)
+    return None if u is None else u[3]
 
 
 def _to_pixel_bbox(

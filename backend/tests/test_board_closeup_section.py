@@ -1,4 +1,9 @@
-"""G3 纹类近景对比区单测：触发解析 + bbox 比例扩展 + fail-open + 构建管线（monkeypatch 重依赖）。"""
+"""G3 近景对比区单测：覆盖率 gate + 触发解析 + per-region 布局 + fail-open + 构建管线。
+
+2026-06-14 全部位延展 + 覆盖率 gate（owner 拍板）后的契约：
+- closeup_plan_regions = 触发判定（单部位/同区紧凑出；多部位分散跳；鼻类正面不做）
+- cell_aspect_for / center_shift_for 走 REGION_CLOSEUP_LAYOUT 表
+"""
 
 from __future__ import annotations
 
@@ -10,47 +15,65 @@ from PIL import Image
 from backend.services import board_closeup_section as closeup
 
 
-# ---------- wrinkle_regions 触发解析 ----------
+# ---------- closeup_plan_regions：覆盖率 gate + 触发 ----------
 
 
-def test_wrinkle_regions_hits_chuanzi():
-    assert closeup.wrinkle_regions("保妥适20U川字纹") == ["川字"]
+def test_plan_chuanzi_single_compact():
+    # 单纹类 → 紧凑 → 出
+    assert closeup.closeup_plan_regions("保妥适20U川字纹") == ["川字"]
 
 
-def test_wrinkle_regions_alias_taitou_maps_to_ewen():
-    # 抬头纹 是 额纹 的 alias；鱼尾 不在 atlas，诚实不命中
-    assert closeup.wrinkle_regions("衡力50U川字鱼尾抬头纹") == ["川字", "额纹"]
+def test_plan_leigou_single_now_triggers():
+    # 泪沟 单做（容量类，旧逻辑刻意排除）→ 现在单部位紧凑 → 出
+    assert closeup.closeup_plan_regions("弗缦1.0注射泪沟") == ["泪沟"]
 
 
-def test_wrinkle_regions_faling():
-    got = closeup.wrinkle_regions("缇颜3支唇，法令纹，口角、保妥适20U川字纹")
-    assert set(got) == {"法令纹", "川字"}
+def test_plan_xiaba_single_now_triggers():
+    # 下巴 单做（旧逻辑非纹类不触发）→ 现在出
+    assert closeup.closeup_plan_regions("玻尿酸注射下巴") == ["下巴"]
 
 
-def test_wrinkle_regions_filler_regions_excluded():
-    # 泪沟/卧蚕 = 容量填充非纹，刻意不触发
-    assert closeup.wrinkle_regions("弗缦1.0注射泪沟") == []
-    assert closeup.wrinkle_regions("玻尿酸卧蚕 唇填充") == []
+def test_plan_colocated_undereye_both():
+    # 泪沟+卧蚕 都在眼下 → union 仍紧凑 → 两者都进
+    got = closeup.closeup_plan_regions("弗缦注射泪沟、玻尿酸卧蚕")
+    assert set(got) == {"泪沟", "卧蚕"}
 
 
-def test_wrinkle_regions_empty_and_none_safe():
-    assert closeup.wrinkle_regions("") == []
-    assert closeup.wrinkle_regions(None) == []  # type: ignore[arg-type]
+def test_plan_scattered_multi_region_skips():
+    # 泪沟(眼下) + 下巴(下脸) 纵向铺开 → 多部位 → 跳过（正面已覆盖）
+    assert closeup.closeup_plan_regions("弗缦注射泪沟、玻尿酸注射下巴") == []
 
 
-def test_wrinkle_regions_order_stable():
-    # extract_regions 保持 atlas 定义序（法令纹 在 川字 之前定义）
-    a = closeup.wrinkle_regions("川字纹及法令纹")
-    b = closeup.wrinkle_regions("法令纹及川字纹")
-    assert a == b
+def test_plan_nose_only_skipped_front():
+    # 纯鼻类：鼻背可定位（紧凑）但不入正面合格集 → 不出
+    assert closeup.closeup_plan_regions("海魅骨性1支注射鼻子") == []
+
+
+def test_plan_nose_plus_chin_scattered_skips():
+    # 鼻+下巴（许楚楚式多部位分散）→ union 铺满 → 跳过
+    assert closeup.closeup_plan_regions("越致1支注射鼻子下巴") == []
+
+
+def test_plan_empty_and_none_safe():
+    assert closeup.closeup_plan_regions("") == []
+    assert closeup.closeup_plan_regions(None) == []  # type: ignore[arg-type]
+
+
+def test_plan_no_locatable_region_returns_empty():
+    # 无任何可定位治疗区（纯非局部词）→ []
+    assert closeup.closeup_plan_regions("水光针全脸补水") == []
+
+
+def test_plan_pingguoji_single_triggers():
+    assert closeup.closeup_plan_regions("盈致1支注射苹果肌") == ["苹果肌"]
 
 
 def test_section_label_display_names():
     assert closeup.section_label(["川字"]) == "川字纹"
-    assert closeup.section_label(["川字", "法令纹"]) == "川字纹、法令纹"
+    assert closeup.section_label(["泪沟", "卧蚕"]) == "泪沟、卧蚕"
 
 
-# ---------- cell_aspect_for（宽带纹类横版，owner 拍板 2026-06-11） ----------
+# ---------- cell_aspect_for / center_shift_for（REGION_CLOSEUP_LAYOUT） ----------
 
 
 def test_cell_aspect_wide_for_faling_and_ewen():
@@ -58,18 +81,44 @@ def test_cell_aspect_wide_for_faling_and_ewen():
     assert closeup.cell_aspect_for(["额纹"]) == closeup.CELL_ASPECT_WIDE
 
 
-def test_cell_aspect_vertical_for_chuanzi_only():
-    # 川字是小中央区，竖版已验可读（曾玲莉 e2e），保持现状
-    assert closeup.cell_aspect_for(["川字"]) == closeup.CELL_ASPECT
+def test_cell_aspect_narrow_for_chuanzi():
+    # owner 06-14 拍板：川字 = 800×420 窄带
+    assert closeup.cell_aspect_for(["川字"]) == closeup.CELL_ASPECT_NARROW
 
 
-def test_cell_aspect_mixed_goes_wide():
-    # union mask 含宽带区时 bbox 必然横宽
+def test_cell_aspect_undereye_for_leigou_woocan():
+    assert closeup.cell_aspect_for(["泪沟"]) == closeup.CELL_ASPECT_UNDEREYE
+    assert closeup.cell_aspect_for(["卧蚕"]) == closeup.CELL_ASPECT_UNDEREYE
+
+
+def test_cell_aspect_midface_for_pingguoji():
+    assert closeup.cell_aspect_for(["苹果肌"]) == closeup.CELL_ASPECT_MIDFACE
+
+
+def test_cell_aspect_lower_for_xiaba():
+    assert closeup.cell_aspect_for(["下巴"]) == closeup.CELL_ASPECT_LOWER
+
+
+def test_cell_aspect_mixed_priority_widest_band():
+    # 跨组取最宽带（法令纹优先），保证 expand_to_aspect 恒含 union bbox
     assert closeup.cell_aspect_for(["川字", "法令纹"]) == closeup.CELL_ASPECT_WIDE
 
 
 def test_cell_aspect_empty_defaults_vertical():
     assert closeup.cell_aspect_for([]) == closeup.CELL_ASPECT
+
+
+def test_center_shift_chuanzi_down():
+    assert closeup.center_shift_for(["川字"]) == closeup.NARROW_CENTER_SHIFT_FRAC
+
+
+def test_center_shift_xiaba_up():
+    # 下巴 mask 偏低延入颈 → 负 shift（上移对中下巴）
+    assert closeup.center_shift_for(["下巴"]) < 0
+
+
+def test_center_shift_undereye_neutral():
+    assert closeup.center_shift_for(["泪沟"]) == 0.0
 
 
 # ---------- expand_to_aspect ----------
@@ -86,7 +135,6 @@ TARGET = closeup.CELL_ASPECT[0] / closeup.CELL_ASPECT[1]
 def test_expand_to_aspect_widens_narrow_bbox():
     box = closeup.expand_to_aspect((900, 400, 1100, 1400), (4000, 5000))
     assert abs(_aspect(box) - TARGET) < 0.01
-    # 原 bbox 被包含
     assert box[0] <= 900 and box[2] >= 1100
 
 
@@ -97,7 +145,6 @@ def test_expand_to_aspect_heightens_flat_bbox():
 
 
 def test_expand_to_aspect_clamps_inside_image():
-    # bbox 顶在角落，扩展后必须整体平移进界
     box = closeup.expand_to_aspect((0, 0, 100, 1000), (1200, 1500))
     left, top, right, bottom = box
     assert left >= 0 and top >= 0 and right <= 1200 and bottom <= 1500
@@ -117,13 +164,20 @@ def test_expand_to_aspect_degenerate_raises():
 
 
 def test_expand_to_aspect_wide_keeps_band_local():
-    # G3 根因锚定（郭璟琳法令纹量纲）：宽带 bbox 1968x576 @ 图 3936x2624，
-    # 竖版 cell 高顶到全脸；横版 aspect 下高度收在局部带（< 图高 60%）
     wide = closeup.CELL_ASPECT_WIDE
     box = closeup.expand_to_aspect((984, 1024, 2952, 1600), (3936, 2624), aspect=wide)
     left, top, right, bottom = box
     assert abs(_aspect(box) - wide[0] / wide[1]) < 0.01
     assert (bottom - top) < 2624 * 0.6  # 不再渲成全脸高
+
+
+def test_expand_to_aspect_negative_shift_moves_up():
+    # center_shift_frac < 0 把裁剪中心上移（下巴对中）
+    base = closeup.expand_to_aspect((1000, 3000, 1400, 3400), (4000, 5000))
+    up = closeup.expand_to_aspect(
+        (1000, 3000, 1400, 3400), (4000, 5000), center_shift_frac=-0.1
+    )
+    assert up[1] < base[1]  # 顶边更高
 
 
 # ---------- build_closeup_assets（重依赖 monkeypatch） ----------
@@ -134,11 +188,7 @@ def _patch_pipeline(monkeypatch, tmp_path, bbox=(100, 100, 300, 500)):
     import backend.ai_generation_adapter as adapter
     from backend.services import classical_enhance, focal_mask_generator
 
-    monkeypatch.setattr(
-        classical_enhance,
-        "unsharp_focal_enhance",
-        lambda src, **kw: src,
-    )
+    monkeypatch.setattr(classical_enhance, "unsharp_focal_enhance", lambda src, **kw: src)
 
     def _fake_mask(image_path, focus_targets, *, output_path=None, **kw):
         mask = Image.new("L", (10, 10), 255)
@@ -155,7 +205,7 @@ def _make_src(tmp_path, name, size=(1200, 1600)):
     return p
 
 
-def test_build_closeup_assets_happy_path(monkeypatch, tmp_path):
+def test_build_closeup_assets_chuanzi_narrow(monkeypatch, tmp_path):
     _patch_pipeline(monkeypatch, tmp_path)
     before = _make_src(tmp_path, "before.jpg")
     after = _make_src(tmp_path, "after.jpg")
@@ -165,16 +215,16 @@ def test_build_closeup_assets_happy_path(monkeypatch, tmp_path):
     assert got is not None
     assert got["regions"] == ["川字"]
     assert got["label"] == "川字纹"
-    assert got["cell_aspect"] == list(closeup.CELL_ASPECT)  # 川字竖版现状
+    assert got["cell_aspect"] == list(closeup.CELL_ASPECT_NARROW)  # 川字 = 800×420
+    narrow_target = closeup.CELL_ASPECT_NARROW[0] / closeup.CELL_ASPECT_NARROW[1]
     for side in ("before_path", "after_path"):
         crop_path = Path(got[side])
         assert crop_path.is_file()
         with Image.open(crop_path) as img:
-            assert abs((img.width / img.height) - TARGET) < 0.02
+            assert abs((img.width / img.height) - narrow_target) < 0.02
 
 
 def test_build_closeup_assets_wide_region_horizontal_crop(monkeypatch, tmp_path):
-    # 法令纹 → 横版 cell_aspect 进 section dict，裁剪比例 ≈ 800/516
     _patch_pipeline(monkeypatch, tmp_path, bbox=(100, 600, 1100, 900))
     before = _make_src(tmp_path, "before.jpg")
     after = _make_src(tmp_path, "after.jpg")
@@ -189,12 +239,24 @@ def test_build_closeup_assets_wide_region_horizontal_crop(monkeypatch, tmp_path)
             assert abs((img.width / img.height) - wide_target) < 0.02
 
 
+def test_build_closeup_assets_undereye_region(monkeypatch, tmp_path):
+    # 新增部位：泪沟 → 眼下带 aspect
+    _patch_pipeline(monkeypatch, tmp_path, bbox=(100, 400, 1100, 700))
+    before = _make_src(tmp_path, "before.jpg")
+    after = _make_src(tmp_path, "after.jpg")
+
+    got = closeup.build_closeup_assets(before, after, ["泪沟"], tmp_path / "work")
+
+    assert got is not None
+    assert got["cell_aspect"] == list(closeup.CELL_ASPECT_UNDEREYE)
+
+
 def test_build_closeup_assets_missing_source_fail_open(monkeypatch, tmp_path):
     _patch_pipeline(monkeypatch, tmp_path)
     got = closeup.build_closeup_assets(
         tmp_path / "nope_b.jpg", tmp_path / "nope_a.jpg", ["川字"], tmp_path / "work"
     )
-    assert got is None  # 不抛，fail-open
+    assert got is None
 
 
 def test_build_closeup_assets_bbox_failure_fail_open(monkeypatch, tmp_path):
@@ -227,9 +289,10 @@ def _manifest_with_front(before, after):
     }
 
 
-def test_build_for_manifest_no_wrinkle_returns_none(tmp_path):
+def test_build_for_manifest_scattered_returns_none(tmp_path):
+    # 多部位分散 → gate 跳过 → None
     m = _manifest_with_front(tmp_path / "b.jpg", tmp_path / "a.jpg")
-    assert closeup.build_for_manifest(m, "玻尿酸注射下巴", tmp_path) is None
+    assert closeup.build_for_manifest(m, "弗缦注射泪沟、玻尿酸注射下巴", tmp_path) is None
 
 
 def test_build_for_manifest_no_front_slot_returns_none(tmp_path):
@@ -237,15 +300,16 @@ def test_build_for_manifest_no_front_slot_returns_none(tmp_path):
     assert closeup.build_for_manifest(m, "保妥适20U川字纹", tmp_path) is None
 
 
-def test_build_for_manifest_happy_path(monkeypatch, tmp_path):
+def test_build_for_manifest_single_region_happy_path(monkeypatch, tmp_path):
     _patch_pipeline(monkeypatch, tmp_path)
     before = _make_src(tmp_path, "b.jpg")
     after = _make_src(tmp_path, "a.jpg")
     m = _manifest_with_front(before, after)
 
-    got = closeup.build_for_manifest(m, "保妥适20U川字纹", tmp_path / "work")
+    # 下巴 单做现在出近景（旧逻辑非纹类返回 None）
+    got = closeup.build_for_manifest(m, "玻尿酸注射下巴", tmp_path / "work")
 
-    assert got is not None and got["regions"] == ["川字"]
+    assert got is not None and got["regions"] == ["下巴"]
 
 
 def test_build_for_manifest_empty_groups_fail_open(tmp_path):

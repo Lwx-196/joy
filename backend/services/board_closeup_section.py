@@ -1,16 +1,22 @@
-"""G3 板级纹类近景对比区：含真皱纹类项目的板，板尾追加近景 before/after 对比行。
+"""G3 板级近景对比区：单部位/同区集中的项目，板尾追加近景 before/after 对比行。
 
-定位（2026-06-11 审核标准 v1 G3）：纹类项目（川字纹/额纹/法令纹）在角度行
-全身/半身尺度下沟纹不可读（曾玲莉 川字纹近景缺失不可读 = 标定根因），
-板尾追加一行近景对比让"打了什么改善哪里"可读。
+定位（2026-06-11 审核标准 v1 G3 → 2026-06-14 全部位延展 + 覆盖率 gate）：
+局部小变化（川字纹/泪沟/卧蚕/苹果肌/下巴…）在角度行全身/半身尺度下不可读
+（曾玲莉 川字纹近景缺失不可读 = 标定根因），板尾追加一行近景对比让
+"打了什么改善哪里"可读。
+
+近景 gate（owner 拍板 2026-06-14，覆盖率自动判）：
+- **单部位 / 同区相邻**（川字；或 泪沟+卧蚕 都在眼下）→ 近景能放大孤立该处 → 出。
+- **多部位且分散**（眉弓+鼻+下巴，上中下都有）→ 要同时看到 = 几乎整张脸，
+  而正面行本来就是整张脸 → 近景冗余 → 跳过。
+- 判据 = 治疗区 union 纵向高度占脸比 ≤ COMPACT_HEIGHT_MAX（纯算术，零图像处理）。
 
 纪律：
-- 范围 = 真皱纹类 atlas key（川字/额纹/法令纹）。泪沟/卧蚕是容量填充非纹，
-  刻意不进集（反臆造，与 G1 EXTRA_GATE_KEYWORDS 同纪律）。
 - 源 = front 槽**原始源图**（非 AI 增强后图）：faithful-zoom L-139/L-140 ——
-  真实像素全分辨率 + 古典 clarity（arm A 产品化路径，真 gate 91.67% PASS），
-  零烧钱零 API。
-- fail-open：无纹类命中 / 无 front 槽 / mask、裁剪、增强任何一步失败 →
+  真实像素全分辨率 + 古典 clarity（arm A 产品化路径，真 gate 91.67% PASS），零烧钱零 API。
+- 鼻类正面刻意不入合格集（owner 2026-06-14）：正面鼻近景 = 竖条含全脸、孤立性弱，
+  鼻背线轮廓斜/侧才显（atlas 同标），留 oblique/profile 另设计。
+- fail-open：gate 不过 / 无 front 槽 / mask、裁剪、增强任何一步失败 →
   返回空/None，板照常出。近景是增益不是门槛，永不挡板。
 """
 
@@ -21,74 +27,124 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-# 真皱纹类 region（facial_region_atlas key 子集；alias 由 extract_regions 归一：
-# 川字纹/眉间→川字，抬头纹/额头→额纹）。
-WRINKLE_REGION_KEYS: tuple[str, ...] = ("川字", "额纹", "法令纹")
+# ── 近景 cell 宽高比（owner 拍板 2026-06-11 / 2026-06-14） ──
+# 基准 = render_brand_clean 角度行 cell（scale=1 时 516x624），同比例让渲染端高度公式零改动。
+CELL_ASPECT: tuple[int, int] = (516, 624)          # 竖版基线（兜底）
+CELL_ASPECT_WIDE: tuple[int, int] = (800, 516)     # 法令纹/额纹 横带
+# 横向近景统一用宽 800（与 WIDE/NARROW 同宽，board 1920 下双格留足边距 s(110)；
+# 900 宽实测仅剩 s(5) 边距贴边）。各部位只用高度调 framing 比例（probe 标定）。
+CELL_ASPECT_NARROW: tuple[int, int] = (800, 420)   # 川字 窄中央带 r=1.90（owner 06-14 拍板）
+CELL_ASPECT_UNDEREYE: tuple[int, int] = (800, 392) # 泪沟/卧蚕/眼袋 眼下带 r≈2.04（probe 900×440）
+CELL_ASPECT_MIDFACE: tuple[int, int] = (800, 444)  # 苹果肌/面颊 中脸带 r≈1.80（probe 900×500）
+CELL_ASPECT_LOWER: tuple[int, int] = (800, 570)    # 下巴/下颌线/唇 下脸带 r≈1.40（probe 700×500）
 
-# atlas key → 板面展示名
-REGION_DISPLAY = {"川字": "川字纹", "额纹": "额纹", "法令纹": "法令纹"}
-
-# 近景 cell 宽高比基准 = render_brand_clean 角度行 cell（scale=1 时 516x624），
-# 同比例可让渲染端高度公式零改动。
-CELL_ASPECT: tuple[int, int] = (516, 624)
-
-# 宽带纹类横版 cell（owner 拍板 2026-06-11）：法令纹/额纹 mask 是横跨宽带
-# （郭璟琳法令纹 bbox 1968x576，w/h=3.4），竖版 cell 下 expand_to_aspect 必然
-# 把高顶到全脸（四档 pad 探针零差别，pad 非杠杆）→ 横版近景条（鼻到下巴/额头
-# 局部带）才与正面行视觉区分。川字是小中央区，竖版已验可读，保持现状。
-CELL_ASPECT_WIDE: tuple[int, int] = (800, 516)
-WIDE_REGION_KEYS: tuple[str, ...] = ("法令纹", "额纹")
-
-# 窄中央纹近景带（owner 拍板 2026-06-14）：川字类收紧到 800×420（占源高 ~29%），
-# 有效孤立治疗区与其他部位。比 WIDE 更扁，配合下移对中（见 NARROW_CENTER_SHIFT_FRAC）。
-CELL_ASPECT_NARROW: tuple[int, int] = (800, 420)
-NARROW_STRIP_KEYS: tuple[str, ...] = ("川字",)
 # 川字 mask 椭圆含上中线点 9 → 质心偏额头（探针实测 bbox 中心在眉间之上）；
-# 裁剪中心向下偏 = 占crop高的比例，把眉间真川字从底边拉回画面（探针 variant C 验证 0.10 framing 正确）
+# 裁剪中心向下偏 = 占 crop 高的比例，把眉间真川字从底边拉回画面（探针 variant C 验 0.10 正确）。
 NARROW_CENTER_SHIFT_FRAC = 0.10
 
-# bbox 外扩比例：纹是细长区域，留足上下文（额头/眉/鼻周）近景才可定位部位
+# 部位 → (近景 cell aspect, 裁剪中心下移比例 frac)。owner 2026-06-14 全部位延展。
+# aspect 由各部位 probe 标定（/tmp/verify_g3_region_crop.py）：眼下/苹果肌=横带，下巴=下脸横带。
+# 下巴/下颌线 mask 偏低延入颈 → 负 shift（上移）对中下巴。鼻类刻意不入（正面不做）。
+REGION_CLOSEUP_LAYOUT: dict[str, tuple[tuple[int, int], float]] = {
+    "川字": (CELL_ASPECT_NARROW, NARROW_CENTER_SHIFT_FRAC),
+    "额纹": (CELL_ASPECT_WIDE, 0.0),
+    "法令纹": (CELL_ASPECT_WIDE, 0.0),
+    "泪沟": (CELL_ASPECT_UNDEREYE, 0.0),
+    "卧蚕": (CELL_ASPECT_UNDEREYE, 0.0),
+    "眼袋": (CELL_ASPECT_UNDEREYE, 0.0),
+    "苹果肌": (CELL_ASPECT_MIDFACE, 0.0),
+    "面颊": (CELL_ASPECT_MIDFACE, 0.0),
+    "下巴": (CELL_ASPECT_LOWER, -0.05),
+    "下颌线": (CELL_ASPECT_LOWER, -0.05),
+    "唇": (CELL_ASPECT_LOWER, 0.0),
+}
+
+# 出特写的合格部位集 = 有精确 _FOCAL_REGIONS 定位 + 正面可读 + 非鼻类。
+CLOSEUP_ELIGIBLE_FRONT: frozenset[str] = frozenset(REGION_CLOSEUP_LAYOUT)
+
+# aspect 解析优先序：紧凑 union 内若跨组，取最宽带的一档（expand_to_aspect 恒含 bbox，
+# 选宽带只决定追加上下文方向，不会切掉任何合格区）。
+_ASPECT_PRIORITY: tuple[str, ...] = (
+    "法令纹", "额纹", "川字", "泪沟", "卧蚕", "眼袋",
+    "苹果肌", "面颊", "下巴", "下颌线", "唇",
+)
+
+# 近景 gate 阈值（owner 拍板 2026-06-14，覆盖率自动判，边界靠真实案例标定）：
+# 可定位治疗区 union 纵向高度 ≤ 此值（占脸高）= 紧凑单区 → 出特写；超过 = 多部位铺开 → 跳过。
+COMPACT_HEIGHT_MAX = 0.42
+
+# atlas key → 板面展示名
+REGION_DISPLAY = {
+    "川字": "川字纹", "额纹": "额纹", "法令纹": "法令纹",
+    "泪沟": "泪沟", "卧蚕": "卧蚕", "眼袋": "眼袋",
+    "苹果肌": "苹果肌", "面颊": "面颊",
+    "下巴": "下巴", "下颌线": "下颌线", "唇": "唇",
+}
+
+# bbox 外扩比例：留足上下文（额头/眉/鼻周）近景才可定位部位
 CROP_PAD_FRAC = 0.35
 
 
-def wrinkle_regions(treatment_text: str) -> list[str]:
-    """treatment 串 → 命中的真皱纹类 region key（atlas 定义序，稳定输出）。
+def closeup_plan_regions(treatment_text: str) -> list[str]:
+    """治疗串 → 出近景特写的 region 列表（已过紧凑 gate）。空 = 不出特写。
 
-    解析失败 fail-open 返回空列表（无近景区，不挡板）。
+    gate（owner 2026-06-14，覆盖率自动判）：
+      1. 解析全部治疗区；取可 _FOCAL_REGIONS 定位的子集量 union 纵向高度。
+      2. union 高度 > COMPACT_HEIGHT_MAX → 多部位铺开（≈整脸）→ 跳过，正面行已覆盖。
+      3. 紧凑 → 取其中正面合格部位（CLOSEUP_ELIGIBLE_FRONT）作为特写内容；
+         纯鼻类等无合格部位 → 空（不出特写）。
+    解析失败/无治疗区一律 fail-open 返回空（近景是增益非门槛）。
     """
     try:
         from backend.services.facial_region_atlas import extract_regions
 
-        return [r for r in extract_regions(treatment_text or "") if r in WRINKLE_REGION_KEYS]
+        all_regions = list(extract_regions(treatment_text or ""))
     except Exception as exc:  # noqa: BLE001 — fail-open
-        logger.warning("closeup wrinkle_regions 解析失败（fail-open 跳过）: %s", exc)
+        logger.warning("closeup 治疗区解析失败（fail-open 跳过）: %s", exc)
         return []
+    if not all_regions:
+        return []
+    try:
+        from backend.services.focal_mask_generator import union_region_height
+
+        union_h = union_region_height(all_regions)
+    except Exception as exc:  # noqa: BLE001 — fail-open
+        logger.warning("closeup union 高度计算失败（fail-open 跳过）: %s", exc)
+        return []
+    if union_h is None:
+        return []  # 无可定位治疗区
+    if union_h > COMPACT_HEIGHT_MAX:
+        logger.info(
+            "closeup gate: 治疗区分散 union_h=%.2f > %.2f（多部位，正面已覆盖），跳过近景",
+            union_h, COMPACT_HEIGHT_MAX,
+        )
+        return []
+    eligible = [r for r in all_regions if r in CLOSEUP_ELIGIBLE_FRONT]
+    if not eligible:
+        logger.info("closeup gate: 紧凑但无正面合格部位（如纯鼻类），跳过近景")
+    return eligible
 
 
 def section_label(regions: list[str]) -> str:
     return "、".join(REGION_DISPLAY.get(r, r) for r in regions)
 
 
-def cell_aspect_for(regions: list[str]) -> tuple[int, int]:
-    """命中宽带纹类（法令纹/额纹）→ 横版 cell；纯川字 → 竖版现状。
+def _dominant_layout(regions: list[str]) -> tuple[tuple[int, int], float]:
+    """紧凑 union 内取最宽带部位的 (aspect, shift)；无命中回退竖版基线。"""
+    for r in _ASPECT_PRIORITY:
+        if r in regions:
+            return REGION_CLOSEUP_LAYOUT[r]
+    return (CELL_ASPECT, 0.0)
 
-    混合命中（如 川字+法令纹）也走横版：mask 是各 region 的 union，
-    含宽带区时 bbox 必然横宽。
-    """
-    if any(r in WIDE_REGION_KEYS for r in regions):
-        return CELL_ASPECT_WIDE
-    if any(r in NARROW_STRIP_KEYS for r in regions):
-        return CELL_ASPECT_NARROW
-    return CELL_ASPECT
+
+def cell_aspect_for(regions: list[str]) -> tuple[int, int]:
+    """命中部位 → 近景 cell aspect（REGION_CLOSEUP_LAYOUT，按 _ASPECT_PRIORITY 取主导）。"""
+    return _dominant_layout(regions)[0]
 
 
 def center_shift_for(regions: list[str]) -> float:
-    """近景裁剪中心下移比例（占 crop 高）。宽版优先不偏；川字类下移到眉间真纹。"""
-    if any(r in WIDE_REGION_KEYS for r in regions):
-        return 0.0
-    if any(r in NARROW_STRIP_KEYS for r in regions):
-        return NARROW_CENTER_SHIFT_FRAC
-    return 0.0
+    """近景裁剪中心下移比例（占 crop 高，负=上移）。按主导部位取。"""
+    return _dominant_layout(regions)[1]
 
 
 def expand_to_aspect(
@@ -165,16 +221,22 @@ def build_closeup_assets(
         for side, src in (("before", Path(before_path)), ("after", Path(after_path))):
             side_dir = work_dir / side
             side_dir.mkdir(parents=True, exist_ok=True)
+            # L-145 升级：EXIF 朝向**先归一一次**再喂 enhance + mask。
+            # generate_focus_mask 不做 exif_transpose（按 raw 像素放椭圆），而 unsharp 内部
+            # 把输出归一到 display → 二者坐标系不一致：对 EXIF 旋转的手机竖拍源（新增部位主力）
+            # mask bbox 会落到旋转前坐标 → 裁错。orientation=1 源（如曾玲莉）归一=no-op，字节不变。
+            norm_src = side_dir / "src_exif_norm.png"
+            with Image.open(src) as _im:
+                ImageOps.exif_transpose(_im).convert("RGB").save(norm_src, format="PNG")
             enhanced = unsharp_focal_enhance(
-                src, focus_targets=list(regions), output_dir=side_dir, preset="clarity"
+                norm_src, focus_targets=list(regions), output_dir=side_dir, preset="clarity"
             )
             mask = generate_focus_mask(
-                src, list(regions), output_path=side_dir / "closeup_mask.png"
+                norm_src, list(regions), output_path=side_dir / "closeup_mask.png"
             )
             bbox = _focal_crop_bbox(mask, pad_frac=CROP_PAD_FRAC)
             with Image.open(enhanced) as img:
-                # L-145：EXIF 朝向先归一再裁剪（增强产物 PNG 无 EXIF = no-op；
-                # K-1 回退原 JPEG 时归一到与 mask 同一坐标系）
+                # norm_src/enhanced 均 display 朝向；exif_transpose 兜底（PNG 无 EXIF = no-op）
                 img = ImageOps.exif_transpose(img)
                 crop_box = expand_to_aspect(tuple(bbox), img.size, aspect=aspect, center_shift_frac=shift)
                 crop = img.convert("RGB").crop(crop_box)
@@ -203,7 +265,7 @@ def build_for_manifest(
     取第一个有 front 槽的 group 的 before/after **原始源图路径**
     （selected_slots 的 path 即源图；AI 增强产物在 enhancement 字段，刻意不用）。
     """
-    regions = wrinkle_regions(treatment_text)
+    regions = closeup_plan_regions(treatment_text)
     if not regions:
         return None
     try:
