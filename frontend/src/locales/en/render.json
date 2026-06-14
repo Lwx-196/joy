@@ -27,6 +27,16 @@
     "publishable": "publishable",
     "reviewRequired": "needs review"
   },
+  "held": {
+    "title": "Quality hold",
+    "hint": "Did not meet the delivery quality gate and was held back (not a render failure). Add missing sources, then re-render with vision retry.",
+    "diagnosticBoard": "Diagnostic board (review only, not for delivery)",
+    "diagnosticBoardTitle": "Open diagnostic board in new tab",
+    "gate": {
+      "angle": "Angle coverage gate",
+      "pair": "Pairing consistency gate"
+    }
+  },
   "composition": {
     "title": "Composition note",
     "generic": "Before/after composition differs and should be reviewed.",

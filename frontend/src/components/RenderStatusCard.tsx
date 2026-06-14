@@ -167,6 +167,13 @@ export function RenderStatusCard({ caseId, brand: brandOverride, caseAbsPath }: 
   const statusLabel = statusLabelMap[status] ?? status;
   const isPending = status === "queued" || status === "running";
   const outputDir = job.output_path ? job.output_path.replace(/\/[^/]+$/, "") : null;
+  // WP2 aligned-render-pipeline: G1/G2 质量门 HELD = 「质量保留」，区别于真渲染失败。
+  // held_gate 来自后端 meta；G2 保留诊断板（output_path 存在）可缩略预览，G1 无板。
+  const heldGate = job.meta?.held_gate || null;
+  const heldReason = job.meta?.held_reason || job.error_message || null;
+  const heldPreviewUrl =
+    heldGate && job.output_path ? renderJobOutputUrl(caseId, job, caseAbsPath) : null;
+  const heldImageFailed = heldPreviewUrl != null && failedPreviewUrl === heldPreviewUrl;
   const copyText = async (text: string, message: string) => {
     await navigator.clipboard.writeText(text);
     setActionMessage(message);
@@ -443,7 +450,76 @@ export function RenderStatusCard({ caseId, brand: brandOverride, caseAbsPath }: 
         </div>
       )}
 
-      {status === "blocked" && (
+      {status === "blocked" && heldGate && (
+        <div style={{ fontSize: 12 }} data-testid="render-held">
+          <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", marginBottom: 6 }}>
+            <span
+              className="badge"
+              data-testid="render-held-gate"
+              style={{ background: "var(--amber-50)", color: "var(--amber-ink)" }}
+            >
+              {t("held.title")} · {t(`held.gate.${heldGate}`, { defaultValue: heldGate })}
+            </span>
+          </div>
+          {heldReason && (
+            <div
+              data-testid="render-held-reason"
+              style={{
+                fontFamily: "var(--mono)",
+                fontSize: 11,
+                padding: 8,
+                background: "var(--amber-50)",
+                borderRadius: 4,
+                maxHeight: 90,
+                overflow: "auto",
+                wordBreak: "break-all",
+                color: "var(--amber-ink)",
+              }}
+            >
+              {heldReason}
+            </div>
+          )}
+          <div style={{ marginTop: 6, color: "var(--ink-3)" }}>{t("held.hint")}</div>
+          {heldPreviewUrl && !heldImageFailed && (
+            <div style={{ marginTop: 8 }} data-testid="render-held-board">
+              <div style={{ color: "var(--ink-4)", fontSize: 11, marginBottom: 4 }}>{t("held.diagnosticBoard")}</div>
+              <a
+                href={heldPreviewUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="render-final-preview"
+                data-testid="render-held-thumb"
+                title={t("held.diagnosticBoardTitle")}
+              >
+                <img src={heldPreviewUrl} alt="held-diagnostic-board" onError={() => setFailedPreviewUrl(heldPreviewUrl)} />
+              </a>
+            </div>
+          )}
+          <button
+            type="button"
+            className="btn sm"
+            style={{ marginTop: 8 }}
+            onClick={() =>
+              renderMut.mutate({
+                caseId,
+                payload: {
+                  brand: job.brand,
+                  template: job.template,
+                  semantic_judge: "auto",
+                },
+              })
+            }
+            disabled={renderMut.isPending}
+            title={t("actions.visionRetryTitle")}
+          >
+            <Ico name="scan" size={11} />
+            {t("actions.visionRetry")}
+          </button>
+          <RenderBlockingDetail job={job} />
+        </div>
+      )}
+
+      {status === "blocked" && !heldGate && (
         <div style={{ fontSize: 12, color: "var(--err)" }}>
           <RenderSummary job={job} />
           {job.error_message && (

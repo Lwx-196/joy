@@ -27,6 +27,16 @@
     "publishable": "可发布",
     "reviewRequired": "需复核"
   },
+  "held": {
+    "title": "质量保留",
+    "hint": "未达交付质量门槛，已保留不交付（非渲染失败）。可补齐素材后用「视觉筛选重试」重出。",
+    "diagnosticBoard": "诊断板（仅供复核，不作交付）",
+    "diagnosticBoardTitle": "新窗口查看诊断板大图",
+    "gate": {
+      "angle": "角度覆盖门",
+      "pair": "配对一致性门"
+    }
+  },
   "composition": {
     "title": "构图提示",
     "generic": "术前/术后构图存在差异，建议人工复核。",

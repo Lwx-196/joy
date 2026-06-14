@@ -15,7 +15,7 @@ import subprocess
 
 import pytest
 
-from backend import render_executor, render_queue
+from backend import render_executor, render_queue, render_quality
 
 
 # ----------------------------------------------------------------------
@@ -30,6 +30,38 @@ def test_parse_ai_board_result_extracts_path():
 
 def test_parse_ai_board_result_none_when_absent():
     assert render_executor._parse_ai_board_result("no marker here\nfoo") is None
+
+
+# ----------------------------------------------------------------------
+# _parse_ai_board_held (WP2 aligned-render-pipeline)
+# ----------------------------------------------------------------------
+
+
+def test_parse_ai_board_held_pair_with_board():
+    stdout = (
+        "chatter\n"
+        '  AI_BOARD_HELD: {"gate": "pair", "reason": "front eye_ratio=1.5", "board": "/tmp/o/b.jpg"}  \n'
+        "trailing"
+    )
+    held = render_executor._parse_ai_board_held(stdout)
+    assert held == {"gate": "pair", "reason": "front eye_ratio=1.5", "board": "/tmp/o/b.jpg"}
+
+
+def test_parse_ai_board_held_angle_board_none():
+    stdout = 'AI_BOARD_HELD: {"gate": "angle", "reason": "印堂需正面|斜侧", "board": null}'
+    held = render_executor._parse_ai_board_held(stdout)
+    assert held["gate"] == "angle"
+    assert held["board"] is None
+    # reason 含 '|' 字符也不影响（JSON 编码，非分隔符方案）
+    assert "|" in held["reason"]
+
+
+def test_parse_ai_board_held_none_when_absent():
+    assert render_executor._parse_ai_board_held("no marker\nfoo") is None
+
+
+def test_parse_ai_board_held_none_when_malformed_json():
+    assert render_executor._parse_ai_board_held("AI_BOARD_HELD: {not json}") is None
 
 
 # ----------------------------------------------------------------------
@@ -158,6 +190,120 @@ def test_run_ai_enhanced_render_raises_when_no_marker(tmp_path, monkeypatch):
 def test_run_ai_enhanced_render_missing_case_dir(tmp_path):
     with pytest.raises(FileNotFoundError):
         render_executor.run_ai_enhanced_render(tmp_path / "does-not-exist")
+
+
+# ----------------------------------------------------------------------
+# run_ai_enhanced_render HELD → status="blocked" (WP2: gate HELD ≠ 渲染失败)
+# ----------------------------------------------------------------------
+
+
+def test_run_ai_enhanced_render_pair_held_blocks_with_diagnostic_board(tmp_path, monkeypatch):
+    """G2 配对门 HELD：保留诊断板 → status='blocked' 不抛错，诊断板落 final-board。"""
+    case_dir = tmp_path / "case"
+    case_dir.mkdir()
+    diag = tmp_path / "diag_board.jpg"
+    diag.write_bytes(b"diagnostic-board-bytes")
+    out_root = tmp_path / "outroot"
+
+    held_line = json.dumps(
+        {"gate": "pair", "reason": "front eye_ratio=1.46（允许 [0.78, 1.3]）", "board": str(diag)},
+        ensure_ascii=False,
+    )
+
+    def fake_sub(args, timeout, extra_env=None):
+        return _fake_proc(f"chatter\nAI_BOARD_HELD: {held_line}\n")
+
+    monkeypatch.setattr(render_executor, "_run_render_subprocess", fake_sub)
+    monkeypatch.setattr(render_executor.stress, "render_output_root", lambda *a, **k: out_root)
+
+    result = render_executor.run_ai_enhanced_render(case_dir)
+
+    assert result["status"] == "blocked"
+    assert result["held_gate"] == "pair"
+    assert "eye_ratio" in result["held_reason"]
+    assert result["render_error"] == result["held_reason"]
+    assert result["blocking_issue_count"] == 1
+    final = out_root / "final-board.jpg"
+    assert result["output_path"] == str(final)
+    assert final.read_bytes() == b"diagnostic-board-bytes"
+
+
+def test_run_ai_enhanced_render_angle_held_blocks_without_board(tmp_path, monkeypatch):
+    """G1 角度门 HELD：出板前短路无诊断板 → status='blocked'，output_path=None。"""
+    case_dir = tmp_path / "case"
+    case_dir.mkdir()
+    out_root = tmp_path / "outroot"
+
+    held_line = json.dumps(
+        {"gate": "angle", "reason": "印堂需正面|斜侧（板上实有 ['front']）", "board": None},
+        ensure_ascii=False,
+    )
+
+    def fake_sub(args, timeout, extra_env=None):
+        return _fake_proc(f"AI_BOARD_HELD: {held_line}\n")
+
+    monkeypatch.setattr(render_executor, "_run_render_subprocess", fake_sub)
+    monkeypatch.setattr(render_executor.stress, "render_output_root", lambda *a, **k: out_root)
+
+    result = render_executor.run_ai_enhanced_render(case_dir)
+
+    assert result["status"] == "blocked"
+    assert result["held_gate"] == "angle"
+    assert result["output_path"] is None
+    assert result["blocking_issue_count"] == 1
+    # G1 短路无板 → 不创建 final-board
+    assert not (out_root / "final-board.jpg").exists()
+
+
+def test_evaluate_render_result_held_maps_to_blocked_even_with_board(tmp_path):
+    """render_quality：held_gate 存在 → quality_status='blocked'，即使诊断板 output 存在（G2）。"""
+    board = tmp_path / "final-board.jpg"
+    board.write_bytes(b"x")
+    quality = render_quality.evaluate_render_result(
+        {
+            "status": "blocked",
+            "output_path": str(board),
+            "blocking_issue_count": 1,
+            "held_gate": "pair",
+            "held_reason": "front eye_ratio=1.46",
+            "render_error": "front eye_ratio=1.46",
+        }
+    )
+    assert quality["quality_status"] == "blocked"
+    assert quality["can_publish"] is False
+    assert quality["metrics"]["held_gate"] == "pair"
+    assert quality["metrics"]["held_reason"] == "front eye_ratio=1.46"
+
+
+def test_evaluate_render_result_done_when_no_held(tmp_path):
+    """无 held_gate + 干净出板 → 仍走原 done 逻辑（不回归）。"""
+    board = tmp_path / "final-board.jpg"
+    board.write_bytes(b"x")
+    quality = render_quality.evaluate_render_result(
+        {"status": "ok", "output_path": str(board), "blocking_issue_count": 0}
+    )
+    assert quality["quality_status"] in {"done", "done_with_issues"}
+    assert quality["metrics"]["held_gate"] == ""
+
+
+def test_run_ai_enhanced_render_board_result_wins_over_absent_held(tmp_path, monkeypatch):
+    """成功路（有 AI_BOARD_RESULT）仍 status='done'，不被 HELD 逻辑干扰。"""
+    case_dir = tmp_path / "case"
+    case_dir.mkdir()
+    produced = tmp_path / "ok.jpg"
+    produced.write_bytes(b"ok-bytes")
+    out_root = tmp_path / "outroot"
+
+    monkeypatch.setattr(
+        render_executor,
+        "_run_render_subprocess",
+        lambda a, t, extra_env=None: _fake_proc(f"AI_BOARD_RESULT: {produced}\n"),
+    )
+    monkeypatch.setattr(render_executor.stress, "render_output_root", lambda *a, **k: out_root)
+
+    result = render_executor.run_ai_enhanced_render(case_dir)
+    assert result["status"] == "done"
+    assert "held_gate" not in result
 
 
 # ----------------------------------------------------------------------

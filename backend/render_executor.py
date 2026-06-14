@@ -1928,6 +1928,27 @@ def _parse_ai_board_result(stdout: str) -> str | None:
     return None
 
 
+def _parse_ai_board_held(stdout: str) -> dict[str, Any] | None:
+    """从 CLI stdout 解析 'AI_BOARD_HELD: <json>' 标记（aligned-render-pipeline WP2）。
+
+    G1/G2 质量门 HELD 时脚本输出该信号 = 「质量保留」而非「渲染失败」。
+    JSON 体 {gate, reason, board}：gate=angle|pair，board 为诊断板路径或 null（G1 无板）。
+    解析失败/缺失返回 None。
+    """
+    for line in stdout.splitlines():
+        line = line.strip()
+        if line.startswith("AI_BOARD_HELD:"):
+            payload = line.split("AI_BOARD_HELD:", 1)[1].strip()
+            try:
+                parsed = json.loads(payload)
+            except (json.JSONDecodeError, ValueError):
+                return None
+            if isinstance(parsed, dict):
+                return parsed
+            return None
+    return None
+
+
 def run_ai_enhanced_render(
     case_dir: Path | str,
     brand: str = "fumei",
@@ -1992,21 +2013,53 @@ def run_ai_enhanced_render(
             stderr = _summarize_subprocess_error(proc.stderr, proc.stdout)
             raise RuntimeError(f"ai-enhance subprocess exit={proc.returncode}: {stderr}")
         board_path = _parse_ai_board_result(proc.stdout)
-        if not board_path or not Path(board_path).exists():
-            tail = (proc.stdout or "")[-500:]
-            raise RuntimeError(f"ai-enhance produced no board; stdout tail: {tail}")
-        final_path = out_root / "final-board.jpg"
-        final_path.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(board_path, final_path)
+        if board_path and Path(board_path).exists():
+            # 成功路：增强板就位 → 放标准 final-board 位置，前端零改像普通板展示。
+            final_path = out_root / "final-board.jpg"
+            final_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(board_path, final_path)
+            return {
+                "output_path": str(final_path),
+                "manifest_path": None,
+                "status": "done",
+                "case_mode": "ai_enhanced_board",
+                "enhance": {"direction": enhance_direction, "model": enhance_model},
+                "blocking_issue_count": 0,
+                "warning_count": 0,
+                "effective_templates": {},
+                "manual_overrides_applied": [],
+            }
 
-    return {
-        "output_path": str(final_path),
-        "manifest_path": None,
-        "status": "done",
-        "case_mode": "ai_enhanced_board",
-        "enhance": {"direction": enhance_direction, "model": enhance_model},
-        "blocking_issue_count": 0,
-        "warning_count": 0,
-        "effective_templates": {},
-        "manual_overrides_applied": [],
-    }
+        # WP2（aligned-render-pipeline）：G1/G2 质量门 HELD ≠ 渲染失败。
+        # 不再 RuntimeError → 前端「渲染失败」，而是返回 status='blocked' + 原因 +
+        # 诊断板（G2 有板 / G1 无板），由 render_quality/render_queue 映射成质量保留态。
+        held = _parse_ai_board_held(proc.stdout)
+        if held is not None:
+            gate = str(held.get("gate") or "unknown")
+            reason = str(held.get("reason") or "").strip()
+            diag_board = held.get("board")
+            held_output: str | None = None
+            if isinstance(diag_board, str) and diag_board and Path(diag_board).exists():
+                # 诊断板在子进程 temp 目录，必须在 with 退出前 copy 出来。
+                final_path = out_root / "final-board.jpg"
+                final_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(diag_board, final_path)
+                held_output = str(final_path)
+            return {
+                "output_path": held_output,
+                "manifest_path": None,
+                "status": "blocked",
+                "case_mode": "ai_enhanced_board",
+                "enhance": {"direction": enhance_direction, "model": enhance_model},
+                "blocking_issue_count": 1,
+                "warning_count": 0,
+                "effective_templates": {},
+                "manual_overrides_applied": [],
+                "held_gate": gate,
+                "held_reason": reason,
+                "render_error": reason or f"{gate} gate held",
+            }
+
+        # 既无成品板也无 HELD 信号 = 真失败。
+        tail = (proc.stdout or "")[-500:]
+        raise RuntimeError(f"ai-enhance produced no board; stdout tail: {tail}")

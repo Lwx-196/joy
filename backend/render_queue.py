@@ -2700,6 +2700,8 @@ class RenderQueue:
 	                                        "effective_templates",
 	                                        "ai_usage",
 	                                        "render_error",
+	                                        "held_gate",
+	                                        "held_reason",
 	                                        "blocking_issues",
 	                                        "warnings",
 	                                        "composition_alerts",

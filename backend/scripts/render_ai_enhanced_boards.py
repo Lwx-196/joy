@@ -1470,6 +1470,13 @@ def main() -> None:
                     f"{m['region']}需{'|'.join(m['required_any_of'])}"
                     for m in angle_gate["missing"])
                 print(f"  🚫 ANGLE_GATE_HELD: {_missing_desc}（板上实有 {sorted(available_views)}）")
+                if args.case_dir is not None:
+                    # 单案例入口（server 集成）：machine-parseable HELD 信号，供父进程
+                    # 区分「质量保留 blocked」与「渲染失败」（aligned-render-pipeline WP2）。
+                    # G1 在出板前短路，无诊断板（board=None）。
+                    print("AI_BOARD_HELD: " + json.dumps(
+                        {"gate": "angle", "reason": _missing_desc, "board": None},
+                        ensure_ascii=False))
                 results.append({
                     "customer": customer, "treatment": treatment, "title": board_title,
                     "status": "ANGLE_GATE_HELD", "angle_gate": angle_gate,
@@ -1553,6 +1560,11 @@ def main() -> None:
                         f"{v['slot']} eye_ratio={v['eye_ratio']}（允许 {v['allowed']}）"
                         for v in pair_gate["violations"])
                     print(f"  🚫 PAIR_GATE_HELD: {_viol_desc}")
+                    if args.case_dir is not None:
+                        # G2 板已渲（out_path 在）但不交付；保留诊断板路径供前端缩略展示。
+                        print("AI_BOARD_HELD: " + json.dumps(
+                            {"gate": "pair", "reason": _viol_desc, "board": str(out_path)},
+                            ensure_ascii=False))
                     results.append({
                         "customer": customer, "treatment": treatment, "title": board_title,
                         "status": "PAIR_GATE_HELD", "board": str(out_path),

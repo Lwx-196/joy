@@ -1607,6 +1607,10 @@ export interface RenderJob {
     case_mode?: string;
     effective_templates?: string[];
     ai_usage?: Record<string, unknown>;
+    /** WP2 aligned-render-pipeline: AI 增强板质量门 HELD 信号。
+     * held_gate=angle|pair → 「质量保留」而非渲染失败；held_reason=门级原因（后端协议串，不抽 i18n）。 */
+    held_gate?: string;
+    held_reason?: string;
 	    composition_alerts?: CompositionAlert[];
 	    run_id?: string | null;
 	    code_version?: Record<string, unknown>;

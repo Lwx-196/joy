@@ -264,6 +264,9 @@ def evaluate_render_result(result: dict[str, Any]) -> dict[str, Any]:
     used_ai_enhancement = bool(ai_usage.get("used_after_enhancement"))
     used_ai_padfill = bool(ai_usage.get("used_ai_padfill"))
     render_error = str(result.get("render_error") or "").strip()
+    # WP2（aligned-render-pipeline）：AI 增强板的 G1/G2 质量门 HELD 信号。
+    held_gate = str(result.get("held_gate") or "").strip()
+    held_reason = str(result.get("held_reason") or "").strip()
     blocking_issues = [str(item) for item in (result.get("blocking_issues") or [])]
     raw_warning_items = [str(item) for item in (result.get("warnings") or [])]
     # Transient API errors (HTTP 403/429, quota, rate limit) are upstream
@@ -295,7 +298,11 @@ def evaluate_render_result(result: dict[str, Any]) -> dict[str, Any]:
     score -= max(0.0, float(pixel_metrics.get("cv_penalty") or 0.0))
     score = max(0.0, round(score, 1))
 
-    if not output_exists:
+    if held_gate:
+        # WP2：质量门 HELD = 质量保留态，即使保留了诊断板（output 存在）也判 blocked，
+        # 区别于 done_with_issues（出板可复核）与 failed（真渲染异常）。
+        quality_status = "blocked"
+    elif not output_exists:
         quality_status = "blocked"
     elif manifest_status == "ok" and blocking == 0 and score >= 80 and not composition_alerts and actionable_warnings == 0:
         quality_status = "done"
@@ -320,6 +327,8 @@ def evaluate_render_result(result: dict[str, Any]) -> dict[str, Any]:
             "ai_after_enhancement": used_ai_enhancement,
             "ai_edge_padfill": used_ai_padfill,
             "render_error": render_error,
+            "held_gate": held_gate,
+            "held_reason": held_reason,
             "blocking_issues": blocking_issues,
             "warnings": display_warnings,
             "display_warnings": display_warnings,
