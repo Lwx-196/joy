@@ -1651,12 +1651,16 @@ sys.stdout.write(json.dumps({
 """
 
 
-def _render_subprocess_env() -> dict[str, str]:
+def _render_subprocess_env(extra: dict[str, str] | None = None) -> dict[str, str]:
     """Environment for the heavy skill subprocess.
 
     Semantic helpers improve classification, but a slow helper cannot be
     allowed to consume the whole formal render. These short defaults remain
     overrideable for dedicated deep runs.
+
+    `extra` 用于按需注入子进程专属 env（如 AI 增强路的 CASE_WORKBENCH_ADAPTIVE_4K）——
+    这个 env 是干净的（不继承父进程 os.environ 全量），所以 server 上设的 env 不会自动
+    传进来，必须显式 extra 透传。
     """
     env = {
         "PATH": os.environ.get("PATH", ""),
@@ -1680,10 +1684,14 @@ def _render_subprocess_env() -> dict[str, str]:
         value = os.environ.get(name)
         if value:
             env[name] = value
+    if extra:
+        env.update(extra)
     return env
 
 
-def _run_render_subprocess(args: list[str], timeout: int) -> subprocess.CompletedProcess[str]:
+def _run_render_subprocess(
+    args: list[str], timeout: int, extra_env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
     """Run render in a killable process group.
 
     The skill can spawn Node helpers for semantic checks. On timeout, kill the
@@ -1694,7 +1702,7 @@ def _run_render_subprocess(args: list[str], timeout: int) -> subprocess.Complete
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
-        env=_render_subprocess_env(),
+        env=_render_subprocess_env(extra_env),
         start_new_session=True,
     )
     try:
@@ -1931,8 +1939,18 @@ def run_ai_enhanced_render(
     """术后 AI 增强板：spawn `render_ai_enhanced_boards.py --case-dir`（仿 run_render 子进程隔离），
     把增强板放到标准 `final-board.jpg` 位置，前端零改即可像普通板轮询+展示。
 
-    CLI 自带链路：build_manifest(focus) → apply_after_enhancements(原生 gemini/gpt 局部增强)
-    → matte 纯黑底 → render_from_manifest，并自加载 tuzi/flash/t54 creds。
+    CLI 链路（2026-06-14 aligned-render-pipeline WP1 接通 non-native 路）：
+    build_manifest → `_enhance_manifest_sources`(全分辨率 AI 增强 + ENHANCE_PROMPT_V2 +
+    letterbox/自适应 4K + 内容寻址 cache) → matte 纯黑底 → render_from_manifest，
+    并自加载 rsta/tuzi/flash creds（env 文件，绝对路径，不依赖父进程 env）。
+
+    与批量 `render_ai_enhanced_boards`（non-native）同路同质：
+    - 去 `--native-enhance`：旧路 apply_after_enhancements 大面积「增强 0/3」出降质板（WP0 实测）。
+    - 去 `--no-cache`：cache 是全局 `~/.cache/...` 内容寻址，与 output-dir 无关 → temp output-dir
+      不破坏复用 → 前端自动复用批量已烧 cache（命中=秒出零烧钱）。
+    - 带 `--no-board-qa`：board-qa 会因 judge env 文件存在自动启用，前端每次点击不应烧 judge 钱。
+    - 透传 `CASE_WORKBENCH_ADAPTIVE_4K`（默认 "1" 跟 4K 批量；server env 可翻）：子进程 env 干净
+      不继承父进程，必须 extra_env 显式注入。
 
     v1 仅 tri-compare（CLI build_manifest 固定三联）；manifest_path=None（旧板经 .history 仍可恢复）。
 
@@ -1958,13 +1976,17 @@ def run_ai_enhanced_render(
                 str(AI_ENHANCE_SCRIPT),
                 "--case-dir", str(case_dir),
                 "--brand", brand,
-                "--native-enhance",
                 "--enhance-direction", enhance_direction,
                 "--enhance-model", enhance_model,
                 "--output-dir", tmp,
-                "--no-cache",
+                "--no-board-qa",
             ],
             timeout,
+            extra_env={
+                "CASE_WORKBENCH_ADAPTIVE_4K": os.environ.get(
+                    "CASE_WORKBENCH_ADAPTIVE_4K", "1"
+                ),
+            },
         )
         if proc.returncode != 0:
             stderr = _summarize_subprocess_error(proc.stderr, proc.stdout)

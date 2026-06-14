@@ -1323,6 +1323,10 @@ def main() -> None:
                         help="板输出分辨率倍率（默认 2.0 = 3840 宽 4K；1.0 = 1920 旧版）")
     parser.add_argument("--board-qa", action="store_true",
                         help="渲染后跑 D6 板级 VLM 质量门（白边/留白/标注缺陷 → held），需 Vertex ADC 凭证")
+    parser.add_argument("--no-board-qa", action="store_true",
+                        help="强制关闭 D6 板级 QA。注意：board-qa 默认会因 judge env 文件存在而自动启用"
+                             "（见下方 `args.board_qa or _qa_env_p`）——前端 per-click 路径用此 flag 显式关闭，"
+                             "避免每次点击烧 judge 钱（render_executor.run_ai_enhanced_render 默认带）")
     parser.add_argument("--case-dir", type=Path, default=None,
                         help="单案例入口（server 集成用）：直接渲染指定的治疗目录，绕过 --cases-root 遍历。"
                              "成功后 stdout 打印 'AI_BOARD_RESULT: <board.jpg>' 供父进程解析")
@@ -1369,7 +1373,7 @@ def main() -> None:
     _qa_env_p = _find_env_file("t52_vlm_judge.local.env")
     if _qa_env_p:
         os.environ.update(_load_env_from_file(_qa_env_p))
-    if args.board_qa or _qa_env_p:
+    if (args.board_qa or _qa_env_p) and not args.no_board_qa:
         try:
             from backend.services.board_delivery_qa import BoardDeliveryQA
             from backend.services.vlm_provider import VLMProvider

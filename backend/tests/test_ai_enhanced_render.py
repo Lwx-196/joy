@@ -78,11 +78,19 @@ def test_run_ai_enhanced_render_places_board_at_final(tmp_path, monkeypatch):
     produced.write_bytes(b"enhanced-board-bytes")
     out_root = tmp_path / "outroot"
 
-    def fake_sub(args, timeout):
-        # CLI invocation carries the expected flags.
-        assert "--case-dir" in args and "--native-enhance" in args
+    captured = {}
+
+    def fake_sub(args, timeout, extra_env=None):
+        # WP1 (aligned-render-pipeline): 接通 non-native 增强路。
+        assert "--case-dir" in args
         assert "--enhance-direction" in args and "heal" in args
         assert "--enhance-model" in args and "gemini-3-pro-image-preview" in args
+        # 去 native 局部重绘 + 去 no-cache（复用全局内容寻址 cache）。
+        assert "--native-enhance" not in args
+        assert "--no-cache" not in args
+        # 前端 per-click 不烧 judge 钱。
+        assert "--no-board-qa" in args
+        captured["extra_env"] = extra_env
         return _fake_proc(f"chatter\nAI_BOARD_RESULT: {produced}\n")
 
     monkeypatch.setattr(render_executor, "_run_render_subprocess", fake_sub)
@@ -102,13 +110,34 @@ def test_run_ai_enhanced_render_places_board_at_final(tmp_path, monkeypatch):
     final = out_root / "final-board.jpg"
     assert result["output_path"] == str(final)
     assert final.read_bytes() == b"enhanced-board-bytes"
+    # 默认透传自适应 4K（跟 4K 批量对齐），子进程 env 干净不继承父进程。
+    assert captured["extra_env"]["CASE_WORKBENCH_ADAPTIVE_4K"] == "1"
+
+
+def test_run_ai_enhanced_render_forwards_adaptive_4k_env_override(tmp_path, monkeypatch):
+    """server env CASE_WORKBENCH_ADAPTIVE_4K=0 → 透传 0（运行时开关，owner 可翻档）。"""
+    case_dir = tmp_path / "case"
+    case_dir.mkdir()
+    produced = tmp_path / "b.jpg"
+    produced.write_bytes(b"x")
+    monkeypatch.setenv("CASE_WORKBENCH_ADAPTIVE_4K", "0")
+    captured = {}
+
+    def fake_sub(args, timeout, extra_env=None):
+        captured["extra_env"] = extra_env
+        return _fake_proc(f"AI_BOARD_RESULT: {produced}\n")
+
+    monkeypatch.setattr(render_executor, "_run_render_subprocess", fake_sub)
+    monkeypatch.setattr(render_executor.stress, "render_output_root", lambda *a, **k: tmp_path / "o")
+    render_executor.run_ai_enhanced_render(case_dir)
+    assert captured["extra_env"]["CASE_WORKBENCH_ADAPTIVE_4K"] == "0"
 
 
 def test_run_ai_enhanced_render_raises_on_nonzero(tmp_path, monkeypatch):
     case_dir = tmp_path / "case"
     case_dir.mkdir()
     monkeypatch.setattr(
-        render_executor, "_run_render_subprocess", lambda a, t: _fake_proc("boom", returncode=1)
+        render_executor, "_run_render_subprocess", lambda a, t, extra_env=None: _fake_proc("boom", returncode=1)
     )
     monkeypatch.setattr(render_executor.stress, "render_output_root", lambda *a, **k: tmp_path / "outroot")
     with pytest.raises(RuntimeError, match="ai-enhance subprocess exit=1"):
@@ -119,7 +148,7 @@ def test_run_ai_enhanced_render_raises_when_no_marker(tmp_path, monkeypatch):
     case_dir = tmp_path / "case"
     case_dir.mkdir()
     monkeypatch.setattr(
-        render_executor, "_run_render_subprocess", lambda a, t: _fake_proc("finished but no marker")
+        render_executor, "_run_render_subprocess", lambda a, t, extra_env=None: _fake_proc("finished but no marker")
     )
     monkeypatch.setattr(render_executor.stress, "render_output_root", lambda *a, **k: tmp_path / "outroot")
     with pytest.raises(RuntimeError, match="no board"):
