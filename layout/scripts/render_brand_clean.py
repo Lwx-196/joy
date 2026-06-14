@@ -1539,6 +1539,65 @@ def compute_pair_eye_signal(
         return {"valid": False, "reason": f"signal_error: {exc}"}
 
 
+# |dcs_a/dcs_b − 1| 超此 = 术前/术后真实头尺寸确有差异（非同人同尺度），不强行
+# 配平脸高（拉等会掩盖真实差异），回退保护框锚。同一人 DCS 跨 pose CV 仅 2-3%，
+# 正常配对远在阈值内；超阈通常意味错人/粗检测误差 → 留诊断交 VLM/人工。
+_FACESIZE_DCS_GATE = 0.20
+
+
+def _depth_corrected_size(face: dict) -> float | None:
+    """深度校正头大小 DCS = face_height_px × |t_z| / image_width。
+
+    t_z = facial_transformation_matrix 平移 z（人脸到相机深度）。透视下
+    apparent_pixel_size ∝ focal/|t_z|，PnP 已吸收旋转 → DCS ≈ 真实 metric 头高，
+    **pose-invariant**（实测同一人跨 front→side 55° CV 2-3%，vs eye_distance 19-32%、
+    face_height 6-17%）。缺 matrix / 字段 / 异常 → None（fail-open，调用方回退保护框锚）。
+    """
+    try:
+        matrix = face.get("transform_matrix")
+        if matrix is None:
+            return None
+        width = float(face["size"][0])
+        face_h = float(face["face_height"])
+        tz = abs(float(np.asarray(matrix, dtype=np.float64)[2][3]))
+        if width <= 0 or face_h <= 0 or tz <= 1e-6:
+            return None
+        return face_h * tz / width
+    except Exception:  # noqa: BLE001 — 信号永不让渲染崩溃
+        return None
+
+
+def compute_facesize_match(
+    before_face: dict,
+    after_face: dict,
+    slot: str,
+    before_protection_h: float,
+    after_protection_h: float,
+) -> tuple[float, float, dict]:
+    """返回 (before_match_h, after_match_h, debug)，供 after-follows-before 尺度配平。
+
+    side/oblique 且 DCS-gate 通过（真实头≈等大）→ 用 **pixel face_height** 做锚，令
+    渲染后脸高拉等，根治保护框（含 eye_distance·3 项 + 大 padding）在近侧位被前缩
+    腐蚀 + 钳位 → 「术后脸偏大/偏小」（坐实：郭璟琳 side 真实头 DCS 比 0.96 却被渲成
+    1.125）。DCS 已证真实头相等 → 拉等是诚实校正而非掩盖。front / DCS 缺失 / 真实头
+    真差（gate 失败）→ 回退保护框高度（原行为，零回归）。fail-open 永不抛。
+    """
+    debug: dict = {"anchor": "protection_box"}
+    if slot in ("side", "oblique"):
+        before_fh = float(before_face.get("face_height") or 0.0)
+        after_fh = float(after_face.get("face_height") or 0.0)
+        dcs_b = _depth_corrected_size(before_face)
+        dcs_a = _depth_corrected_size(after_face)
+        if before_fh > 0 and after_fh > 0 and dcs_b and dcs_a:
+            dcs_ratio = dcs_a / dcs_b
+            debug["dcs_ratio"] = round(dcs_ratio, 4)
+            if abs(dcs_ratio - 1.0) <= _FACESIZE_DCS_GATE:
+                debug["anchor"] = "face_height"
+                return before_fh, after_fh, debug
+            debug["gate"] = "dcs_real_size_diff"  # 真实头真差→不拉等，保留保护框留诊断
+    return before_protection_h, after_protection_h, debug
+
+
 def render_protected_pair(
     before_path: str,
     after_path: str,
@@ -1567,6 +1626,12 @@ def render_protected_pair(
     before_protection_h = max(1.0, before_box[3] - before_box[1])
     after_protection_h = max(1.0, after_box[3] - after_box[1])
     face_ratio = after_protection_h / before_protection_h
+
+    # side/oblique 改用 pixel face_height 做 after-follows-before 配平锚（DCS-gated），
+    # 替代前缩腐蚀的保护框高度；front 与 gate 失败回退保护框（before_match==before_protection_h）。
+    before_match_h, after_match_h, facesize_debug = compute_facesize_match(
+        before_face, after_face, slot, before_protection_h, after_protection_h
+    )
 
     before_contain = min(
         target_w / max(before_image.shape[1], 1),
@@ -1597,13 +1662,13 @@ def render_protected_pair(
     # after 永远按保护框高度比反推跟随。旧逻辑 smart 按各自 eye_d 独立推两边，
     # 斜/侧位前后转头角度不同时 eye_d 比 ≠ 保护框高度比 + 单边触 2.50 顶，
     # 配对断裂（oblique 板面比 0.87）。after 触 clamp 时回拉 before 保持等大。
-    after_target_scale = before_scale * (before_protection_h / after_protection_h)
+    after_target_scale = before_scale * (before_match_h / after_match_h)
     after_scale = float(max(after_contain * 0.92, min(after_target_scale, after_contain * 2.50)))
     if abs(after_scale - after_target_scale) > 1e-9:
         before_scale = float(
             max(
                 before_contain * 0.92,
-                min(after_scale * (after_protection_h / before_protection_h), before_contain * 2.50),
+                min(after_scale * (after_match_h / before_match_h), before_contain * 2.50),
             )
         )
 
@@ -1635,6 +1700,7 @@ def render_protected_pair(
             "before_scale": round(before_scale, 4),
             "after_scale": round(after_scale, 4),
             "face_ratio": round(face_ratio, 4),
+            "facesize_match": facesize_debug,
             "smart_crop_ratio": smart_crop_ratio,
             "before_transform": before_transform,
             "after_transform": after_transform,
