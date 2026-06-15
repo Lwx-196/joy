@@ -43,6 +43,7 @@
     "done": "已完成",
     "done_with_issues": "完成需复核",
     "blocked": "质量阻塞",
+    "needs_confirmation": "待确认",
     "failed": "失败",
     "cancelled": "已取消",
     "undone": "已撤销"

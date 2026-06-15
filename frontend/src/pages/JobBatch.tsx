@@ -342,6 +342,7 @@ function StatusPill({ status }: { status: AnyStatus }) {
     done: { bg: "var(--ok-50, #DCFCE7)", fg: "var(--ok)" },
     done_with_issues: { bg: "var(--amber-50)", fg: "var(--amber-ink)" },
     blocked: { bg: "var(--err-50)", fg: "var(--err)" },
+    needs_confirmation: { bg: "var(--amber-50)", fg: "var(--amber-ink)" },
     failed: { bg: "var(--err-50)", fg: "var(--err)" },
     cancelled: { bg: "var(--bg-2)", fg: "var(--ink-3)" },
     undone: { bg: "var(--bg-2)", fg: "var(--ink-3)" },

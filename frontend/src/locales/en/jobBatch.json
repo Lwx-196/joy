@@ -43,6 +43,7 @@
     "done": "Done",
     "done_with_issues": "Done with issues",
     "blocked": "Quality blocked",
+    "needs_confirmation": "Needs confirmation",
     "failed": "Failed",
     "cancelled": "Cancelled",
     "undone": "Undone"
