@@ -88,6 +88,9 @@ const STATUS_KEYS: AnyStatus[] = [
   "queued",
   "running",
   "done",
+  "done_with_issues",
+  "blocked",
+  "needs_confirmation",
   "failed",
   "cancelled",
   "undone",
@@ -305,27 +308,32 @@ function BatchToastRow({ entry }: { entry: BatchToastEntry }) {
 }
 
 function statusZh(s: AnyStatus): string {
-  return (
-    {
-      queued: "排队",
-      running: "处理",
-      done: "成功",
-      failed: "失败",
-      cancelled: "取消",
-      undone: "撤销",
-    } as Record<AnyStatus, string>
-  )[s];
+  // 注解 const（非 as cast）强制穷尽：未来给 RenderStatus 加状态时编译期即拦。
+  const map: Record<AnyStatus, string> = {
+    queued: "排队",
+    running: "处理",
+    done: "成功",
+    done_with_issues: "复核",
+    blocked: "阻塞",
+    needs_confirmation: "待确认",
+    failed: "失败",
+    cancelled: "取消",
+    undone: "撤销",
+  };
+  return map[s];
 }
 
 function statusColor(s: AnyStatus): string {
-  return (
-    {
-      queued: "rgba(250,250,249,0.7)",
-      running: "var(--cyan, #67E8F9)",
-      done: "var(--ok)",
-      failed: "var(--err)",
-      cancelled: "rgba(250,250,249,0.55)",
-      undone: "rgba(250,250,249,0.55)",
-    } as Record<AnyStatus, string>
-  )[s];
+  const map: Record<AnyStatus, string> = {
+    queued: "rgba(250,250,249,0.7)",
+    running: "var(--cyan, #67E8F9)",
+    done: "var(--ok)",
+    done_with_issues: "var(--amber)",
+    blocked: "var(--err)",
+    needs_confirmation: "var(--amber)",
+    failed: "var(--err)",
+    cancelled: "rgba(250,250,249,0.55)",
+    undone: "rgba(250,250,249,0.55)",
+  };
+  return map[s];
 }
