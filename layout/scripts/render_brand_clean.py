@@ -815,6 +815,24 @@ def shift_cell_vertical_with_background(cell: np.ndarray, shift_y: int) -> np.nd
     return shifted
 
 
+def compute_eye_align_shifts(eye_shift: int, cell_height: int) -> tuple[int, int, str]:
+    """眼高对齐(2-轴 fix 第二轴)的 before/after 平移分配。
+
+    返回 (before_shift, after_shift, strategy)。两路终态都满足
+    ``before_shift - after_shift == eye_shift``（before 终眼位 == after 终眼位）。
+
+    |eye_shift| 超 ``cell_height * _EYE_ALIGN_SPLIT_RATIO`` → 双向分摊(各担一半),
+    对称化大单边平移引入的黑带 + 重裁(实测郭璟琳 oblique 板真对 +145px=11.6% 被 VLM
+    读成「脸大小未对齐」)。阈值内(clean 案例实测 |shift|≤92px≈7.4%)维持原单边 before
+    平移、after 不动,渲染字节不变零回归。
+    """
+    if abs(eye_shift) > cell_height * _EYE_ALIGN_SPLIT_RATIO:
+        before_shift = int(round(eye_shift / 2))
+        after_shift = before_shift - eye_shift
+        return before_shift, after_shift, "eye_height_align_split"
+    return eye_shift, 0, "eye_height_align_to_after"
+
+
 def crop_cell_bottom_to_background(cell: np.ndarray, from_y: int) -> np.ndarray:
     h, _w = cell.shape[:2]
     from_y = int(max(0, min(from_y, h)))
@@ -1565,6 +1583,12 @@ def compute_pair_eye_signal(
 # 正常配对远在阈值内；超阈通常意味错人/粗检测误差 → 留诊断交 VLM/人工。
 _FACESIZE_DCS_GATE = 0.20
 
+# 眼高对齐(2-轴 fix 第二轴)单边平移 before 的容忍上限(占 cell 高比例)。|eye_shift|
+# 超此 → 单边大黑带 + 重裁肩颈、after 不动 → 框感不对称(实测郭璟琳 oblique 板真对
+# +145px=11.6% 被 VLM 读成「脸大小未对齐」),改 before/after 双向分摊各担一半;阈值
+# 内(clean 案例实测 |shift|≤92px≈7.4%)维持原单边 before 平移,字节不变零回归。
+_EYE_ALIGN_SPLIT_RATIO = 0.10
+
 
 def _depth_corrected_size(face: dict) -> float | None:
     """深度校正头大小 DCS = face_height_px × |t_z| / image_width。
@@ -1721,12 +1745,19 @@ def render_protected_pair(
         before_eye_y = float(eye_center_before[1]) * before_scale + before_transform["offset"][1]
         after_eye_y = float(eye_center_after[1]) * after_scale + after_transform["offset"][1]
         eye_shift = int(round(after_eye_y - before_eye_y))
-        if eye_shift != 0:
-            before_arr = shift_cell_vertical_with_background(before_arr, eye_shift)
+        before_shift, after_shift, strategy = compute_eye_align_shifts(
+            eye_shift, before_arr.shape[0]
+        )
+        if before_shift != 0:
+            before_arr = shift_cell_vertical_with_background(before_arr, before_shift)
+        if after_shift != 0:
+            after_arr = shift_cell_vertical_with_background(after_arr, after_shift)
         position_alignment = {
             "enabled": True,
-            "strategy": "eye_height_align_to_after",
+            "strategy": strategy,
             "shift_y": eye_shift,
+            "before_shift_y": before_shift,
+            "after_shift_y": after_shift,
             "before_eye_y": round(before_eye_y, 1),
             "after_eye_y": round(after_eye_y, 1),
         }

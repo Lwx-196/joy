@@ -9,8 +9,10 @@ pixel face_height 做 after-follows-before 配平锚，DCS（=face_h×|t_z|/w，
 import numpy as np
 
 from scripts.render_brand_clean import (
+    _EYE_ALIGN_SPLIT_RATIO,
     _FACESIZE_DCS_GATE,
     _depth_corrected_size,
+    compute_eye_align_shifts,
     compute_facesize_match,
     shift_cell_vertical_with_background,
 )
@@ -142,3 +144,47 @@ def test_shift_vertical_out_of_bounds_returns_original():
     assert shift_cell_vertical_with_background(c, -12) is c
     assert shift_cell_vertical_with_background(c, 99) is c
     assert shift_cell_vertical_with_background(c, -99) is c
+
+
+# ---- compute_eye_align_shifts（郭璟琳 oblique 精修：大 shift 双向分摊）----
+# 终态不变式：before_shift - after_shift == eye_shift（两脸终眼位重合，eyeΔ 不退）。
+
+def test_eye_align_below_threshold_keeps_single_sided():
+    # |shift| 在阈值内 → 单边 before 平移、after 不动（clean 案例字节不变路径）。
+    h = 1248  # 阈值 = 124.8px
+    for shift in (0, 50, -92, 124):  # 刘亦卿 -92 / 许晓洁 -83 等均落此区
+        b, a, strat = compute_eye_align_shifts(shift, h)
+        assert (b, a) == (shift, 0)
+        assert strat == "eye_height_align_to_after"
+        assert b - a == shift  # 不变式
+
+
+def test_eye_align_above_threshold_splits_evenly():
+    # 郭璟琳 oblique 板真对 +145px=11.6% → 超阈分摊 before +72 / after -73。
+    h = 1248
+    b, a, strat = compute_eye_align_shifts(145, h)
+    assert strat == "eye_height_align_split"
+    assert b == 72 and a == -73
+    assert b - a == 145  # 不变式：终眼位重合
+    # 每格位移都比原单边 145 小（黑带/裁切对称化）
+    assert abs(b) < 145 and abs(a) < 145
+
+
+def test_eye_align_split_negative_large_shift():
+    # 负向大 shift（before 大幅上移）同样对称分摊。
+    h = 1248
+    b, a, strat = compute_eye_align_shifts(-145, h)
+    assert strat == "eye_height_align_split"
+    assert b - a == -145  # 不变式
+    assert abs(b) <= 73 and abs(a) <= 73
+
+
+def test_eye_align_threshold_boundary_uses_ratio_constant():
+    # 阈值随 cell 高缩放：恰好 == 阈值不分摊（严格大于才触发），略超即分摊。
+    h = 1000
+    thresh = int(h * _EYE_ALIGN_SPLIT_RATIO)  # 100
+    b, a, strat = compute_eye_align_shifts(thresh, h)
+    assert strat == "eye_height_align_to_after" and (b, a) == (thresh, 0)
+    b2, a2, strat2 = compute_eye_align_shifts(thresh + 1, h)
+    assert strat2 == "eye_height_align_split"
+    assert b2 - a2 == thresh + 1  # 不变式
