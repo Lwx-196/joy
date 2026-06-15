@@ -38,6 +38,10 @@ else:
     SMART_CROP = None
 
 DATE_RE = re.compile(r"(\d{2,4}\.\d{1,2}\.\d{1,2})")
+# 源图文件夹常以 phase 标记结尾（术前/术后/术中，可叠加「术前术后」，可空格分隔），
+# 这是数据组织痕迹而非项目名。板面同时展示术前+术后，标题若挂单相（如「隆鼻术前」）
+# 会误导。仅锚定结尾剥离、不碰中段（「眼周术后修复」「双眼皮术」不误伤）。
+PHASE_SUFFIX_RE = re.compile(r"[\s、，,]*(?:术前|术后|术中)+[\s、，,]*$")
 
 
 def parse_case_meta(case_dir: Path) -> dict:
@@ -56,6 +60,10 @@ def parse_case_meta(case_dir: Path) -> dict:
         stripped = project[len(customer_name):].strip(" _-，,")
         if stripped:
             project = stripped
+    # 剥尾部 phase 标记（术前/术后/术中）；剥后为空则保留原值（fail-safe）
+    phase_stripped = PHASE_SUFFIX_RE.sub("", project).strip(" _-，,")
+    if phase_stripped:
+        project = phase_stripped
 
     return {
         "date": date or case_name,
