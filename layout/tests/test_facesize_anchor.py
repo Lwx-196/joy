@@ -12,6 +12,7 @@ from scripts.render_brand_clean import (
     _FACESIZE_DCS_GATE,
     _depth_corrected_size,
     compute_facesize_match,
+    shift_cell_vertical_with_background,
 )
 
 
@@ -100,3 +101,44 @@ def test_side_missing_face_height_falls_back():
     bm, am, dbg = compute_facesize_match(before, after, "side", 1500.0, 1700.0)
     assert (bm, am) == (1500.0, 1700.0)
     assert dbg["anchor"] == "protection_box"
+
+
+# ---- shift_cell_vertical_with_background（2-轴 fix 第二轴：眼高对齐平移）----
+def _grad_cell(h=12, w=4):
+    """行 i 内容 = (i+1)*10，便于追踪平移位置（避免与 0 背景混淆）。"""
+    c = np.zeros((h, w, 3), dtype=np.uint8)
+    for i in range(h):
+        c[i, :, :] = (i + 1) * 10
+    return c
+
+
+def test_shift_vertical_zero_is_noop():
+    c = _grad_cell()
+    assert shift_cell_vertical_with_background(c, 0) is c
+
+
+def test_shift_vertical_down_moves_content():
+    c = _grad_cell(h=12)
+    out = shift_cell_vertical_with_background(c, 3)
+    # 原第 0 行内容下移到第 3 行；第 8 行→第 11 行
+    assert np.array_equal(out[3], c[0])
+    assert np.array_equal(out[11], c[8])
+    # 内容不回卷（顶部不等于原底部内容）
+    assert not np.array_equal(out[0], c[9])
+
+
+def test_shift_vertical_up_moves_content():
+    c = _grad_cell(h=12)
+    out = shift_cell_vertical_with_background(c, -3)
+    # 原第 3 行内容上移到第 0 行；第 11 行→第 8 行
+    assert np.array_equal(out[0], c[3])
+    assert np.array_equal(out[8], c[11])
+    assert not np.array_equal(out[11], c[2])
+
+
+def test_shift_vertical_out_of_bounds_returns_original():
+    c = _grad_cell(h=12)
+    assert shift_cell_vertical_with_background(c, 12) is c
+    assert shift_cell_vertical_with_background(c, -12) is c
+    assert shift_cell_vertical_with_background(c, 99) is c
+    assert shift_cell_vertical_with_background(c, -99) is c

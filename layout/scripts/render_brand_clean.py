@@ -794,6 +794,27 @@ def shift_cell_down_with_background(cell: np.ndarray, shift_y: int) -> np.ndarra
     return shifted
 
 
+def shift_cell_vertical_with_background(cell: np.ndarray, shift_y: int) -> np.ndarray:
+    """垂直平移 cell（正=下移 / 负=上移），空出区域用 cell 背景色填充。
+
+    供 side/oblique 眼高对齐（after 为参照，平移 before）用。|shift|≥cell 高时直接
+    返回原图（越界保护，绝不崩）。
+    """
+    s = int(shift_y)
+    if s == 0:
+        return cell
+    h, w = cell.shape[:2]
+    if abs(s) >= h:
+        return cell
+    bg = sample_cell_background(cell)
+    shifted = np.full((h, w, 3), np.clip(bg, 0, 255).astype(np.uint8), dtype=np.uint8)
+    if s > 0:
+        shifted[s:h, :, :] = cell[: h - s, :, :]
+    else:
+        shifted[: h + s, :, :] = cell[-s:h, :, :]
+    return shifted
+
+
 def crop_cell_bottom_to_background(cell: np.ndarray, from_y: int) -> np.ndarray:
     h, _w = cell.shape[:2]
     from_y = int(max(0, min(from_y, h)))
@@ -1684,7 +1705,33 @@ def render_protected_pair(
         after_arr, before_arr, after_transform, before_transform, slot
     )
 
-    before_arr, position_alignment = align_before_position_to_after_cell(before_arr, after_arr, slot)
+    # 2-轴 fix 第二轴（接 8e076a3 size 锚）：side/oblique 且 size 已拉等(anchor==face_height)时
+    # 补眼高对齐——术后为构图参照，术前眼垂直位置对齐术后眼，修 size 拉等(after_scale 变)引入的
+    # eyeΔ 回归（实测郭璟琳 side eyeΔ 0.047→0.109 等）。analytical 眼位 = eye_center_y×scale +
+    # 最终 offset_y（trim 只 cover 边缘不移脸 → after 眼位有效）。size 未拉等(front / DCS-gate
+    # 回退 protection_box)→走原 silhouette 对齐分支，字节不变零回归。
+    eye_center_before = before_face.get("eye_center")
+    eye_center_after = after_face.get("eye_center")
+    if (
+        slot in ("side", "oblique")
+        and facesize_debug.get("anchor") == "face_height"
+        and eye_center_before is not None
+        and eye_center_after is not None
+    ):
+        before_eye_y = float(eye_center_before[1]) * before_scale + before_transform["offset"][1]
+        after_eye_y = float(eye_center_after[1]) * after_scale + after_transform["offset"][1]
+        eye_shift = int(round(after_eye_y - before_eye_y))
+        if eye_shift != 0:
+            before_arr = shift_cell_vertical_with_background(before_arr, eye_shift)
+        position_alignment = {
+            "enabled": True,
+            "strategy": "eye_height_align_to_after",
+            "shift_y": eye_shift,
+            "before_eye_y": round(before_eye_y, 1),
+            "after_eye_y": round(after_eye_y, 1),
+        }
+    else:
+        before_arr, position_alignment = align_before_position_to_after_cell(before_arr, after_arr, slot)
     composition_diagnostic = composition_diagnostic_from_cells(before_arr, after_arr, slot)
 
     if render_plan_records is not None:
