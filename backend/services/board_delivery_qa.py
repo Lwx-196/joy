@@ -33,11 +33,16 @@ from typing import Any
 
 from backend.services.vlm_provider import VLMProvider, VLMRequestError
 
-PROMPT_VERSION = "v1"
+PROMPT_VERSION = "v2"
 
-# Frozen, calibrated v1 prompt (recall 14/14, held-out validated). Do NOT edit
-# without re-running `vlm_calibrate.py full + heldout`; bump PROMPT_VERSION on any
-# change so stale cache rows are re-assessed instead of silently reused.
+# v2 (2026-06-15): v1 was frozen/calibrated (recall 14/14) but systematically
+# over-flagged the cutout_artifact family — legit clothing texture (gray shawl /
+# cream fur collar), hair-strand soft edges, and low-res source softness were
+# judged as 抠图缺陷 (5/5 mask-leak blockers proven false-positive via real-matte
+# probes, 2026-06-15). v2 tightens the real-defect definition (head-cut / bg-block
+# bleed / hard white halo) and adds an explicit exclusion clause for material /
+# hair / low-res softness. Bump PROMPT_VERSION on any change so stale cache rows
+# are re-assessed instead of silently reused.
 PROMPT = (
     "你是医美「术前/术后」对比板的交付质检员。判断这张已渲染对比板能否交付给客户。"
     "只看 render/合成/抠图/版式/标注质量，不判医美治疗效果好坏。\n"
@@ -46,9 +51,10 @@ PROMPT = (
     "- 某格背景是没清的诊所灰/杂乱实景/补光灯架/挂布夹子/计时器入镜，而同行另一格干净（背景不一致）\n"
     "- 某格照片明显小于同行另一格、悬浮在大片灰或留白里、没填满格子\n"
     "- 术前术后脸大小或眼睛高度明显不一致（对比板核心是对齐）\n"
-    "- 某格脸部模糊涂抹/抠图蒙版撕裂白斑/灰色模糊团块\n"
+    "- 某格人物轮廓被错误裁断（如头顶被切平）、背景实体块渗入人物轮廓内、前景出现硬白边 halo 描边、或脸部被明显模糊涂抹（真抠图崩坏）\n"
     "- 标题区姓名或术式渲染成文件夹名(如 derived / 陈院案例(1))、乱码、缺失，或术前术后标签贴反\n"
     "重要：深色或纯色影棚背景只要同行术前术后一致、对称 letterbox 边，就不是缺陷；只判明显硬伤。\n"
+    "重要：以下不算抠图硬伤——衣物布料本身（灰披肩/米白毛领/围巾）的质感与柔边、发丝边缘的自然柔和过渡、源照分辨率不足导致的整体轻微软边；这些是真实素材特征不是合成缺陷，判 clean 或至多 warning。\n"
     "轻微瑕疵=warning；无明显 render/合成/抠图/标注问题=clean。\n"
     '只输出 JSON 一行，无其它文字：{"verdict":"blocker|warning|clean","confidence":0.0-1.0,'
     '"primary_defect":"最严重问题一句话，clean写无","families":["bg_letterbox|eye_align|cutout_artifact|title_text|none 适用的"]}'
@@ -62,7 +68,8 @@ PROMPT = (
 CLOSEUP_NOTE = (
     "\n补充：本板最后一行是治疗区近景特写行（行标题含「近景对比」），左右两格为各自独立的"
     "局部特写裁剪，脸大小/取景/眼睛位置天然不同，该行不参与脸大小与眼睛对齐一致性评判；"
-    "该行只判脸部模糊涂抹/抠图蒙版撕裂白斑/灰色模糊团块这类工艺硬伤。其余各行仍按上述规则评。"
+    "该行只判人物轮廓被错误裁断/背景实体块渗入轮廓/硬白边 halo/脸部明显模糊涂抹这类真抠图崩坏；"
+    "衣物布料柔边、发丝边缘、源照低清软边不算硬伤。其余各行仍按上述规则评。"
 )
 CLOSEUP_VERSION_SUFFIX = "+closeup"
 

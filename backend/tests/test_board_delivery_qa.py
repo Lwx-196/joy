@@ -454,6 +454,8 @@ def test_closeup_assess_appends_note_and_version(tmp_path: Path) -> None:
 
 def test_closeup_and_default_cache_isolated(tmp_path: Path) -> None:
     """同一板字节在两个 prompt 版本下各评各存：互不命中、各自缓存复用。"""
+    from backend.services.board_delivery_qa import PROMPT_VERSION
+
     conn = _mem()
     stub = StubProvider("clean")
     qa = BoardDeliveryQA(stub, conn)
@@ -471,4 +473,8 @@ def test_closeup_and_default_cache_isolated(tmp_path: Path) -> None:
     rows = conn.execute(
         "SELECT prompt_version FROM board_delivery_qa ORDER BY prompt_version"
     ).fetchall()
-    assert [r["prompt_version"] for r in rows] == ["v1", "v1+closeup"]
+    # 用常量派生，prompt 版本 bump 时不脆断（v2: 2026-06-15 mask-leak 误报校准）
+    assert [r["prompt_version"] for r in rows] == [
+        PROMPT_VERSION,
+        f"{PROMPT_VERSION}+closeup",
+    ]
