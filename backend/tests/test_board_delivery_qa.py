@@ -478,3 +478,83 @@ def test_closeup_and_default_cache_isolated(tmp_path: Path) -> None:
         PROMPT_VERSION,
         f"{PROMPT_VERSION}+closeup",
     ]
+
+
+# ---------------------------------------------------------------------------
+# Deterministic head-cut FP guard (2026-06-15)
+# ---------------------------------------------------------------------------
+# Refutes the judge's stubborn, prompt-resistant "头顶切平/裁断" false positive
+# when the rendered board provably has black headroom above every person cell
+# (胡志超 2026-06-15: real-data headroom 27%, judge still 0.99 blocker).
+
+
+def _synthetic_board(tmp_path: Path, name: str, headroom_frac: float) -> Path:
+    """A cream board with one photo band of two black cells; a bright 'person'
+    blob in each cell whose top sits headroom_frac down from the cell top."""
+    import numpy as np
+    from PIL import Image
+
+    h, w = 600, 900
+    arr = np.full((h, w, 3), (244, 238, 231), dtype=np.uint8)  # cream board bg
+    y0, y1 = 100, 550  # photo band (cell_h = 450 > 200)
+    cells = [(100, 400), (500, 800)]  # two cells, gap 400..500 (>40)
+    blob_top = y0 + int(round(headroom_frac * (y1 - y0)))
+    for (x0, x1) in cells:
+        arr[y0:y1, x0:x1] = (0, 0, 0)  # rembg-black photo cell
+        cx0 = x0 + (x1 - x0) // 3
+        cx1 = x1 - (x1 - x0) // 3
+        arr[blob_top:y1, cx0:cx1] = (220, 200, 190)  # bright 'person' silhouette
+    fp = tmp_path / name
+    Image.fromarray(arr).save(fp)
+    return fp
+
+
+def test_measure_headroom_matches_constructed_geometry(tmp_path: Path) -> None:
+    from backend.services.board_delivery_qa import _measure_person_headroom
+
+    board = _synthetic_board(tmp_path, "hr.png", headroom_frac=0.25)
+    geo = _measure_person_headroom(board)
+    assert geo is not None
+    assert geo["n_cells"] == 2
+    assert abs(geo["min_headroom"] - 0.25) < 0.02  # ~25% black above each blob
+
+
+def test_headcut_guard_downgrades_fp_when_headroom_present(tmp_path: Path) -> None:
+    """blocker + head-cut defect text + provable headroom → blocker downgraded."""
+    from backend.services.board_delivery_qa import HEADCUT_GUARD_FAMILY
+
+    board = _synthetic_board(tmp_path, "fp.png", headroom_frac=0.25)
+    stub = StubProvider("blocker", primary="45°行术后头顶被水平裁断切平", families=["cutout_artifact"])
+    qa = BoardDeliveryQA(stub, _mem())
+    v = qa.assess(board)
+    assert v.verdict == "warning"
+    assert v.deliverable is True and v.held is False
+    assert HEADCUT_GUARD_FAMILY in v.families
+    assert "几何守卫" in v.primary_defect
+
+
+def test_headcut_guard_skips_non_headcut_defect(tmp_path: Path) -> None:
+    """A real halo/bg blocker (not head-cut wording) is NOT touched even with headroom."""
+    board = _synthetic_board(tmp_path, "halo.png", headroom_frac=0.25)
+    stub = StubProvider("blocker", primary="人物头发边缘硬白边 halo 描边", families=["cutout_artifact"])
+    qa = BoardDeliveryQA(stub, _mem())
+    v = qa.assess(board)
+    assert v.verdict == "blocker" and v.held is True
+
+
+def test_headcut_guard_respects_real_cut(tmp_path: Path) -> None:
+    """blocker + head-cut text but NO headroom (blob touches cell top) → stays blocker."""
+    board = _synthetic_board(tmp_path, "cut.png", headroom_frac=0.0)
+    stub = StubProvider("blocker", primary="头顶被切平裁断缺失", families=["cutout_artifact"])
+    qa = BoardDeliveryQA(stub, _mem())
+    v = qa.assess(board)
+    assert v.verdict == "blocker" and v.held is True
+
+
+def test_headcut_guard_fail_open_on_unreadable_board(tmp_path: Path) -> None:
+    """Unmeasurable board (tiny fake JPG) → guard fails open, judge blocker stands."""
+    board = _board(tmp_path, "tiny.jpg", b"\xff\xd8not-an-image")
+    stub = StubProvider("blocker", primary="头顶切平", families=["cutout_artifact"])
+    qa = BoardDeliveryQA(stub, _mem())
+    v = qa.assess(board)
+    assert v.verdict == "blocker" and v.held is True

@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -250,11 +251,17 @@ class BoardDeliveryQA:
 
         families = _coerce_families(parsed.get("families"))
         confidence = _coerce_float(parsed.get("confidence"))
+        primary_defect = str(parsed.get("primary_defect") or "").strip()
+        # Deterministic head-cut FP guard: refute a "头顶切平/裁断" blocker when the
+        # rendered board provably has black headroom above every person silhouette.
+        verdict, primary_defect, families, _hc_geo = apply_headcut_guard(
+            board_path, verdict, primary_defect, families
+        )
         assessed_at = _now()
         result = BoardQAVerdict(
             content_hash=content_hash,
             verdict=verdict,
-            primary_defect=str(parsed.get("primary_defect") or "").strip(),
+            primary_defect=primary_defect,
             families=families,
             confidence=confidence,
             cached=False,
@@ -504,3 +511,137 @@ def _coerce_float(raw: Any) -> float | None:
         return float(raw)
     except (TypeError, ValueError):
         return None
+
+
+# ---------------------------------------------------------------------------
+# Deterministic head-cut false-positive guard (2026-06-15)
+# ---------------------------------------------------------------------------
+# The VLM judge has a stubborn, prompt-resistant false positive on some 45° rows:
+# it reports "头顶被水平裁断/切平" at ~0.99 even when the rendered head sits with
+# ~30% pure-black headroom above it. Real-data probe on 胡志超 (2026-06-15):
+# render_plan clip_top=0; measured headroom 28-34% INVARIANT from lum>20..>80
+# (no dark hair hidden in the black); the top edge ramps 45→132→276px over ~30
+# rows = a domed hairline, not a flat cut. Prompt-softening (PROMPT v3) did NOT
+# move the judge (still 0.99). So this guard re-measures the board geometrically:
+# when the judge's *blocker* is a head-cut/truncation claim BUT every detected
+# person-cell provably has black headroom above its silhouette, the cut claim is
+# geometrically false → downgrade blocker→warning (ships, still flagged).
+# Surgical (only head-cut defect text), conservative (high headroom margin),
+# fail-open (any read/measure failure trusts the judge verdict unchanged).
+_HEADCUT_DEFECT_RE = re.compile(r"头顶|切顶|切平|裁断|截断|cut[\s-]*off|truncat", re.IGNORECASE)
+HEADCUT_GUARD_MIN_HEADROOM = 0.06   # every person-cell must clear this fraction of black headroom
+HEADCUT_GUARD_FAMILY = "headcut_guard_override"
+_HC_CELL_BLACK_LUM = 25             # mean luminance < this = photo-cell (rembg/letterbox) background
+_HC_FG_LUM = 55                     # mean luminance > this = person foreground
+_HC_MIN_CELL_PX = 200              # ignore detected bands/columns smaller than this
+_HC_FG_ROW_FRAC = 0.02             # a row counts as foreground if >this fraction of its width is bright
+
+
+def _is_headcut_defect(primary_defect: str) -> bool:
+    return bool(primary_defect and _HEADCUT_DEFECT_RE.search(primary_defect))
+
+
+def _measure_person_headroom(board_path: str | Path) -> dict | None:
+    """Deterministically measure black headroom above each person-cell silhouette.
+
+    Detects the dark photo cells (cream board bg, near-black rembg/letterbox cells),
+    then per cell finds the topmost foreground (person) row and its headroom as a
+    fraction of cell height. Returns {n_cells, min_headroom, per_cell:[...]} or None
+    when the board can't be read or no person-cells are found (caller fails open).
+    """
+    try:
+        import numpy as np
+        from PIL import Image
+    except Exception:  # noqa: BLE001 — missing optional dep → fail open
+        return None
+    try:
+        with Image.open(board_path) as im:
+            arr = np.asarray(im.convert("RGB"), dtype=np.int16)
+    except Exception:  # noqa: BLE001 — unreadable/corrupt board → fail open
+        return None
+    if arr.ndim != 3 or arr.shape[0] < _HC_MIN_CELL_PX or arr.shape[1] < _HC_MIN_CELL_PX:
+        return None
+    lum = arr.mean(axis=2)
+    black = lum < _HC_CELL_BLACK_LUM
+    height, _ = lum.shape
+
+    # contiguous row bands that are predominantly photo-cell background
+    bands: list[tuple[int, int]] = []
+    in_band = False
+    start = 0
+    rowfrac = black.mean(axis=1)
+    for y in range(height):
+        if rowfrac[y] > 0.12 and not in_band:
+            start, in_band = y, True
+        elif rowfrac[y] <= 0.12 and in_band:
+            bands.append((start, y))
+            in_band = False
+    if in_band:
+        bands.append((start, height))
+    bands = [(a, b) for a, b in bands if b - a > _HC_MIN_CELL_PX]
+    if not bands:
+        return None
+
+    per_cell: list[dict] = []
+    for (y0, y1) in bands:
+        colfrac = black[y0:y1].mean(axis=0)
+        cols = np.where(colfrac > 0.15)[0]
+        if len(cols) == 0:
+            continue
+        # split columns into contiguous cell runs (left=术前, right=术后)
+        runs: list[tuple[int, int]] = []
+        s = p = int(cols[0])
+        for c in cols[1:]:
+            c = int(c)
+            if c - p > 40:
+                runs.append((s, p))
+                s = c
+            p = c
+        runs.append((s, p))
+        runs = [(a, b) for a, b in runs if b - a > _HC_MIN_CELL_PX]
+        cell_h = y1 - y0
+        for (x0, x1) in runs:
+            bright_per_row = (lum[y0:y1, x0:x1] > _HC_FG_LUM).sum(axis=1)
+            fg_rows = np.where(bright_per_row > (x1 - x0) * _HC_FG_ROW_FRAC)[0]
+            if len(fg_rows) == 0:
+                continue
+            top = int(fg_rows[0])
+            per_cell.append({
+                "band": [int(y0), int(y1)],
+                "cols": [int(x0), int(x1)],
+                "head_top_px": top,
+                "headroom_frac": round(top / cell_h, 4),
+            })
+    if not per_cell:
+        return None
+    return {
+        "n_cells": len(per_cell),
+        "min_headroom": min(c["headroom_frac"] for c in per_cell),
+        "per_cell": per_cell,
+    }
+
+
+def apply_headcut_guard(
+    board_path: str | Path,
+    verdict: str,
+    primary_defect: str,
+    families: tuple[str, ...],
+) -> tuple[str, str, tuple[str, ...], dict | None]:
+    """Refute a head-cut blocker when geometry proves no head was cut.
+
+    Returns (verdict, primary_defect, families, geometry) — unchanged + None geometry
+    unless the guard fires, in which case verdict is downgraded blocker→warning and
+    primary_defect is annotated with the measured evidence.
+    """
+    if verdict != "blocker" or not _is_headcut_defect(primary_defect):
+        return verdict, primary_defect, families, None
+    geo = _measure_person_headroom(board_path)
+    if geo is None or geo["n_cells"] < 2 or geo["min_headroom"] < HEADCUT_GUARD_MIN_HEADROOM:
+        return verdict, primary_defect, families, geo
+    note = (
+        f"[几何守卫·降级 blocker→warning] judge 报「{primary_defect}」，"
+        f"但实测 {geo['n_cells']} 格人物头顶留白≥{geo['min_headroom'] * 100:.0f}%，"
+        f"几何证伪无切顶"
+    )
+    new_families = tuple(dict.fromkeys(families + (HEADCUT_GUARD_FAMILY,)))
+    return "warning", note, new_families, geo
