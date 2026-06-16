@@ -3,6 +3,7 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import {
   caseFileUrl,
+  parseRenderGateError,
   type CaseUpdatePayload,
   type ManualRenderView,
   type ReviewStatus,
@@ -94,6 +95,33 @@ export default function CaseDetail() {
   const rescanning = rescanMut.isPending;
   const upgrading = upgradeMut.isPending;
   const enqueueingRender = renderMut.isPending;
+
+  // C：渲染入队失败统一提示。pre_render_gate 阻断（409）→ 列出真实阻断原因 + 引导；
+  // 其它失败 → 通用错误。治 F3 静默失败 + F2 禁用原因不透明。
+  const handleRenderError = (err: unknown) => {
+    const gateErr = parseRenderGateError(err);
+    if (gateErr) {
+      const reasons =
+        gateErr.messages.length > 0
+          ? gateErr.messages.map((m) => `• ${m}`).join("\n")
+          : renderGateTitle;
+      window.alert(t("edit.renderBlockedAlert", { reasons }));
+      return;
+    }
+    window.alert(
+      t("edit.renderFailedAlert", { message: err instanceof Error ? err.message : String(err) }),
+    );
+  };
+  // A：force=true 绕过 pre_render_gate（force 只绕质量门，不授权烧钱——cache-miss 仍走 confirm_burn）。
+  const runRender = (force: boolean) => {
+    renderMut.mutate(
+      {
+        caseId,
+        payload: { brand, template: "tri-compare", semantic_judge: "auto", ...(force ? { force: true } : {}) },
+      },
+      { onError: handleRenderError },
+    );
+  };
 
   const [copied, setCopied] = useState(false);
   const [editing, setEditing] = useState(false);
@@ -1619,12 +1647,10 @@ export default function CaseDetail() {
             onToggleExtraBlocking={toggleExtraBlocking}
             onRescan={() => rescanMut.mutate(caseId)}
             onUpgrade={() => upgradeMut.mutate({ caseId, brand })}
-            onRender={() =>
-              renderMut.mutate({
-                caseId,
-                payload: { brand, template: "tri-compare", semantic_judge: "auto" },
-              })
-            }
+            onRender={() => runRender(false)}
+            onForceRender={() => {
+              if (window.confirm(t("edit.forceRenderConfirm"))) runRender(true);
+            }}
             onSetEditing={setEditing}
             onClearOverrides={clearOverrides}
             onSaveEdits={saveEdits}

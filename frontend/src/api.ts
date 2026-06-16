@@ -1737,6 +1737,10 @@ export interface EnqueueRenderPayload {
   /** F2 frugal-cache-guard：cache-miss 确认卡点「确认出图」时带 true → 后端授权真烧 API。
    * 默认省略（false）→ cache-miss 走预判护栏返 needs_confirmation 不静默烧钱。 */
   confirm_burn?: boolean;
+  /** A force-render：绕过 pre_render_gate（治 identity 假阴 / sharpness flaky / 人工兜底真缺角度）。
+   * 注意：force 只绕质量门，不授权烧钱——cache-miss 仍走 confirm_burn 确认。
+   * 后端 RenderRequest.force / RenderBatchRequest.force 已支持（render.py:56/72，409 路径 :825/:893）。 */
+  force?: boolean;
 }
 
 export const enqueueRender = (id: number, payload: EnqueueRenderPayload = {}) =>
@@ -1754,6 +1758,61 @@ export const enqueueBatchRender = (
       { case_ids, ...payload }
     )
     .then((r) => r.data);
+
+/** C：解析 pre_render_gate 阻断（HTTP 409）错误。FastAPI 把 `HTTPException(409, dict)`
+ * 包成响应体 `{ detail: { reason, gate, tickets } }`（单案）或 `{ detail: { reason, invalid:[...] } }`（批量）。
+ * 抽出人读阻断原因（blocks_render 的 ticket message 优先，去重）。非该结构返回 null。 */
+export interface RenderGateError {
+  reason: string;
+  /** 去重后的人读阻断原因（来自 ticket.message） */
+  messages: string[];
+  /** 批量场景：被拦的 case_id 列表 */
+  blockedCaseIds: number[];
+}
+
+function _ticketMessages(tickets: unknown): string[] {
+  if (!Array.isArray(tickets)) return [];
+  const blocking: string[] = [];
+  const other: string[] = [];
+  for (const t of tickets) {
+    if (!t || typeof t !== "object") continue;
+    const msg = String((t as { message?: unknown }).message ?? "").trim();
+    if (!msg) continue;
+    if ((t as { blocks_render?: unknown }).blocks_render === true) blocking.push(msg);
+    else other.push(msg);
+  }
+  // blocks_render 优先；都没有则退回全部
+  return blocking.length > 0 ? blocking : other;
+}
+
+export function parseRenderGateError(err: unknown): RenderGateError | null {
+  if (!axios.isAxiosError(err)) return null;
+  if (err.response?.status !== 409) return null;
+  const detail = (err.response?.data as { detail?: unknown } | undefined)?.detail;
+  if (!detail || typeof detail !== "object") return null;
+  const d = detail as {
+    reason?: unknown;
+    tickets?: unknown;
+    invalid?: unknown;
+  };
+  if (d.reason !== "pre_render_gate_blocked") return null;
+  const messages = new Set<string>();
+  const blockedCaseIds: number[] = [];
+  // 单案：detail.tickets
+  for (const m of _ticketMessages(d.tickets)) messages.add(m);
+  // 批量：detail.invalid[].tickets + case_id
+  if (Array.isArray(d.invalid)) {
+    for (const item of d.invalid) {
+      if (!item || typeof item !== "object") continue;
+      const it = item as { case_id?: unknown; tickets?: unknown; reason?: unknown };
+      if (it.reason === "pre_render_gate_blocked") {
+        if (typeof it.case_id === "number") blockedCaseIds.push(it.case_id);
+        for (const m of _ticketMessages(it.tickets)) messages.add(m);
+      }
+    }
+  }
+  return { reason: String(d.reason), messages: [...messages], blockedCaseIds };
+}
 
 export type BatchPreviewInvalidReason =
   | "case_not_found"

@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { useTranslation } from "react-i18next";
-import { CATEGORY_LABEL, TIER_LABEL, type CaseSummary } from "../api";
+import { CATEGORY_LABEL, TIER_LABEL, parseRenderGateError, type CaseSummary } from "../api";
 import {
   useBatchRenderCases,
   useBatchUpgradeCases,
@@ -96,6 +96,15 @@ export default function Dashboard() {
       {
         onSuccess: (data) => {
           showBatchToast("render", data.batch_id, target.length);
+        },
+        // C：Dashboard 批量直接入队（无 preview），质量门全拦 409 不再静默。
+        onError: (err) => {
+          const gateErr = parseRenderGateError(err);
+          if (gateErr && gateErr.messages.length > 0) {
+            window.alert(`批量出图被质量门阻断：\n\n${gateErr.messages.map((m) => `• ${m}`).join("\n")}`);
+          } else {
+            window.alert(`批量出图失败：${err instanceof Error ? err.message : String(err)}`);
+          }
         },
       }
     );

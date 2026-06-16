@@ -3,7 +3,7 @@ import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { CATEGORY_LABEL, TIER_LABEL, type Category, type CaseSummary, type CaseListParams, type RenderBatchPreviewInvalid } from "../api";
+import { CATEGORY_LABEL, TIER_LABEL, parseRenderGateError, type Category, type CaseSummary, type CaseListParams, type RenderBatchPreviewInvalid } from "../api";
 import {
   useBatchRenderCases,
   useBatchUpdateCases,
@@ -412,6 +412,15 @@ export default function Cases() {
       {
         onSuccess: (data) => {
           showBatchToast("render", data.batch_id, data.job_ids.length);
+        },
+        // C：批量入队若被质量门全拦（preview 已过滤后仍 409 的极端情况）不再静默。
+        onError: (err) => {
+          const gateErr = parseRenderGateError(err);
+          if (gateErr && gateErr.messages.length > 0) {
+            window.alert(`批量出图被质量门阻断：\n\n${gateErr.messages.map((m) => `• ${m}`).join("\n")}`);
+          } else {
+            window.alert(`批量出图失败：${err instanceof Error ? err.message : String(err)}`);
+          }
         },
       }
     );

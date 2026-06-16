@@ -715,7 +715,9 @@ function RenderSummary({ job }: { job: RenderJob }) {
   const skillStatus = meta.status || "—";
   const blocking = meta.blocking_issue_count ?? 0;
   const warnings = meta.warning_count ?? 0;
-  const tplList = (meta.effective_templates || []).join(" / ") || job.template;
+  const tplList =
+    (Array.isArray(meta.effective_templates) ? meta.effective_templates : []).join(" / ") ||
+    job.template;
   const compositionAlerts = getCompositionAlerts(job);
   return (
     <div style={{ display: "grid", gap: 6, minWidth: 0 }}>

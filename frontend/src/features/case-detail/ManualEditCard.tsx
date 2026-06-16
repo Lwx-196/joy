@@ -30,6 +30,7 @@ type ManualEditCardProps = {
   onRescan: () => void;
   onUpgrade: () => void;
   onRender: () => void;
+  onForceRender: () => void;
   onSetEditing: (editing: boolean) => void;
   onClearOverrides: () => void;
   onSaveEdits: () => void;
@@ -56,6 +57,7 @@ export function ManualEditCard({
   onRescan,
   onUpgrade,
   onRender,
+  onForceRender,
   onSetEditing,
   onClearOverrides,
   onSaveEdits,
@@ -113,6 +115,7 @@ export function ManualEditCard({
               </button>
               <button
                 className="btn sm primary"
+                data-testid="render-btn"
                 onClick={onRender}
                 disabled={enqueueingRender || renderGateBlocked}
                 title={renderGateTitle}
@@ -120,6 +123,18 @@ export function ManualEditCard({
                 <Ico name="image" size={11} />
                 {enqueueingRender ? t("buttons.enqueuing") : t("edit.autoRender")}
               </button>
+              {renderGateBlocked && (
+                <button
+                  className="btn sm danger"
+                  data-testid="force-render-btn"
+                  onClick={onForceRender}
+                  disabled={enqueueingRender}
+                  title={t("edit.forceRenderTooltip")}
+                >
+                  <Ico name="alert" size={11} />
+                  {t("edit.forceRender")}
+                </button>
+              )}
               <button className="btn sm ghost" onClick={() => onSetEditing(true)}>
                 <Ico name="edit" size={11} />
                 {t("edit.editButton")}
