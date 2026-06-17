@@ -330,12 +330,17 @@ def _component_ticket(
     code = str(component.get("code") or "")
     if component_name == "identity":
         reason = code or "identity_not_verified"
+        # B1：缺 embedding 证据的假阴（status=not_verified 且无具体 mismatch code）降为 warn，
+        # 不拦正式出图——仍进 ticket 可见，operator 可人工兜底或 force；blocks_publish 保持 True
+        # 不自动发布（须人工身份确认）。真 mismatch（带 code 如 identity_embedding_mismatch）保持 block。
+        # 证据：5-case 探针坐实这些 ticket 全是 status='not_verified'/code=None=缺 ArcFace embedding 假阴。
+        is_missing_evidence = status == "not_verified" and not code
         return _ticket(
             ticket_type="identity_review",
             reason_code=reason,
             message=str(component.get("message") or "同一人证据未通过，需人工复核"),
             slot=view,
-            blocks_render=True,
+            blocks_render=not is_missing_evidence,
             blocks_publish=True,
             evidence={
                 "slot": view,
@@ -343,6 +348,7 @@ def _component_ticket(
                 "before": before,
                 "after": after,
                 "recommended_action": "identity_review",
+                "missing_evidence": is_missing_evidence,
             },
         )
     if status == "block":
@@ -415,7 +421,9 @@ def _pair_tickets(selection_plan: dict[str, Any]) -> list[dict[str, Any]]:
                 sharpness_value = float(sharpness)
             except (TypeError, ValueError):
                 sharpness_value = None
-            if sharpness_value is not None and sharpness_value <= 8:
+            # B2：sharpness 0.0（及 <=0）视为计算失败/无信号的 flaky 值，不当「最糊」假拦
+            # （case 135 ticket376/377 同图忽过忽拦坐实 flaky）；真低清 0<x<=8 仍拦。
+            if sharpness_value is not None and 0 < sharpness_value <= 8:
                 out.append(
                     _ticket(
                         ticket_type="source_quality_review",
