@@ -288,16 +288,38 @@ def _slot_tickets(
                 missing = [{"view": "front", "missing": ["before", "after"]}]
     if not missing:
         return []
+    # 区分「真缺图（无候选）」与「自动降级丢弃（候选存在但对比价值不足，dropped_slots）」。
+    # 后者照片其实存在，文案若写「缺术前/术后」会误导操作员去找不存在的缺图。block 行为不变，仅文案如实。
+    raw_dropped = selection_plan.get("dropped_slots") if isinstance(selection_plan, dict) else []
+    dropped_by_view: dict[str, dict[str, Any]] = {}
+    if isinstance(raw_dropped, list):
+        for entry in raw_dropped:
+            if not isinstance(entry, dict):
+                continue
+            view = str(entry.get("view") or "")
+            if not view:
+                continue
+            reason = entry.get("reason") or entry.get("drop_reason") or {}
+            dropped_by_view[view] = reason if isinstance(reason, dict) else {}
     slot = str((missing[0] or {}).get("view") or "") if isinstance(missing[0], dict) else None
     slot = slot if slot in SLOT_LABELS else None
     readable = []
+    all_dropped = True
     for item in missing:
         if not isinstance(item, dict):
             continue
         view = str(item.get("view") or "")
-        roles = ["术前" if role == "before" else "术后" for role in item.get("missing") or []]
-        readable.append(f"{SLOT_LABELS.get(view, view)}缺{'/'.join(roles)}")
-    message = "正式出图已阻断：源图槽位未配齐（" + "；".join(readable or ["缺少术前/术后配对"]) + "）。"
+        label = SLOT_LABELS.get(view, view)
+        if view in dropped_by_view:
+            # drop 原因文案已含角度名（如「侧面术前术后…已降级移除」），直接用避免重复角度名
+            drop_msg = str(dropped_by_view[view].get("message") or f"{label}对比价值不足，已从正式出图降级移除")
+            readable.append(drop_msg)
+        else:
+            all_dropped = False
+            roles = ["术前" if role == "before" else "术后" for role in item.get("missing") or []]
+            readable.append(f"{label}缺{'/'.join(roles)}")
+    prefix = "正式出图已阻断：部分角度已降级移除（" if all_dropped else "正式出图已阻断：源图槽位未配齐（"
+    message = prefix + "；".join(readable or ["缺少术前/术后配对"]) + "）。"
     return [
         _ticket(
             ticket_type="slot_fill",
@@ -306,11 +328,14 @@ def _slot_tickets(
             slot=slot,
             evidence={
                 "missing_slots": missing,
+                "dropped_views": sorted(dropped_by_view.keys()),
+                "dropped_slots": raw_dropped if isinstance(raw_dropped, list) else [],
                 "required_slots": list(REQUIRED_SLOTS),
                 "effective_required_slots": required,
                 "renderable_slots": selection_plan.get("renderable_slots") or [],
                 "source_profile": source_profile,
-                "recommended_action": "slot_fill",
+                # 全部为降级丢弃时，操作员动作不是补图而是复核降级判定
+                "recommended_action": "review_low_value_drop" if all_dropped else "slot_fill",
             },
         )
     ]
