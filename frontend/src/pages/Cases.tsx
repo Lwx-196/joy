@@ -371,7 +371,7 @@ export default function Cases() {
     );
   };
 
-  const renderSelectedCases = async () => {
+  const renderSelectedCases = async (force = false) => {
     if (selected.size === 0) return;
     let ids = [...selected];
     if (ids.length > MAX_BATCH_RENDER) {
@@ -380,6 +380,32 @@ export default function Cases() {
       );
       if (!ok) return;
       ids = ids.slice(0, MAX_BATCH_RENDER);
+    }
+    // A4：强制批量出图——绕过质量门（force:true），跳过 preview 过滤，直接送全选；
+    // force 只绕质量门不授权烧钱（cache-miss 仍走 confirm_burn）。源图整缺的案例后端仍会拒。
+    if (force) {
+      const ok = window.confirm(t("bulk.confirmForceRender", { count: ids.length }));
+      if (!ok) return;
+      batchRenderMut.mutate(
+        {
+          caseIds: ids,
+          payload: { brand, template: "tri-compare", semantic_judge: "auto", force: true },
+        },
+        {
+          onSuccess: (data) => {
+            showBatchToast("render", data.batch_id, data.job_ids.length);
+          },
+          onError: (err) => {
+            const gateErr = parseRenderGateError(err);
+            if (gateErr && gateErr.messages.length > 0) {
+              window.alert(`强制批量出图仍被拦（源图整缺无法绕过）：\n\n${gateErr.messages.map((m) => `• ${m}`).join("\n")}`);
+            } else {
+              window.alert(`强制批量出图失败：${err instanceof Error ? err.message : String(err)}`);
+            }
+          },
+        }
+      );
+      return;
     }
     let preview;
     try {
@@ -657,6 +683,16 @@ export default function Cases() {
               >
                 <Ico name="image" size={12} />
                 {batchRenderMut.isPending || previewRenderMut.isPending ? t("bulk.rendering") : t("bulk.batchRender", { n: selected.size })}
+              </button>
+              <button
+                className="btn danger"
+                data-testid="force-batch-render-btn"
+                onClick={() => void renderSelectedCases(true)}
+                disabled={batchRenderMut.isPending || previewRenderMut.isPending}
+                title={t("bulk.forceRenderTitle")}
+              >
+                <Ico name="alert" size={12} />
+                {t("bulk.forceBatchRender", { n: selected.size })}
               </button>
               <button
                 className="btn"
