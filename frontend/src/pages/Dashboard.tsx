@@ -75,7 +75,7 @@ export default function Dashboard() {
     return [];
   };
 
-  const handleBatchRenderLane = (laneKey: string) => {
+  const handleBatchRenderLane = (laneKey: string, force = false) => {
     let target = laneTargets(laneKey);
     if (target.length === 0) return;
     if (target.length > MAX_BATCH_RENDER) {
@@ -85,13 +85,18 @@ export default function Dashboard() {
       if (!ok) return;
       target = target.slice(0, MAX_BATCH_RENDER);
     } else {
-      const ok = window.confirm(t("queue.confirmRender", { count: target.length, brand }));
+      // A4：force 走绕质量门确认；常规走普通确认。force 只绕质量门不授权烧钱。
+      const ok = window.confirm(
+        force
+          ? t("queue.confirmForceRender", { count: target.length })
+          : t("queue.confirmRender", { count: target.length, brand })
+      );
       if (!ok) return;
     }
     batchRenderMut.mutate(
       {
         caseIds: target.map((c) => c.id),
-        payload: { brand, template: "tri-compare", semantic_judge: "auto" },
+        payload: { brand, template: "tri-compare", semantic_judge: "auto", ...(force ? { force: true } : {}) },
       },
       {
         onSuccess: (data) => {
@@ -332,6 +337,22 @@ export default function Dashboard() {
                       {lane.count > MAX_BATCH_RENDER
                         ? t("queue.batchRenderLimit", { max: MAX_BATCH_RENDER })
                         : t("queue.batchRender", { n: lane.count })}
+                    </button>
+                    <button
+                      type="button"
+                      className="btn sm danger"
+                      data-testid={`force-lane-render-btn-${lane.key}`}
+                      onClick={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        handleBatchRenderLane(lane.key, true);
+                      }}
+                      disabled={batchRenderMut.isPending}
+                      title={t("queue.forceRenderTitle", { n: lane.count })}
+                      style={{ fontSize: 11, padding: "3px 8px" }}
+                    >
+                      <Ico name="alert" size={11} />
+                      {t("queue.forceBatchRender")}
                     </button>
                     <button
                       type="button"

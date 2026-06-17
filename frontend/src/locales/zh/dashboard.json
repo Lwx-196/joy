@@ -28,7 +28,10 @@
     "confirmRenderOver": "共 {{count}} 条超过单批上限 {{max}}。仅入队前 {{max}} 条？",
     "confirmRender": "将对 {{count}} 条 case 触发批量出图（品牌：{{brand}}）。确定吗？",
     "confirmUpgradeOver": "共 {{count}} 条超过单批上限 {{max}}。仅入队前 {{max}} 条？",
-    "confirmUpgrade": "将对 {{count}} 条 case 触发 v3 异步升级（品牌：{{brand}}）。每个 5–30s，并发 2。确定吗？"
+    "confirmUpgrade": "将对 {{count}} 条 case 触发 v3 异步升级（品牌：{{brand}}）。每个 5–30s，并发 2。确定吗？",
+    "forceBatchRender": "强制出图",
+    "forceRenderTitle": "绕过质量门，对该泳道 {{n}} 个案例强制批量出图（可能含假阴或真缺角度的案例）",
+    "confirmForceRender": "强制批量出图将绕过质量门，对 {{count}} 个案例直接出图（可能含假阴或真缺角度的案例）。\n\nforce 只绕质量门、不授权烧钱（cache-miss 仍需确认）。请确认源图可用。是否继续？"
   },
   "worktray": {
     "title": "人工审核工作箱",

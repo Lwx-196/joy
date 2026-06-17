@@ -28,7 +28,10 @@
     "confirmRenderOver": "{{count}} exceeds batch limit {{max}}. Only enqueue first {{max}}?",
     "confirmRender": "Trigger batch render on {{count}} cases (brand: {{brand}})?",
     "confirmUpgradeOver": "{{count}} exceeds batch limit {{max}}. Only enqueue first {{max}}?",
-    "confirmUpgrade": "Trigger v3 async upgrade on {{count}} cases (brand: {{brand}})? 5–30s each, concurrency 2."
+    "confirmUpgrade": "Trigger v3 async upgrade on {{count}} cases (brand: {{brand}})? 5–30s each, concurrency 2.",
+    "forceBatchRender": "Force render",
+    "forceRenderTitle": "Bypass the quality gate and force-render this lane's {{n}} cases (may include false-negative or genuinely-missing-view cases)",
+    "confirmForceRender": "Force batch render bypasses the quality gate and renders {{count}} cases directly (may include false-negative or genuinely-missing-view cases).\n\nForce only bypasses the gate — it does not authorize burn (cache-miss still needs confirmation). Confirm the source images are usable. Continue?"
   },
   "worktray": {
     "title": "Review work-tray",
