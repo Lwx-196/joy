@@ -1808,6 +1808,10 @@ def test_render_queue_pulls_overrides_into_run_render(client, seed_case, monkeyp
             "case_mode": "tri-compare",
             "effective_templates": [],
             "manual_overrides_applied": list((manual_overrides or {}).keys()),
+            # single-compare policy（WIP 质量门）：最小合规元数据，保住本测试
+            # 「overrides 透传→done」的原意图
+            "render_selection_slot_count": 1,
+            "title": "客户 2026.01.01 示例项目",
         }
 
     monkeypatch.setattr(render_executor, "run_render", fake_run)
@@ -2164,7 +2168,10 @@ def test_render_queue_reuses_primary_render_metadata_for_bound_oblique_reselecti
             """INSERT INTO render_jobs
                (case_id, brand, template, status, enqueued_at, semantic_judge, render_mode)
                VALUES (?, ?, ?, 'queued', ?, 'off', 'standard')""",
-            (before_case, "fumei", "single-compare", now),
+            # bi-compare：WIP _constrain_selection_plan_to_template 对 single-compare
+            # 刻意只留 front；本测试主旨是 oblique 重选复用 primary 元数据，
+            # 换 front 缺席时保留 oblique 的 bi-compare 模板
+            (before_case, "fumei", "bi-compare", now),
         )
         job_id = cur.lastrowid
 
@@ -2454,6 +2461,9 @@ def test_render_queue_infers_filename_labels_and_excludes_generated_artifacts(
             "case_mode": "face",
             "effective_templates": ["single-compare"],
             "manual_overrides_applied": list((manual_overrides or {}).keys()),
+            # single-compare policy（WIP 质量门）最小合规元数据
+            "render_selection_slot_count": 1,
+            "title": "客户 2026.01.01 示例项目",
         }
 
     monkeypatch.setattr(render_executor, "run_render", fake_run)
@@ -2861,6 +2871,8 @@ def test_ai_enhance_direction_bypasses_semantic_auto_preflight(
             "warning_count": 0,
             "effective_templates": {},
             "manual_overrides_applied": [],
+            # ai_evidence policy（WIP 质量门）：正式 AI 板需真实增强产物证据
+            "enhancement_evidence": {"generated_count": 1, "external_call_count": 1},
         }
 
     def fail_normal_render(*args, **kwargs):
