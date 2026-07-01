@@ -48,6 +48,9 @@
     "cancelButton": "取消",
     "dismissed": "已取消本次出图（未消耗 API 额度）"
   },
+  "freshAi": {
+    "confirm": "本次将禁用 AI 增强缓存，重新调用图像 API 生成 {{count}} 个增强槽位，预计花费 ~{{cost}}、耗时 ~{{time}}。确认后会真实消耗 API 额度。是否继续？"
+  },
   "composition": {
     "title": "构图提示",
     "generic": "术前/术后构图存在差异，建议人工复核。",
@@ -65,6 +68,8 @@
     "openCaseRoot": "打开根目录",
     "openOutputDir": "打开输出目录",
     "openInNewTab": "新窗口",
+    "freshAi": "本次重新深图",
+    "freshAiTitle": "禁用增强缓存并确认调用图像 API，本次真实重新生成 AI 增强图",
     "expandDetail": "展开详情",
     "collapseDetail": "收起"
   },

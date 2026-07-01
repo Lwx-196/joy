@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+from pathlib import Path
+
+import pytest
+from PIL import Image, ImageDraw
+
 from backend import source_selection
 
 
@@ -29,6 +34,22 @@ def _candidate(
         "pose": pose or {"yaw": 0.0, "pitch": 0.0, "roll": 0.0},
         "direction": direction,
     }
+
+
+def _write_side_source(path: Path, *, scale: float) -> Path:
+    image = Image.new("RGB", (720, 480), (0, 0, 0))
+    draw = ImageDraw.Draw(image)
+    face_w = int(170 * scale)
+    face_h = int(230 * scale)
+    x0 = 190
+    y0 = 70
+    x1 = x0 + face_w
+    y1 = y0 + face_h
+    draw.ellipse((x0, y0, x1, y1), fill=(178, 136, 112))
+    draw.rectangle((x0 + 18, y0 + face_h // 2, x1 - 10, min(440, y1 + 95)), fill=(178, 136, 112))
+    draw.rectangle((x0 - 46, min(455, y1 + 80), min(680, x1 + 70), 480), fill=(50, 56, 62))
+    image.save(path)
+    return path
 
 
 def test_select_best_pair_prefers_pose_aligned_pair_over_single_image_score():
@@ -156,6 +177,136 @@ def test_locked_side_pair_with_large_pose_delta_is_dropped_from_formal_render():
     assert pair_quality["render_slot_status"] == "dropped"
     assert pair_quality["drop_reason"]["code"] == "low_comparison_value"
     assert pair_quality["metrics"]["pose_delta"]["weighted"] > source_selection.POSE_THRESHOLDS["side"]["weighted"]
+
+
+def test_side_slot_prefers_true_profile_over_weak_yaw_candidate():
+    """#33: side 槽位不能把 yaw≈35 的 45°候选当成严格侧面首选。"""
+
+    def scored(filename: str, *, phase: str, yaw: float, direction: str, issues: list[str] | None = None) -> dict[str, object]:
+        candidate = _candidate(
+            filename,
+            score=0,
+            phase=phase,
+            view="side",
+            case_id=33,
+            pose={"yaw": yaw, "pitch": 0.0, "roll": 0.0},
+            direction=direction,
+        )
+        candidate["manual"] = False
+        candidate["phase_source"] = "filename"
+        candidate["view_source"] = "semantic_screen"
+        candidate["angle_confidence"] = 0.88
+        candidate["issues"] = issues or []
+        candidate.update(source_selection.candidate_quality(candidate, "primary"))
+        return candidate
+
+    before_left = scored(
+        "术前3.JPG",
+        phase="before",
+        yaw=-45.0,
+        direction="left",
+        issues=["正脸检测失败，已使用侧脸检测兜底: 未检测到面部"],
+    )
+    before_right = scored(
+        "术前5.JPG",
+        phase="before",
+        yaw=45.0,
+        direction="right",
+        issues=["正脸检测失败，已使用侧脸检测兜底: 未检测到面部"],
+    )
+    weak_after_left = scored("术后2.JPG", phase="after", yaw=-35.42, direction="left")
+    true_after_right = scored(
+        "术后5.JPG",
+        phase="after",
+        yaw=45.0,
+        direction="right",
+        issues=["正脸检测失败，已使用侧脸检测兜底: 未检测到面部"],
+    )
+
+    assert weak_after_left["selection_score"] < true_after_right["selection_score"]
+    assert "side_profile_yaw_weak" in [
+        str(item.get("code")) for item in (weak_after_left.get("quality_warnings") or [])
+    ]
+
+    selected_before, selected_after, pair_quality = source_selection.select_best_pair(
+        "side",
+        [before_left, before_right],
+        [weak_after_left, true_after_right],
+    )
+
+    assert selected_before == before_right
+    assert selected_after == true_after_right
+    assert pair_quality is not None
+    assert pair_quality["metrics"]["pose_delta"]["weighted"] == 0.0
+
+
+def test_side_pair_quality_penalizes_source_scale_mismatch(tmp_path: Path):
+    before_path = _write_side_source(tmp_path / "before-side.jpg", scale=1.0)
+    after_bad_path = _write_side_source(tmp_path / "after-side-bad.jpg", scale=1.34)
+    after_good_path = _write_side_source(tmp_path / "after-side-good.jpg", scale=1.0)
+    before = _candidate(
+        "术前-side.jpg",
+        score=88,
+        phase="before",
+        view="side",
+        pose={"yaw": 45.0, "pitch": 0.0, "roll": 0.0},
+        direction="right",
+    )
+    after_bad = _candidate(
+        "术后-side-bad.jpg",
+        score=96,
+        phase="after",
+        view="side",
+        pose={"yaw": 45.0, "pitch": 0.0, "roll": 0.0},
+        direction="right",
+    )
+    after_good = _candidate(
+        "术后-side-good.jpg",
+        score=86,
+        phase="after",
+        view="side",
+        pose={"yaw": 45.0, "pitch": 0.0, "roll": 0.0},
+        direction="right",
+    )
+    before["path"] = str(before_path)
+    after_bad["path"] = str(after_bad_path)
+    after_good["path"] = str(after_good_path)
+
+    bad_quality = source_selection.slot_pair_quality("side", before, after_bad)
+    selected_before, selected_after, selected_quality = source_selection.select_best_pair(
+        "side",
+        [before],
+        [after_bad, after_good],
+    )
+
+    assert bad_quality is not None
+    assert bad_quality["metrics"]["source_scale"]["status"] == "review"
+    assert any(item["code"] == "side_source_scale_mismatch" for item in bad_quality["warnings"])
+    assert selected_before == before
+    assert selected_after == after_good
+    assert selected_quality is not None
+    assert selected_quality["metrics"]["source_scale"]["status"] == "ok"
+
+
+def test_side_source_scale_mismatch_drops_side_slot_even_above_score_floor():
+    quality = {
+        "score": source_selection.LOW_COMPARISON_VALUE_SCORE + 8,
+        "label": "review",
+        "severity": "review",
+        "warnings": [
+            {
+                "code": "side_source_scale_mismatch",
+                "severity": "review",
+                "message": "侧面源图人物尺度不一致",
+            }
+        ],
+    }
+
+    drop = source_selection.render_slot_drop_reason("side", quality)
+
+    assert drop is not None
+    assert drop["code"] == "low_comparison_value"
+    assert "side_source_scale_mismatch" in drop["trigger_codes"]
 
 
 def test_render_feedback_penalizes_selected_quality_risk_without_penalizing_cross_case_review():
@@ -444,6 +595,159 @@ def test_manual_pair_pose_review_does_not_emit_review_warning():
     quality = source_selection.slot_pair_quality("front", before, after)
     codes = [str(w.get("code")) for w in (quality.get("warnings") or [])]
     assert "pose_delta_review" not in codes
+
+
+def test_lip_pair_near_duplicate_real_case_blocks_target_effect():
+    """#65/job1048: 丰唇 pair 不能因姿态接近而误判 strong/render。"""
+    case_dir = Path("/Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/刘柏玲/25.6.4娇兰丰唇")
+    before_path = case_dir / "06041654_01.jpg"
+    after_path = case_dir / "06041654_02.jpg"
+    assert before_path.is_file()
+    assert after_path.is_file()
+    before = _candidate(
+        "06041654_01.jpg",
+        score=63,
+        phase="before",
+        case_id=65,
+        pose={"yaw": -1.2, "pitch": 3.38, "roll": 2.42},
+    )
+    after = _candidate(
+        "06041654_02.jpg",
+        score=63,
+        phase="after",
+        case_id=65,
+        pose={"yaw": -1.14, "pitch": 3.02, "roll": 2.58},
+    )
+    before["source_path"] = str(before_path)
+    after["source_path"] = str(after_path)
+
+    quality = source_selection.slot_pair_quality("front", before, after, treatment_type="lip")
+
+    assert quality is not None
+    codes = [str(w.get("code")) for w in (quality.get("warnings") or [])]
+    assert "target_effect_near_duplicate_lip" in codes
+    assert quality["severity"] == "block"
+    target_effect = quality["metrics"]["target_effect"]
+    assert target_effect["status"] == "block"
+    assert target_effect["dhash_distance"] <= 2
+
+
+def test_multi_treatment_lip_pair_near_duplicate_blocks_target_effect():
+    """多项目 case 主项目不是 lip 时，含 lip 仍要跑唇部目标效果门禁。"""
+    case_dir = Path("/Users/a1234/Desktop/飞书Claude/医美资料/陈院案例(1)/刘柏玲/25.6.4娇兰丰唇")
+    before_path = case_dir / "06041654_01.jpg"
+    after_path = case_dir / "06041654_02.jpg"
+    assert before_path.is_file()
+    assert after_path.is_file()
+    before = _candidate(
+        "06041654_01.jpg",
+        score=63,
+        phase="before",
+        case_id=65,
+        pose={"yaw": -1.2, "pitch": 3.38, "roll": 2.42},
+    )
+    after = _candidate(
+        "06041654_02.jpg",
+        score=63,
+        phase="after",
+        case_id=65,
+        pose={"yaw": -1.14, "pitch": 3.02, "roll": 2.58},
+    )
+    before["source_path"] = str(before_path)
+    after["source_path"] = str(after_path)
+
+    quality = source_selection.slot_pair_quality(
+        "front",
+        before,
+        after,
+        treatment_type="tear_trough",
+        treatment_types=["tear_trough", "lip"],
+    )
+
+    assert quality is not None
+    target_effect = quality["metrics"]["target_effect"]
+    assert target_effect["treatment_type"] == "lip"
+    assert target_effect["treatment_types"] == ["tear_trough", "lip"]
+    assert target_effect["status"] == "block"
+    assert "target_effect_near_duplicate_lip" in [
+        str(w.get("code")) for w in (quality.get("warnings") or [])
+    ]
+
+
+def test_front_pair_mouth_expression_mismatch_blocks_bad_pair_from_metadata():
+    before = _candidate(
+        "术前-嘟嘴.jpg",
+        score=90,
+        phase="before",
+        pose={"yaw": 0.0, "pitch": 0.0, "roll": 0.0},
+    )
+    after = _candidate(
+        "术后-中性.jpg",
+        score=90,
+        phase="after",
+        pose={"yaw": 0.0, "pitch": 0.0, "roll": 0.0},
+    )
+    before["mouth_expression"] = {"status": "evaluated", "mouthPucker": 0.99}
+    after["mouth_expression"] = {"status": "evaluated", "mouthPucker": 0.12}
+
+    quality = source_selection.slot_pair_quality("front", before, after)
+
+    assert quality is not None
+    assert quality["severity"] == "block"
+    codes = [str(w.get("code")) for w in (quality.get("warnings") or [])]
+    assert "mouth_expression_mismatch" in codes
+    assert quality["metrics"]["mouth_expression"]["mouth_pucker_delta"] == 0.87
+
+
+def test_real_case396_front_selection_avoids_pucker_before_source():
+    pytest.importorskip("mediapipe")
+    root = Path("/Users/a1234/Desktop/案例生成器/incoming/无创案例库/无创注射案例库/林方如/林方如2026.4.1盈致1支下巴，颏肌释放术前")
+    before_pucker_path = root / "术前7.jpg"
+    before_neutral_path = root / "术前1.jpg"
+    after_neutral_path = root / "术后1.jpg"
+    for path in (before_pucker_path, before_neutral_path, after_neutral_path):
+        assert path.is_file()
+    before_pucker = _candidate(
+        "术前7.jpg",
+        score=76,
+        phase="before",
+        case_id=396,
+        pose={"pitch": 1.4, "yaw": -1.55, "roll": 3.49},
+    )
+    before_pucker["source_path"] = str(before_pucker_path)
+    before_neutral = _candidate(
+        "术前1.jpg",
+        score=63,
+        phase="before",
+        case_id=396,
+        pose={"pitch": 5.46, "yaw": -0.04, "roll": -0.27},
+    )
+    before_neutral["source_path"] = str(before_neutral_path)
+    after_neutral = _candidate(
+        "术后1.jpg",
+        score=63,
+        phase="after",
+        case_id=396,
+        pose={"pitch": 6.33, "yaw": -0.39, "roll": 1.55},
+    )
+    after_neutral["source_path"] = str(after_neutral_path)
+
+    blocked_quality = source_selection.slot_pair_quality("front", before_pucker, after_neutral)
+    selected_before, selected_after, selected_quality = source_selection.select_best_pair(
+        "front",
+        [before_pucker, before_neutral],
+        [after_neutral],
+    )
+
+    assert blocked_quality is not None
+    assert blocked_quality["severity"] == "block"
+    assert [
+        str(w.get("code")) for w in (blocked_quality.get("warnings") or [])
+    ].count("mouth_expression_mismatch") == 1
+    assert selected_before == before_neutral
+    assert selected_after == after_neutral
+    assert selected_quality is not None
+    assert selected_quality["severity"] != "block"
 
 
 def test_direction_filename_fallback_right_for_side():

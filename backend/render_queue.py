@@ -92,6 +92,16 @@ if _RENDER_AUTO_AI_ENABLED:
 
 DEFAULT_TEMPLATE = "tri-compare"
 DEFAULT_SEMANTIC_JUDGE = "auto"
+_GENERIC_CUSTOMER_TITLE_NAMES = {
+    "",
+    "无创注射案例库",
+    "陈院案例(1)",
+    "陈院案例",
+    "derived",
+    "output",
+    "outputs",
+}
+_CUSTOMER_PATH_ANCHORS = ("无创注射案例库", "陈院案例(1)", "陈院案例")
 
 
 def _env_int(name: str, default: int) -> int:
@@ -102,6 +112,23 @@ def _env_int(name: str, default: int) -> int:
 
 
 SEMANTIC_AUTO_SOURCE_LIMIT = _env_int("CASE_WORKBENCH_SEMANTIC_AUTO_SOURCE_LIMIT", 18)
+
+
+def _display_customer_name_for_title(customer_raw: str | None, case_dir: str | Path | None) -> str:
+    raw = str(customer_raw or "").strip()
+    if raw and raw not in _GENERIC_CUSTOMER_TITLE_NAMES:
+        return raw
+    if case_dir:
+        parts = Path(case_dir).parts
+        for anchor in _CUSTOMER_PATH_ANCHORS:
+            if anchor not in parts:
+                continue
+            idx = parts.index(anchor)
+            if idx + 1 < len(parts):
+                candidate = str(parts[idx + 1]).strip()
+                if candidate and candidate not in _GENERIC_CUSTOMER_TITLE_NAMES:
+                    return candidate
+    return raw
 
 
 def _code_version_summary() -> dict[str, Any]:
@@ -155,10 +182,84 @@ def _parse_case_meta(raw: str | None) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
+def _merge_meta_patch(base: dict[str, Any], patch: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(patch, dict) or not patch:
+        return dict(base)
+    merged = dict(base)
+    for key, value in patch.items():
+        if key == "ai_usage" and isinstance(value, dict):
+            current = merged.get("ai_usage")
+            ai_usage = dict(current) if isinstance(current, dict) else {}
+            for ai_key, ai_value in value.items():
+                if ai_key == "enhancement_evidence" and isinstance(ai_value, dict):
+                    current_evidence = ai_usage.get("enhancement_evidence")
+                    evidence = dict(current_evidence) if isinstance(current_evidence, dict) else {}
+                    evidence.update(ai_value)
+                    ai_usage[ai_key] = evidence
+                else:
+                    ai_usage[ai_key] = ai_value
+            merged[key] = ai_usage
+        else:
+            merged[key] = value
+    return merged
+
+
+def _ai_enhance_failure_meta(exc: BaseException, message: str) -> dict[str, Any]:
+    command = getattr(exc, "ai_enhance_command", None)
+    stdout_tail = getattr(exc, "ai_enhance_stdout_tail", "")
+    stderr_tail = getattr(exc, "ai_enhance_stderr_tail", "")
+    failure_manifest = getattr(exc, "ai_enhance_failure_manifest", None)
+    progress = getattr(exc, "ai_enhance_progress", None)
+    provider_order = command.get("provider_order") if isinstance(command, dict) else []
+    cache_disabled = bool(command.get("no_cache")) if isinstance(command, dict) else False
+    evidence: dict[str, Any] = {
+        "status": "failed",
+        "error_type": type(exc).__name__,
+        "error_message": message,
+        "provider_order": provider_order,
+        "ai_enhance_command": command,
+        "stdout_tail": stdout_tail,
+        "stderr_tail": stderr_tail,
+    }
+    if failure_manifest is not None:
+        evidence["failure_manifest"] = failure_manifest
+    if progress is not None:
+        evidence["progress"] = progress
+    return {
+        "status": "failed",
+        "render_error": message,
+        "ai_usage": {
+            "formal_ai_enhancement_run": True,
+            "used_after_enhancement": False,
+            "generated_artifact_count": 0,
+            "enhanced_artifact_count": 0,
+            "external_call_count": 0,
+            "cache_hit_count": 0,
+            "fresh_ai_call": False,
+            "cache_disabled": cache_disabled,
+            "ai_enhance_command": command,
+            "enhancement_evidence": evidence,
+        },
+    }
+
+
 def _parse_job_options(raw_meta: str | None) -> dict[str, Any]:
     """从 render job 的 meta_json 取 enqueue 时存的 options（含 AI 增强板 enhance_direction/model）。"""
     options = _parse_case_meta(raw_meta).get("options")
     return options if isinstance(options, dict) else {}
+
+
+def _resolve_ai_enhance_direction(options: dict[str, Any], render_mode: str) -> str:
+    """Resolve AI enhancement mode while preserving explicit opt-out.
+
+    `enhance_direction=""` is the contract used by manual standard render to
+    disable the default AI-enhanced board path.
+    """
+    if "enhance_direction" in options:
+        return str(options.get("enhance_direction") or "").strip()
+    if render_mode == "ai":
+        return "heal"
+    return ""
 
 
 def _case_source_info(raw_meta: str | None, abs_path: str | None = None) -> tuple[int, list[str]]:
@@ -440,8 +541,41 @@ def _image_review_states(raw_meta: str | None) -> dict[str, dict[str, Any]]:
     return out
 
 
-def _state_for_filename(states: dict[str, dict[str, Any]], filename: str) -> dict[str, Any] | None:
-    return states.get(filename) or states.get(Path(filename).name)
+def _ambiguous_basenames(filenames: list[str]) -> set[str]:
+    counts: dict[str, int] = {}
+    for filename in filenames:
+        basename = Path(str(filename)).name
+        if basename:
+            counts[basename] = counts.get(basename, 0) + 1
+    return {basename for basename, count in counts.items() if count > 1}
+
+
+def _lookup_file_keyed(
+    mapping: dict[str, dict[str, Any]],
+    filename: str,
+    *,
+    render_filename: str | None = None,
+    ambiguous_basenames: set[str] | None = None,
+) -> dict[str, Any] | None:
+    for key in (filename, render_filename):
+        if key and key in mapping:
+            return mapping[key]
+    for key in (render_filename, filename):
+        if not key:
+            continue
+        basename = Path(str(key)).name
+        if basename and basename not in (ambiguous_basenames or set()) and basename in mapping:
+            return mapping[basename]
+    return None
+
+
+def _state_for_filename(
+    states: dict[str, dict[str, Any]],
+    filename: str,
+    *,
+    ambiguous_basenames: set[str] | None = None,
+) -> dict[str, Any] | None:
+    return _lookup_file_keyed(states, filename, ambiguous_basenames=ambiguous_basenames)
 
 
 _VLM_PHASES_ALLOWED = {"before", "intraop", "after"}
@@ -460,7 +594,7 @@ def _vlm_classifier_observations_by_filename(
     """
     rows = conn.execute(
         """
-        SELECT image_path, phase, body_part, view, confidence, quality_json
+        SELECT image_path, phase, body_part, view, confidence, quality_json, reasons_json
         FROM image_observations
         WHERE case_id = ?
           AND source = 'vlm_classifier'
@@ -479,13 +613,20 @@ def _vlm_classifier_observations_by_filename(
             quality = json.loads(quality_raw) if quality_raw else {}
         except (TypeError, ValueError):
             quality = {}
+        try:
+            reasons = json.loads(str(row["reasons_json"] or "[]"))
+        except (TypeError, ValueError):
+            reasons = []
         obs: dict[str, Any] = {
             "phase": row["phase"],
             "view": row["view"],
             "body_part": row["body_part"],
             "confidence": float(row["confidence"] or 0.0),
         }
-        if isinstance(quality, dict) and quality.get("is_composite"):
+        if (
+            (isinstance(quality, dict) and quality.get("is_composite"))
+            or source_images.observation_reasons_indicate_composite(reasons)
+        ):
             obs["is_composite"] = True
         for key in (path, Path(path).name):
             out.setdefault(key, obs)
@@ -1023,6 +1164,13 @@ def _build_render_selection_context(
     render_feedback = source_selection.render_feedback_from_history(conn, primary_case_id) if primary_case_id else None
     primary_skill_metadata = _skill_metadata_by_file(str(rows[0].get("skill_image_metadata_json") or "")) if rows else {}
     primary_render_metadata = _latest_render_selection_metadata_by_file(conn, primary_case_id) if primary_case_id else {}
+    primary_treatment_types = source_selection.detect_treatment_types(str(rows[0].get("abs_path") or "")) if rows else []
+    primary_treatment_type = primary_treatment_types[0] if primary_treatment_types else None
+    selection_treatment_types: list[str] = []
+    for source_row in rows:
+        for treatment in source_selection.detect_treatment_types(str(source_row.get("abs_path") or "")):
+            if treatment not in selection_treatment_types:
+                selection_treatment_types.append(treatment)
     selection_controls = source_selection.selection_controls_from_meta(
         _parse_case_meta(str(rows[0].get("meta_json") or "")) if rows else {}
     )
@@ -1041,6 +1189,7 @@ def _build_render_selection_context(
             for item in source_images.existing_source_image_files(case_dir, raw_files)["existing"]
             if source_images.is_source_image_file(str(item))
         ]
+        ambiguous_basenames = _ambiguous_basenames(existing_files)
         metadata_by_file = _skill_metadata_by_file(str(source_row.get("skill_image_metadata_json") or ""))
         vlm_obs_by_file = _vlm_classifier_observations_by_filename(conn, case_id)
         review_states = _image_review_states(meta_json)
@@ -1049,21 +1198,21 @@ def _build_render_selection_context(
         layout_evidence_by_file = _layout_quality_evidence_by_file(row_selection_controls)
         for filename in existing_files:
             render_filename = render_names.get((case_id, filename), filename)
-            state = _state_for_filename(review_states, filename) or {}
+            state = _state_for_filename(review_states, filename, ambiguous_basenames=ambiguous_basenames) or {}
             if bool(state.get("render_excluded") or state.get("verdict") == "excluded"):
                 overrides_by_render_name[render_filename] = {"render_excluded": True, "review_verdict": "excluded"}
                 continue
-            metadata = (
-                metadata_by_file.get(filename)
-                or metadata_by_file.get(render_filename)
-                or metadata_by_file.get(Path(render_filename).name)
-                or metadata_by_file.get(Path(filename).name)
+            metadata = _lookup_file_keyed(
+                metadata_by_file,
+                filename,
+                render_filename=render_filename,
+                ambiguous_basenames=ambiguous_basenames,
             )
-            observation = (
-                vlm_obs_by_file.get(filename)
-                or vlm_obs_by_file.get(render_filename)
-                or vlm_obs_by_file.get(Path(render_filename).name)
-                or vlm_obs_by_file.get(Path(filename).name)
+            observation = _lookup_file_keyed(
+                vlm_obs_by_file,
+                filename,
+                render_filename=render_filename,
+                ambiguous_basenames=ambiguous_basenames,
             )
             if isinstance(observation, dict) and observation.get("is_composite"):
                 LOGGER.info(
@@ -1076,22 +1225,23 @@ def _build_render_selection_context(
                 }
                 continue
             metadata = _apply_vlm_observation_to_metadata(metadata, observation)
-            fallback_metadata = (
-                primary_render_metadata.get(render_filename)
-                or primary_render_metadata.get(Path(render_filename).name)
-                or primary_render_metadata.get(filename)
-                or primary_render_metadata.get(Path(filename).name)
-                or primary_skill_metadata.get(render_filename)
-                or primary_skill_metadata.get(Path(render_filename).name)
-                or primary_skill_metadata.get(filename)
-                or primary_skill_metadata.get(Path(filename).name)
+            fallback_metadata = _lookup_file_keyed(
+                primary_render_metadata,
+                filename,
+                render_filename=render_filename,
+                ambiguous_basenames=ambiguous_basenames,
+            ) or _lookup_file_keyed(
+                primary_skill_metadata,
+                filename,
+                render_filename=render_filename,
+                ambiguous_basenames=ambiguous_basenames,
             )
             metadata = _selection_metadata_with_fallback(metadata, fallback_metadata)
-            manual_override = (
-                manual_overrides.get(filename)
-                or manual_overrides.get(render_filename)
-                or manual_overrides.get(Path(render_filename).name)
-                or manual_overrides.get(Path(filename).name)
+            manual_override = _lookup_file_keyed(
+                manual_overrides,
+                filename,
+                render_filename=render_filename,
+                ambiguous_basenames=ambiguous_basenames,
             )
             phase, phase_source, view, view_source, manual = _selection_phase_view(
                 filename,
@@ -1101,11 +1251,14 @@ def _build_render_selection_context(
             )
             if phase not in {"before", "after"} or view not in {"front", "oblique", "side"}:
                 continue
+            rel_path = Path(str(filename))
+            source_path = str(rel_path if rel_path.is_absolute() else (Path(case_dir) / rel_path).resolve())
             candidate: dict[str, Any] = {
                 "case_id": case_id,
                 "source_role": role,
                 "filename": filename,
                 "render_filename": render_filename,
+                "source_path": source_path,
                 "phase": phase,
                 "phase_source": phase_source,
                 "view": view,
@@ -1142,10 +1295,11 @@ def _build_render_selection_context(
             if isinstance(manual_override, dict) and isinstance(manual_override.get("transform"), dict):
                 candidate["manual_transform"] = manual_override["transform"]
             ar = candidate.get("source_aspect_ratio")
-            if ar is not None and ar > 0 and max(ar, 1 / ar) >= source_images.COMPOSITE_ASPECT_RATIO_THRESHOLD:
+            source_file_path = Path(str(source_path))
+            if source_file_path.is_file() and source_images.is_composite_image(source_file_path):
                 LOGGER.info(
-                    "skipping composite image (aspect ratio %.2f): case %s / %s",
-                    ar, case_id, filename,
+                    "skipping composite image: case %s / %s",
+                    case_id, filename,
                 )
                 overrides_by_render_name[render_filename] = {
                     "render_excluded": True,
@@ -1194,6 +1348,8 @@ def _build_render_selection_context(
             slot["before_candidates"],
             slot["after_candidates"],
             lock=locked_slots.get(view) if isinstance(locked_slots, dict) else None,
+            treatment_type=primary_treatment_type,
+            treatment_types=selection_treatment_types,
         )
         if before:
             selected_candidates.append(before)
@@ -1244,6 +1400,8 @@ def _build_render_selection_context(
         "plan": {
             "version": 1,
             "policy": "source_selection_v1",
+            "treatment_type": primary_treatment_type,
+            "treatment_types": selection_treatment_types,
             "feedback_source_job_id": (render_feedback or {}).get("source_job_id") if isinstance(render_feedback, dict) else None,
             "feedback_applied": bool(
                 isinstance(render_feedback, dict)
@@ -1299,9 +1457,10 @@ def _apply_inferred_phase_view_overrides(
     ephemeral overrides without writing any manual override rows.
     """
     applied = 0
+    ambiguous_basenames = _ambiguous_basenames(image_files)
     for filename in image_files:
-        current = manual_overrides.get(filename) or manual_overrides.get(Path(filename).name)
-        metadata = metadata_by_file.get(filename) or metadata_by_file.get(Path(filename).name)
+        current = _lookup_file_keyed(manual_overrides, filename, ambiguous_basenames=ambiguous_basenames)
+        metadata = _lookup_file_keyed(metadata_by_file, filename, ambiguous_basenames=ambiguous_basenames)
         phase, view, _manual = _metadata_phase_view(filename, current, metadata)
         if phase not in {"before", "after"} or view not in {"front", "oblique", "side"}:
             continue
@@ -1336,6 +1495,7 @@ def _classification_blocking_preflight(
     metadata_by_file = _skill_metadata_by_file(skill_image_metadata_json)
     if case_id:
         _enrich_metadata_from_observations(metadata_by_file, case_id)
+    ambiguous_basenames = _ambiguous_basenames(image_files)
     blockers: list[str] = []
     missing_count = 0
     low_confidence_count = 0
@@ -1344,7 +1504,7 @@ def _classification_blocking_preflight(
     copied_review_count = 0
     unresolved_samples: list[str] = []
     for filename in image_files:
-        state = _state_for_filename(states, filename)
+        state = _state_for_filename(states, filename, ambiguous_basenames=ambiguous_basenames)
         verdict = str((state or {}).get("verdict") or "")
         if bool((state or {}).get("render_excluded") or verdict == "excluded"):
             continue
@@ -1354,8 +1514,8 @@ def _classification_blocking_preflight(
             copied_review_count += 1
             unresolved_samples.append(filename)
             continue
-        override = manual_overrides.get(filename) or manual_overrides.get(Path(filename).name)
-        metadata = metadata_by_file.get(filename) or metadata_by_file.get(Path(filename).name)
+        override = _lookup_file_keyed(manual_overrides, filename, ambiguous_basenames=ambiguous_basenames)
+        metadata = _lookup_file_keyed(metadata_by_file, filename, ambiguous_basenames=ambiguous_basenames)
         phase, view, manual = _metadata_phase_view(filename, override, metadata)
         if verdict == "needs_repick":
             needs_repick_count += 1
@@ -1690,6 +1850,74 @@ def _tri_slot_preflight(
             "selection_plan": selection_plan,
         },
     }
+
+
+def _complete_render_slots(slots: dict[str, Any]) -> list[str]:
+    return [
+        view
+        for view in ("front", "oblique", "side")
+        if isinstance((slots.get(view) or {}).get("before"), dict)
+        and isinstance((slots.get(view) or {}).get("after"), dict)
+    ]
+
+
+def _slots_for_effective_template(template: str, renderable_slots: list[str]) -> list[str] | None:
+    if template == "single-compare":
+        return ["front"]
+    if template != "bi-compare":
+        return None
+    if "front" not in renderable_slots:
+        return ["front", "oblique"]
+    side_slot = next((view for view in ("oblique", "side") if view in renderable_slots), "oblique")
+    return ["front", side_slot]
+
+
+def _constrain_selection_plan_to_template(selection_plan: dict[str, Any], template: str) -> dict[str, Any]:
+    """Keep renderer slot selection aligned with the already-approved effective template."""
+    if not isinstance(selection_plan, dict):
+        return selection_plan
+    slots = selection_plan.get("slots")
+    if not isinstance(slots, dict):
+        return selection_plan
+    renderable_slots = _complete_render_slots(slots)
+    required_slots = _slots_for_effective_template(template, renderable_slots)
+    if not required_slots:
+        return selection_plan
+    required_set = set(required_slots)
+    constrained_slots = {
+        view: slots[view]
+        for view in ("front", "oblique", "side")
+        if view in required_set and view in slots
+    }
+    constrained = dict(selection_plan)
+    constrained["slots"] = constrained_slots
+    constrained["required_slots"] = required_slots
+    constrained["renderable_slots"] = [view for view in required_slots if view in renderable_slots]
+    constrained["effective_template_hint"] = template
+    constrained["template_constraint"] = template
+    constrained["missing_slots"] = [
+        item
+        for item in (selection_plan.get("missing_slots") or [])
+        if isinstance(item, dict) and str(item.get("view") or "") in required_set
+    ]
+    constrained["dropped_slots"] = [
+        item
+        for item in (selection_plan.get("dropped_slots") or [])
+        if isinstance(item, dict) and str(item.get("view") or "") in required_set
+    ]
+    constrained["source_provenance"] = [
+        item
+        for item in (selection_plan.get("source_provenance") or [])
+        if isinstance(item, dict) and str(item.get("view") or "") in required_set
+    ]
+    constrained["selected_count"] = sum(
+        1
+        for slot in constrained_slots.values()
+        if isinstance(slot, dict)
+        for role in ("before", "after")
+        if isinstance(slot.get(role), dict)
+    )
+    return constrained
 
 
 def _has_phase_pair(
@@ -2283,16 +2511,16 @@ class RenderQueue:
             # 补上默认值，确保不会静默退化成纯排版。
             _job_options = _parse_job_options(row["meta_json"] if "meta_json" in row.keys() else None)
             render_mode = row["render_mode"] if "render_mode" in row.keys() else "ai"
-            ai_enhance_direction = str(_job_options.get("enhance_direction") or "").strip()
-            if not ai_enhance_direction and render_mode == "ai":
-                ai_enhance_direction = "heal"
+            ai_enhance_direction = _resolve_ai_enhance_direction(_job_options, render_mode)
             ai_enhance_model = str(_job_options.get("enhance_model") or "").strip()
+            ai_no_cache = bool(_job_options.get("no_cache"))
             # F2（frugal-cache-guard）：用户在确认卡点「确认出图」后，路由把 confirm_burn 译成
             # options.allow_burn=True 存进 meta_json。这里读出后透传给执行器子进程 → 授权
             # cache-miss 真烧；默认 False 时执行器走预判护栏，cache-miss 返 needs_confirmation。
             ai_allow_burn = bool(_job_options.get("allow_burn"))
             batch_id = row["batch_id"]
             customer_raw = row["case_customer_raw"]
+            title_customer_name = _display_customer_name_for_title(customer_raw, case_dir)
             case_date, case_project = scanner.extract_case_date_project(Path(case_dir), scanner.DEFAULT_ROOTS)
 
             # Stage B: pull manual phase/view overrides for this case.
@@ -2390,6 +2618,7 @@ class RenderQueue:
                 bound_render_names,
             )
             render_selection_plan = selection_context["plan"]
+            render_selection_plan = _constrain_selection_plan_to_template(render_selection_plan, template)
             for filename, selection_override in selection_context["overrides_by_render_name"].items():
                 target = manual_overrides.setdefault(filename, {})
                 for key, value in selection_override.items():
@@ -2573,6 +2802,12 @@ class RenderQueue:
                     enhance_direction=ai_enhance_direction,
                     enhance_model=ai_enhance_model or "gemini-3-pro-image",
                     allow_burn=ai_allow_burn,
+                    no_cache=ai_no_cache,
+                    manual_overrides=manual_overrides,
+                    selection_plan=render_selection_plan,
+                    customer_name=title_customer_name,
+                    date=case_date,
+                    project=case_project,
                 )
             else:
                 result = render_executor.run_render(
@@ -2582,7 +2817,7 @@ class RenderQueue:
                     semantic_judge=semantic_judge,
                     manual_overrides=manual_overrides,
                     selection_plan=render_selection_plan,
-                    customer_name=customer_raw,
+                    customer_name=title_customer_name,
                     date=case_date,
                     project=case_project,
                 )
@@ -2590,10 +2825,20 @@ class RenderQueue:
             self._mark_failed(job_id, f"missing: {e}")
             return
         except subprocess.TimeoutExpired as e:
-            self._mark_failed(job_id, f"timeout after {e.timeout}s")
+            message = f"timeout after {e.timeout}s"
+            self._mark_failed(
+                job_id,
+                message,
+                meta_patch=_ai_enhance_failure_meta(e, message) if ai_enhance_direction else None,
+            )
             return
         except RuntimeError as e:
-            self._mark_failed(job_id, f"render failed: {e}")
+            message = f"render failed: {e}"
+            self._mark_failed(
+                job_id,
+                message,
+                meta_patch=_ai_enhance_failure_meta(e, message) if ai_enhance_direction else None,
+            )
             return
         ai_usage = dict(result.get("ai_usage") or {})
         ai_usage.setdefault("semantic_judge_requested", requested_semantic_judge)
@@ -2638,6 +2883,8 @@ class RenderQueue:
         # 3. Persist artifact state + quality audit + broadcast. A skill
         # manifest with status=error can still produce a visible board; that
         # must be reviewed as `done_with_issues`, not silently treated as clean.
+        result.setdefault("requested_template", template)
+        result.setdefault("template", template)
         quality = render_quality.evaluate_render_result(result)
         final_status = quality["quality_status"]
         render_error = str(result.get("render_error") or "").strip()
@@ -2809,20 +3056,29 @@ class RenderQueue:
             }
         )
 
-    def _mark_failed(self, job_id: int, message: str) -> None:
+    def _mark_failed(self, job_id: int, message: str, meta_patch: dict[str, Any] | None = None) -> None:
         with db.connect() as conn:
             row = conn.execute(
-                "SELECT case_id, batch_id FROM render_jobs WHERE id = ?", (job_id,)
+                "SELECT case_id, batch_id, meta_json FROM render_jobs WHERE id = ?", (job_id,)
             ).fetchone()
+            meta_json = None
+            if row:
+                current_meta = _parse_case_meta(row["meta_json"] if "meta_json" in row.keys() else None)
+                if meta_patch:
+                    meta_json = json.dumps(
+                        stress.tag_payload(_merge_meta_patch(current_meta, meta_patch)),
+                        ensure_ascii=False,
+                    )
             conn.execute(
                 """
                 UPDATE render_jobs
                 SET status = 'failed',
                     finished_at = ?,
-                    error_message = ?
+                    error_message = ?,
+                    meta_json = COALESCE(?, meta_json)
                 WHERE id = ?
                 """,
-                (_now_iso(), message[:4000], job_id),
+                (_now_iso(), message[:4000], meta_json, job_id),
             )
         self._publish(
             {

@@ -48,6 +48,9 @@
     "cancelButton": "Cancel",
     "dismissed": "Render cancelled (no API quota used)"
   },
+  "freshAi": {
+    "confirm": "This run will bypass the AI enhancement cache and call the image API for {{count}} enhancement slot(s), estimated ~{{cost}} and ~{{time}}. Confirming consumes real API quota. Continue?"
+  },
   "composition": {
     "title": "Composition note",
     "generic": "Before/after composition differs and should be reviewed.",
@@ -65,6 +68,8 @@
     "openCaseRoot": "Open root",
     "openOutputDir": "Open output",
     "openInNewTab": "New tab",
+    "freshAi": "Fresh AI render",
+    "freshAiTitle": "Bypass the enhancement cache and authorize a real image API call for this run",
     "expandDetail": "Show details",
     "collapseDetail": "Hide"
   },

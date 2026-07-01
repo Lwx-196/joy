@@ -16,6 +16,7 @@ from __future__ import annotations
 import logging
 import os
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 
 # 默认从 PANEL_ENV_FILE 取（dev 机 export 一次即可）；不硬编码个人绝对路径。
@@ -459,7 +460,8 @@ def _clear_outage(name: str) -> None:
 
 
 def generate_with_fallback(providers: list[ImageProvider], image_bytes: bytes, prompt: str,
-                           *, mime: str = "image/jpeg", size_override: str | None = None) -> tuple[bytes, str]:
+                           *, mime: str = "image/jpeg", size_override: str | None = None,
+                           progress_callback: Callable[[dict[str, object]], None] | None = None) -> tuple[bytes, str]:
     """按链 fallback；返回 (图字节, provider 名)。全失败抛最后异常。
 
     size_override 透传给 images_edit（自适应 4K 每图动态尺寸）。默认 None = 旧行为。
@@ -476,18 +478,49 @@ def generate_with_fallback(providers: list[ImageProvider], image_bytes: bytes, p
                            p.name, _OUTAGE_WINDOW_S, _OUTAGE_FAIL_THRESHOLD)
             last = last or ProviderOutageError(f"{p.name} skipped (outage circuit-breaker)")
             saw_outage = True
+            if progress_callback:
+                progress_callback({
+                    "event": "provider_skipped",
+                    "provider": p.name,
+                    "reason": "outage_circuit_breaker",
+                })
             continue
         for attempt in (1, 2):   # 瞬时网络/代理错误重试一次再换 provider
             t0 = time.time()
             try:
+                if progress_callback:
+                    progress_callback({
+                        "event": "provider_attempt_start",
+                        "provider": p.name,
+                        "attempt": attempt,
+                        "api_format": p.api_format,
+                        "stream": bool(p.stream),
+                        "size_override": size_override,
+                    })
                 result = images_edit(p, image_bytes, prompt, mime=mime, size_override=size_override), p.name
                 _clear_outage(p.name)   # 成功 = provider 恢复，清零毒化计数
+                if progress_callback:
+                    progress_callback({
+                        "event": "provider_attempt_success",
+                        "provider": p.name,
+                        "attempt": attempt,
+                        "elapsed_s": round(time.time() - t0, 3),
+                    })
                 return result
             except Exception as e:  # noqa: BLE001 — 逐家试，记下最后一个；
                 # 失败必留痕（2026-06-12：刘亦卿槽 648s 静默降级 flashapi 低清，无日志无法归因）
                 last = e
                 logger.warning("images_edit %s attempt %d 失败 (%.1fs): %s",
                                p.name, attempt, time.time() - t0, str(e)[:200])
+                if progress_callback:
+                    progress_callback({
+                        "event": "provider_attempt_failed",
+                        "provider": p.name,
+                        "attempt": attempt,
+                        "elapsed_s": round(time.time() - t0, 3),
+                        "error": str(e)[:500],
+                        "error_type": type(e).__name__,
+                    })
                 if _is_outage_error(e):
                     # outage 类（5xx/server_error/墙钟）重试 2nd attempt 也是死等 ~150s → 记账后立刻换 provider。
                     saw_outage = True

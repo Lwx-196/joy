@@ -1341,6 +1341,7 @@ def render_from_manifest(manifest, final_path):
         (120, 160),
         "side",
         allow_direction_mismatch=True,
+        focus_targets=["下颌线"],
         render_plan_records=records,
     )
     final_path.write_bytes(b"jpeg")

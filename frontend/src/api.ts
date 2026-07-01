@@ -1733,6 +1733,7 @@ export interface EnqueueRenderPayload {
   options?: {
     enhance_direction?: string;
     enhance_model?: string;
+    no_cache?: boolean;
   };
   /** F2 frugal-cache-guard：cache-miss 确认卡点「确认出图」时带 true → 后端授权真烧 API。
    * 默认省略（false）→ cache-miss 走预判护栏返 needs_confirmation 不静默烧钱。 */
@@ -2069,6 +2070,7 @@ export interface SourceGroupResponse {
 	      selected_count: number;
 	      renderable_slot_count?: number;
 	      effective_template_hint?: string | null;
+	      effective_template_source?: string | null;
 	      blocking_reasons?: {
 	        code?: string | null;
 	        view?: string | null;

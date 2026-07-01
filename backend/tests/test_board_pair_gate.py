@@ -19,6 +19,18 @@ def _front(ratio, **extra):
     return rec
 
 
+def _front_position(dy_ratio, **extra):
+    return _front(
+        1.0,
+        pair_position_signal={
+            "valid": True,
+            "eye_center_dy_panel_ratio": dy_ratio,
+            "eye_center_dy_px": round(dy_ratio * 1264, 1),
+        },
+        **extra,
+    )
+
+
 # === C 灾难 3 板实测值必须 HELD（2026-06-11 标定）===
 
 def test_zengyuqin_catastrophe_held():
@@ -52,6 +64,22 @@ def test_boundary_inclusive():
     assert gate.evaluate_pair_coverage(_plan([_front(1.30)]))["verdict"] == "pass"
     assert gate.evaluate_pair_coverage(_plan([_front(0.779)]))["verdict"] == "held"
     assert gate.evaluate_pair_coverage(_plan([_front(1.301)]))["verdict"] == "held"
+
+
+# === 正面眼位垂直错位必须 HELD（蓝凤端 #381 回放：dy=0.1658）===
+
+def test_lanfengduan_front_vertical_misalignment_held():
+    r = gate.evaluate_pair_coverage(_plan([_front_position(0.1658)]))
+    assert r["verdict"] == "held"
+    assert r["violations"][0]["metric"] == "eye_center_dy_panel_ratio"
+    assert r["violations"][0]["eye_center_dy_panel_ratio"] == 0.1658
+
+
+def test_front_vertical_alignment_boundary_inclusive():
+    assert gate.evaluate_pair_coverage(_plan([_front_position(0.14)]))["verdict"] == "pass"
+    assert gate.evaluate_pair_coverage(_plan([_front_position(-0.14)]))["verdict"] == "pass"
+    assert gate.evaluate_pair_coverage(_plan([_front_position(0.141)]))["verdict"] == "held"
+    assert gate.evaluate_pair_coverage(_plan([_front_position(-0.141)]))["verdict"] == "held"
 
 
 # === 非 front 槽不评（oblique/side 眼距是 yaw 噪音，标定证实）===

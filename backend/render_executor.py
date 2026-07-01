@@ -59,6 +59,7 @@ DEFAULT_RENDER_TIMEOUT_SEC = int(os.environ.get("CASE_WORKBENCH_RENDER_TIMEOUT_S
 DEFAULT_AI_ENHANCE_TIMEOUT_SEC = int(os.environ.get("CASE_WORKBENCH_AI_ENHANCE_TIMEOUT_SEC", "900"))
 # AI 增强板 CLI（自带 build_manifest + apply_after_enhancements + matte 纯黑底）。
 AI_ENHANCE_SCRIPT = Path(__file__).resolve().parent / "scripts" / "render_ai_enhanced_boards.py"
+DEFAULT_AI_ENHANCE_PROVIDER_ORDER = "rsta,tuzi,flashapi,77code"
 DEFAULT_SEMANTIC_SCREEN_TIMEOUT_SEC = "3"
 DEFAULT_SEMANTIC_PAIR_REVIEW_TIMEOUT_SEC = "8"
 DEFAULT_SEMANTIC_FINAL_QA_TIMEOUT_SEC = "8"
@@ -353,6 +354,7 @@ if hasattr(render_module, "render_aligned_pair") and hasattr(render_module, "ren
         allow_direction_mismatch=False,
         protection_targets=None,
         render_plan_records=None,
+        **kwargs,
     ):
         try:
             return _original_render_aligned_pair(
@@ -363,6 +365,7 @@ if hasattr(render_module, "render_aligned_pair") and hasattr(render_module, "ren
                 allow_direction_mismatch=allow_direction_mismatch,
                 protection_targets=protection_targets,
                 render_plan_records=render_plan_records,
+                **kwargs,
             )
         except Exception as exc:
             if slot != "side":
@@ -1036,11 +1039,13 @@ def _apply_render_selection_plan(manifest, plan):
             continue
         selected_slots = dict(group.get("selected_slots") or {})
         original = {slot: _slot_selection_summary(selected_slots.get(slot)) for slot in angle_slots if selected_slots.get(slot)}
+        selected_slots_changed = False
         for slot in angle_slots:
             if slot in planned_slot_set:
                 continue
             removed = selected_slots.pop(slot, None)
             if isinstance(removed, dict):
+                selected_slots_changed = True
                 audit["removed_unplanned_slots"].append({
                     "group": group.get("name"),
                     "slot": slot,
@@ -1099,6 +1104,17 @@ def _apply_render_selection_plan(manifest, plan):
                     "after": new_summary,
                 })
         if not applied_for_group:
+            if selected_slots_changed:
+                group["source_selection_original_slots"] = original
+                group["selected_slots"] = selected_slots
+                candidate_slots = [
+                    slot for slot in angle_slots
+                    if slot in planned_slot_set and isinstance(selected_slots.get(slot), dict)
+                ]
+                group["render_slots"] = candidate_slots
+                if not candidate_slots:
+                    group.pop("effective_template", None)
+                group["render_selection_note"] = "正式出图已按 source_selection_v1 移除未计划槽位"
             continue
         group["source_selection_original_slots"] = original
         group["selected_slots"] = selected_slots
@@ -1919,6 +1935,74 @@ def _ai_enhance_cli_python() -> str:
     return sys.executable
 
 
+def _ai_enhance_provider_order(enhance_model: str) -> str:
+    configured = os.environ.get("CASE_WORKBENCH_AI_ENHANCE_PROVIDER_ORDER", "").strip()
+    if configured:
+        return configured
+    # `enhance_model` is a requested model label, not the provider authority.
+    # Production fresh AI keeps the explicit/default provider chain unless an
+    # operator overrides CASE_WORKBENCH_AI_ENHANCE_PROVIDER_ORDER.
+    _ = enhance_model
+    return DEFAULT_AI_ENHANCE_PROVIDER_ORDER
+
+
+def _split_provider_order(provider_order: str) -> list[str]:
+    return [part.strip() for part in (provider_order or "").split(",") if part.strip()]
+
+
+def _tail_text(value: Any, max_chars: int = 2000) -> str:
+    text = value.decode("utf-8", errors="replace") if isinstance(value, bytes) else str(value or "")
+    return text[-max_chars:]
+
+
+def _ai_enhance_command_metadata(
+    *,
+    args: list[str],
+    timeout: int,
+    provider_order: str,
+    enhance_direction: str,
+    enhance_model: str,
+    no_cache: bool,
+    allow_burn: bool,
+) -> dict[str, Any]:
+    """Structured, non-secret provenance for the AI-enhance subprocess."""
+    return {
+        "kind": "ai_enhanced_board_subprocess",
+        "python": args[0] if args else None,
+        "script": args[1] if len(args) > 1 else None,
+        "args": [str(item) for item in args],
+        "timeout_sec": int(timeout),
+        "provider_order_raw": provider_order,
+        "provider_order": _split_provider_order(provider_order),
+        "enhance_direction": enhance_direction,
+        "enhance_model": enhance_model,
+        "no_cache": bool(no_cache),
+        "allow_burn": bool(allow_burn),
+    }
+
+
+def _attach_ai_enhance_exception_metadata(
+    exc: BaseException,
+    *,
+    command: dict[str, Any],
+    stdout: Any = None,
+    stderr: Any = None,
+    output_dir: Path | str | None = None,
+) -> BaseException:
+    """Attach command/failure evidence to exceptions crossing into render_queue."""
+    setattr(exc, "ai_enhance_command", command)
+    setattr(exc, "ai_enhance_stdout_tail", _tail_text(stdout))
+    setattr(exc, "ai_enhance_stderr_tail", _tail_text(stderr))
+    if output_dir is not None:
+        failure_manifest = _load_ai_board_failure_manifest(output_dir)
+        if failure_manifest is not None:
+            setattr(exc, "ai_enhance_failure_manifest", failure_manifest)
+        progress = _load_ai_board_progress(output_dir)
+        if progress is not None:
+            setattr(exc, "ai_enhance_progress", progress)
+    return exc
+
+
 def _parse_ai_board_result(stdout: str) -> str | None:
     """从 CLI stdout 解析 'AI_BOARD_RESULT: <path>' 标记。"""
     for line in stdout.splitlines():
@@ -1926,6 +2010,28 @@ def _parse_ai_board_result(stdout: str) -> str | None:
         if line.startswith("AI_BOARD_RESULT:"):
             return line.split("AI_BOARD_RESULT:", 1)[1].strip()
     return None
+
+
+def _parse_ai_board_evidence(stdout: str) -> dict[str, Any] | None:
+    """Parse machine-readable enhancement provenance emitted by the AI board CLI."""
+    for line in (stdout or "").splitlines():
+        line = line.strip()
+        if not line.startswith("AI_BOARD_EVIDENCE:"):
+            continue
+        payload = line.split("AI_BOARD_EVIDENCE:", 1)[1].strip()
+        try:
+            parsed = json.loads(payload)
+        except (json.JSONDecodeError, ValueError):
+            return None
+        return parsed if isinstance(parsed, dict) else None
+    return None
+
+
+def _evidence_int(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _parse_ai_board_held(stdout: str) -> dict[str, Any] | None:
@@ -1965,6 +2071,110 @@ def _parse_ai_board_cache_miss(stdout: str) -> dict[str, Any] | None:
     return None
 
 
+def _load_ai_board_failure_manifest(output_dir: Path | str) -> dict[str, Any] | None:
+    """Read structured failures from the AI board CLI temp output.
+
+    `render_ai_enhanced_boards.py` always writes `boards_manifest.json` even when
+    no `AI_BOARD_RESULT` is emitted. The parent process owns a temporary
+    output-dir, so this must be read before the temp dir is cleaned up.
+    """
+    manifest_path = Path(output_dir) / "boards_manifest.json"
+    if not manifest_path.is_file():
+        return None
+    try:
+        parsed = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, TypeError, ValueError):
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    boards = parsed.get("boards")
+    if not isinstance(boards, list):
+        return None
+
+    failures: list[dict[str, Any]] = []
+    for board in boards:
+        if not isinstance(board, dict):
+            continue
+        status = str(board.get("status") or "").strip()
+        if status in {"OK", "PARTIAL"}:
+            continue
+        item: dict[str, Any] = {
+            "customer": board.get("customer"),
+            "treatment": board.get("treatment"),
+            "status": status or "UNKNOWN",
+            "error": board.get("error"),
+        }
+        for key in ("manifest_status", "angle_gate", "pair_gate"):
+            if board.get(key) is not None:
+                item[key] = board.get(key)
+        failures.append(item)
+
+    return {
+        "manifest_path": str(manifest_path),
+        "board_count": len(boards),
+        "failures": failures,
+    }
+
+
+def _load_ai_board_progress(output_dir: Path | str) -> dict[str, Any] | None:
+    progress_path = Path(output_dir) / "ai_enhance_progress.jsonl"
+    if not progress_path.is_file():
+        return None
+    events: list[dict[str, Any]] = []
+    malformed = 0
+    try:
+        for line in progress_path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                item = json.loads(line)
+            except (TypeError, ValueError):
+                malformed += 1
+                continue
+            if isinstance(item, dict):
+                events.append(item)
+    except OSError:
+        return None
+    return {
+        "progress_path": str(progress_path),
+        "event_count": len(events),
+        "malformed_count": malformed,
+        "last_event": events[-1] if events else None,
+        "recent_events": events[-20:],
+    }
+
+
+def _format_ai_board_failure_manifest(failure_manifest: dict[str, Any] | None) -> str:
+    if not failure_manifest:
+        return ""
+    failures = failure_manifest.get("failures")
+    if not isinstance(failures, list) or not failures:
+        board_count = failure_manifest.get("board_count")
+        return f"boards_manifest={failure_manifest.get('manifest_path')} board_count={board_count}"
+
+    parts: list[str] = []
+    for item in failures[:5]:
+        if not isinstance(item, dict):
+            continue
+        name = " ".join(
+            str(value).strip()
+            for value in (item.get("customer"), item.get("treatment"))
+            if value
+        )
+        status = str(item.get("status") or "UNKNOWN").strip()
+        error = str(item.get("error") or "").strip()
+        gate_bits = []
+        for key in ("manifest_status", "angle_gate", "pair_gate"):
+            if item.get(key) is not None:
+                gate_bits.append(f"{key}={item.get(key)}")
+        gate_suffix = f" ({', '.join(gate_bits)})" if gate_bits else ""
+        prefix = f"{name} " if name else ""
+        parts.append(f"{prefix}status={status}{gate_suffix} error={error}".strip())
+    if len(failures) > 5:
+        parts.append(f"... +{len(failures) - 5} more")
+    return f"boards_manifest={failure_manifest.get('manifest_path')}; " + " | ".join(parts)
+
+
 def run_ai_enhanced_render(
     case_dir: Path | str,
     brand: str = "fumei",
@@ -1973,6 +2183,12 @@ def run_ai_enhanced_render(
     enhance_model: str = "gemini-3-pro-image",
     timeout: int = DEFAULT_AI_ENHANCE_TIMEOUT_SEC,
     allow_burn: bool = False,
+    no_cache: bool = False,
+    manual_overrides: dict[str, dict[str, Any]] | None = None,
+    selection_plan: dict[str, Any] | None = None,
+    customer_name: str | None = None,
+    date: str | None = None,
+    project: str | None = None,
 ) -> dict[str, Any]:
     """术后 AI 增强板：spawn `render_ai_enhanced_boards.py --case-dir`（仿 run_render 子进程隔离），
     把增强板放到标准 `final-board.jpg` 位置，前端零改即可像普通板轮询+展示。
@@ -2006,33 +2222,98 @@ def run_ai_enhanced_render(
 
     out_root = stress.render_output_root(case_dir, brand, template)
     _archive_existing_final_board(out_root)
+    board_title_context = {
+        "customer_name": str(customer_name or "").strip(),
+        "date": str(date or "").strip(),
+        "project": str(project or "").strip(),
+    }
 
     with tempfile.TemporaryDirectory(prefix="ai-enhance-board-") as tmp:
-        proc = _run_render_subprocess(
-            [
-                _ai_enhance_cli_python(),
-                str(AI_ENHANCE_SCRIPT),
-                "--case-dir", str(case_dir),
-                "--brand", brand,
-                "--enhance-direction", enhance_direction,
-                "--enhance-model", enhance_model,
-                "--output-dir", tmp,
-                "--no-board-qa",
-                # F2：用户确认烧钱后 allow_burn=True → 授权 cache-miss 真烧；默认 off 走预判护栏。
-                *(["--allow-cache-miss-burn"] if allow_burn else []),
-            ],
-            timeout,
-            extra_env={
-                "CASE_WORKBENCH_ADAPTIVE_4K": os.environ.get(
-                    "CASE_WORKBENCH_ADAPTIVE_4K", "1"
-                ),
-            },
+        manual_overrides_path = Path(tmp) / "manual_overrides.json"
+        selection_plan_path = Path(tmp) / "selection_plan.json"
+        manual_overrides_path.write_text(
+            json.dumps(manual_overrides or {}, ensure_ascii=False),
+            encoding="utf-8",
         )
+        selection_plan_path.write_text(
+            json.dumps(selection_plan or {}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        provider_order = _ai_enhance_provider_order(enhance_model)
+        ai_args = [
+            _ai_enhance_cli_python(),
+            str(AI_ENHANCE_SCRIPT),
+            "--case-dir", str(case_dir),
+            "--brand", brand,
+            "--enhance-direction", enhance_direction,
+            "--enhance-model", enhance_model,
+            "--provider-order", provider_order,
+            "--output-dir", tmp,
+            "--manual-overrides-file", str(manual_overrides_path),
+            "--selection-plan-file", str(selection_plan_path),
+            "--no-board-qa",
+            *(["--no-cache"] if no_cache else []),
+            *(["--customer-name", board_title_context["customer_name"]] if board_title_context["customer_name"] else []),
+            *(["--case-date", board_title_context["date"]] if board_title_context["date"] else []),
+            *(["--case-project", board_title_context["project"]] if board_title_context["project"] else []),
+            # F2：用户确认烧钱后 allow_burn=True → 授权 cache-miss 真烧；默认 off 走预判护栏。
+            *(["--allow-cache-miss-burn"] if allow_burn else []),
+        ]
+        ai_command = _ai_enhance_command_metadata(
+            args=ai_args,
+            timeout=timeout,
+            provider_order=provider_order,
+            enhance_direction=enhance_direction,
+            enhance_model=enhance_model,
+            no_cache=no_cache,
+            allow_burn=allow_burn,
+        )
+        if any(board_title_context.values()):
+            ai_command["title_context"] = board_title_context
+        try:
+            proc = _run_render_subprocess(
+                ai_args,
+                timeout,
+                extra_env={
+                    "CASE_WORKBENCH_ADAPTIVE_4K": os.environ.get(
+                        "CASE_WORKBENCH_ADAPTIVE_4K", "1"
+                    ),
+                    "PYTHONUNBUFFERED": "1",
+                },
+            )
+        except subprocess.TimeoutExpired as exc:
+            _attach_ai_enhance_exception_metadata(
+                exc,
+                command=ai_command,
+                stdout=getattr(exc, "stdout", None) or getattr(exc, "output", None),
+                stderr=getattr(exc, "stderr", None),
+                output_dir=tmp,
+            )
+            raise
         if proc.returncode != 0:
             stderr = _summarize_subprocess_error(proc.stderr, proc.stdout)
-            raise RuntimeError(f"ai-enhance subprocess exit={proc.returncode}: {stderr}")
+            err = RuntimeError(f"ai-enhance subprocess exit={proc.returncode}: {stderr}")
+            _attach_ai_enhance_exception_metadata(
+                err,
+                command=ai_command,
+                stdout=proc.stdout,
+                stderr=proc.stderr,
+                output_dir=tmp,
+            )
+            raise err
         board_path = _parse_ai_board_result(proc.stdout)
         if board_path and Path(board_path).exists():
+            evidence = _parse_ai_board_evidence(proc.stdout) or {}
+            evidence.setdefault("provider_order", ai_command["provider_order"])
+            evidence.setdefault("ai_enhance_command", ai_command)
+            progress = _load_ai_board_progress(tmp)
+            if progress is not None:
+                evidence.setdefault("progress", progress)
+            evidence.setdefault("board_title_context", board_title_context)
+            board_title = str(evidence.get("board_title") or evidence.get("title") or "").strip()
+            generated_count = _evidence_int(evidence.get("generated_count") or evidence.get("enhanced_artifact_count"))
+            external_call_count = _evidence_int(evidence.get("external_call_count"))
+            cache_hit_count = _evidence_int(evidence.get("cache_hit_count"))
             # 成功路：增强板就位 → 放标准 final-board 位置，前端零改像普通板展示。
             final_path = out_root / "final-board.jpg"
             final_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2047,6 +2328,24 @@ def run_ai_enhanced_render(
                 "warning_count": 0,
                 "effective_templates": {},
                 "manual_overrides_applied": [],
+                "ai_enhance_command": ai_command,
+                "enhancement_evidence": evidence,
+                "board_title": board_title,
+                "ai_usage": {
+                    "formal_ai_enhancement_run": True,
+                    "used_after_enhancement": generated_count > 0,
+                    "used_ai_padfill": False,
+                    "generated_artifact_count": generated_count,
+                    "enhanced_artifact_count": generated_count,
+                    "external_call_count": external_call_count,
+                    "cache_hit_count": cache_hit_count,
+                    "fresh_ai_call": external_call_count > 0,
+                    "cache_disabled": bool(no_cache),
+                    "ai_enhance_command": ai_command,
+                    "enhancement_evidence": evidence,
+                    "board_title": board_title,
+                    "board_title_context": board_title_context,
+                },
             }
 
         # WP2（aligned-render-pipeline）：G1/G2 质量门 HELD ≠ 渲染失败。
@@ -2074,6 +2373,25 @@ def run_ai_enhanced_render(
                 "warning_count": 0,
                 "effective_templates": {},
                 "manual_overrides_applied": [],
+                "ai_enhance_command": ai_command,
+                "ai_usage": {
+                    "formal_ai_enhancement_run": True,
+                    "used_after_enhancement": False,
+                    "generated_artifact_count": 0,
+                    "external_call_count": 0,
+                    "cache_hit_count": 0,
+                    "cache_disabled": bool(no_cache),
+                    "ai_enhance_command": ai_command,
+                    "board_title_context": board_title_context,
+                    "enhancement_evidence": {
+                        "status": "held",
+                        "held_gate": gate,
+                        "held_reason": reason,
+                        "provider_order": ai_command["provider_order"],
+                        "ai_enhance_command": ai_command,
+                        "board_title_context": board_title_context,
+                    },
+                },
                 "held_gate": gate,
                 "held_reason": reason,
                 "render_error": reason or f"{gate} gate held",
@@ -2094,6 +2412,23 @@ def run_ai_enhanced_render(
                 "warning_count": 0,
                 "effective_templates": {},
                 "manual_overrides_applied": [],
+                "ai_enhance_command": ai_command,
+                "ai_usage": {
+                    "formal_ai_enhancement_run": True,
+                    "used_after_enhancement": False,
+                    "generated_artifact_count": 0,
+                    "external_call_count": 0,
+                    "cache_hit_count": 0,
+                    "cache_disabled": bool(no_cache),
+                    "ai_enhance_command": ai_command,
+                    "board_title_context": board_title_context,
+                    "enhancement_evidence": {
+                        "status": "needs_confirmation",
+                        "provider_order": ai_command["provider_order"],
+                        "ai_enhance_command": ai_command,
+                        "board_title_context": board_title_context,
+                    },
+                },
                 "cache_miss_count": int(cache_miss.get("miss_count") or 0),
                 "cache_miss_total": int(cache_miss.get("total_slots") or 0),
                 "cache_miss_est_cost_usd": cache_miss.get("est_cost_usd"),
@@ -2101,5 +2436,17 @@ def run_ai_enhanced_render(
             }
 
         # 既无成品板也无 HELD 信号 = 真失败。
+        failure_manifest = _load_ai_board_failure_manifest(tmp)
+        failure_summary = _format_ai_board_failure_manifest(failure_manifest)
+        subprocess_summary = _summarize_subprocess_error(proc.stderr, proc.stdout, max_chars=1200)
         tail = (proc.stdout or "")[-500:]
-        raise RuntimeError(f"ai-enhance produced no board; stdout tail: {tail}")
+        details = [part for part in (failure_summary, subprocess_summary, f"stdout tail: {tail}") if part]
+        err = RuntimeError(f"ai-enhance produced no board; {'; '.join(details)}")
+        _attach_ai_enhance_exception_metadata(
+            err,
+            command=ai_command,
+            stdout=proc.stdout,
+            stderr=proc.stderr,
+            output_dir=tmp,
+        )
+        raise err

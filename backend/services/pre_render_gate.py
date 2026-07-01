@@ -233,7 +233,10 @@ def _effective_template_and_required_slots(
 ) -> tuple[str, list[str]]:
     requested = _template_from_tier(requested_template) or "tri-compare"
     manual_template = _template_from_tier(primary.get("manual_template_tier"))
+    plan_hint = _template_from_tier(selection_plan.get("effective_template_hint")) if isinstance(selection_plan, dict) else None
     effective = manual_template if requested == "tri-compare" and manual_template else requested
+    if requested == "tri-compare" and not manual_template and plan_hint == "bi-compare":
+        effective = plan_hint
     renderable = [
         str(value)
         for value in (selection_plan.get("renderable_slots") or [])
@@ -438,6 +441,24 @@ def _pair_tickets(selection_plan: dict[str, Any]) -> list[dict[str, Any]]:
                         message=str(warning.get("message") or "源图质量阻断正式出图"),
                         slot=str(view),
                         evidence={"slot": view, "warning": warning, "before": before, "after": after},
+                    )
+                )
+            elif severity == "review" and code == "side_source_scale_mismatch":
+                out.append(
+                    _ticket(
+                        ticket_type="source_quality_review",
+                        reason_code=code,
+                        message=str(warning.get("message") or "侧面源图人物尺度不一致，需回源重选或人工复核"),
+                        slot=str(view),
+                        blocks_render=False,
+                        blocks_publish=True,
+                        evidence={
+                            "slot": view,
+                            "warning": warning,
+                            "before": before,
+                            "after": after,
+                            "recommended_action": "source_repick_side_pair",
+                        },
                     )
                 )
         for role, candidate in (("before", before), ("after", after)):

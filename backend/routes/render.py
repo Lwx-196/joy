@@ -1058,6 +1058,8 @@ def latest_case_job(case_id: int) -> dict:
     # 一样优先展示确认卡；否则会被旧 done 板（output_row）盖住，用户永远看不到烧钱确认提示。
     if latest["status"] in {"queued", "running", "needs_confirmation"}:
         job = latest
+    elif latest["status"] == "blocked" and latest.get("output_path"):
+        job = latest
     elif output_row is not None:
         job = _row_to_job(output_row)
     else:

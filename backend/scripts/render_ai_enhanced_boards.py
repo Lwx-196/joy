@@ -31,6 +31,7 @@ import tempfile
 import time
 from io import BytesIO
 from pathlib import Path
+from urllib.parse import urlparse
 
 from PIL import Image, ImageFilter
 
@@ -39,6 +40,7 @@ logger = logging.getLogger(__name__)
 
 SKILL_ROOT = Path.home() / "Desktop" / "飞书Claude" / "skills" / "case-layout-board" / "scripts"
 DEFAULT_CASES_ROOT = Path.home() / "Desktop" / "案例生成器" / "incoming" / "无创案例库" / "无创注射案例库"
+_SOURCE_IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif"}
 
 # v2（2026-06-12，defect③(c) owner 拍板 a+b+c）：曾玲莉 front 增强坐实局部重绘色块
 # （低频 diff>25 占 9.5% 像素遍布全脸）→ 新增禁局部重绘/重着色/肤色漂移条款。
@@ -80,14 +82,120 @@ PROVIDER_ENV_FILES = {
     "vertex": "t52_vlm_judge.local.env",
 }
 
+
+def _has_direct_source_images(directory: Path) -> bool:
+    try:
+        return any(
+            child.is_file()
+            and not child.name.startswith(".")
+            and child.suffix.lower() in _SOURCE_IMAGE_SUFFIXES
+            for child in directory.iterdir()
+        )
+    except OSError:
+        return False
+
+
+def _is_phase_split_child_name(name: str) -> bool:
+    text = name.strip().lower()
+    if not text:
+        return False
+    phase_tokens = (
+        "术前",
+        "術前",
+        "before",
+        "pre",
+        "术后",
+        "術後",
+        "after",
+        "post",
+        "恢复",
+        "術中",
+        "术中",
+    )
+    return any(text == token or text.startswith(token) for token in phase_tokens)
+
+
+def _has_phase_split_source_dirs(directory: Path) -> bool:
+    try:
+        children = [child for child in directory.iterdir() if child.is_dir() and not child.name.startswith(".")]
+    except OSError:
+        return False
+    phase_children = [child for child in children if _is_phase_split_child_name(child.name)]
+    if len(phase_children) < 2:
+        return False
+    return any(_has_direct_source_images(child) for child in phase_children)
+
+
+def _single_case_entrypoint(case_dir: Path) -> tuple[list[Path], str | None]:
+    """Resolve server --case-dir as either a treatment dir or a case/customer root.
+
+    Older server calls pass a treatment directory containing image files directly.
+    Source-group cases can pass the customer/case root whose treatment photos live
+    in child directories. Preserve both shapes so board titles use the real
+    customer name instead of the parent archive folder.
+    """
+    resolved = case_dir.resolve()
+    if _has_direct_source_images(resolved):
+        return [resolved.parent], resolved.name
+    if _has_phase_split_source_dirs(resolved):
+        return [resolved.parent], resolved.name
+    return [resolved], None
+
+
+def _resolve_board_title(
+    render_mod,
+    treatment_dir: Path,
+    customer: str,
+    treatment: str,
+    *,
+    customer_name: str = "",
+    case_date: str = "",
+    case_project: str = "",
+) -> dict:
+    """Resolve publish-facing title fields without leaking staging dir names."""
+    meta = render_mod.parse_case_meta(treatment_dir)
+    display_customer = customer_name.strip() or customer
+    title_date = case_date.strip() or (meta["date"] if meta["date"] != treatment else "")
+    title_project = case_project.strip() or meta["project"]
+    title = " ".join(x for x in (display_customer, title_date, title_project) if x)
+    try:
+        title_lines = render_mod.parse_title_b(title_project, customer=display_customer)
+    except Exception:
+        title_lines = None
+    return {
+        "customer": display_customer,
+        "date": title_date,
+        "project": title_project,
+        "title": title,
+        "title_lines": title_lines,
+    }
+
+
+def _apply_board_title_to_manifest(manifest: dict, title_meta: dict) -> None:
+    """Force render-facing metadata to use workbench title overrides."""
+    meta = dict(manifest.get("meta") or {})
+    for source_key, target_key in (
+        ("customer", "customer_name"),
+        ("date", "date"),
+        ("project", "project"),
+    ):
+        value = str(title_meta.get(source_key) or "").strip()
+        if value:
+            meta[target_key] = value
+    manifest["meta"] = meta
+
+    title = str(title_meta.get("title") or "").strip()
+    if title:
+        manifest["title"] = title
+        manifest["board_title"] = title
+    title_lines = title_meta.get("title_lines")
+    if isinstance(title_lines, list) and any(str(item or "").strip() for item in title_lines):
+        manifest["title_lines"] = title_lines
+
 PROVIDER_PREFIX_REMAP = {
     "rsta": "PANEL_IMG_RSTA",
     "flashapi": "PANEL_IMG_FLASHAPI",
     "77code": "PANEL_IMG_77CODE",
-}
-
-AI_STUDIO_KEY_REMAP = {
-    "CASE_WORKBENCH_VLM_JUDGE_API_KEY": "GOOGLE_GENAI_API_KEY",
 }
 
 # provider 名归一化：用户口语 "vertex adc" / "vertex-adc" 都映射到 registry key "vertex"
@@ -105,6 +213,80 @@ def _load_module(name: str, path: Path):
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
+
+
+def _install_side_contain_fallback(render_mod) -> None:
+    if not hasattr(render_mod, "render_aligned_pair") or not hasattr(render_mod, "render_side_profile_contain_cell"):
+        return
+    if getattr(render_mod.render_aligned_pair, "_case_workbench_side_contain_fallback", False):
+        return
+    original_render_aligned_pair = render_mod.render_aligned_pair
+
+    def _render_aligned_pair_with_side_contain_fallback(
+        before_path,
+        after_paths,
+        size,
+        slot,
+        allow_direction_mismatch=False,
+        protection_targets=None,
+        render_plan_records=None,
+        **kwargs,
+    ):
+        try:
+            return original_render_aligned_pair(
+                before_path,
+                after_paths,
+                size,
+                slot,
+                allow_direction_mismatch=allow_direction_mismatch,
+                protection_targets=protection_targets,
+                render_plan_records=render_plan_records,
+                **kwargs,
+            )
+        except Exception as exc:
+            if slot != "side":
+                raise
+            fallback_errors = []
+            for path in after_paths or []:
+                if not path:
+                    continue
+                try:
+                    before_arr = render_mod.render_side_profile_contain_cell(before_path, size)
+                    after_arr = render_mod.render_side_profile_contain_cell(path, size)
+                    before_arr, after_arr = render_mod.CASE_LAYOUT.FACE_ALIGN.harmonize_pair(before_arr, after_arr)
+                    after_arr = render_mod.CASE_LAYOUT.FACE_ALIGN.lift_face_shadows(after_arr, slot=slot)
+                    if render_plan_records is not None:
+                        render_plan_records.append({
+                            "slot": slot,
+                            "strategy": "side_profile_contain_after_face_detection_error",
+                            "targets": protection_targets or [],
+                            "before": Path(before_path).name,
+                            "after": Path(path).name,
+                            "error": str(exc),
+                            "composition_diagnostic": {
+                                "slot": slot,
+                                "alerts": [
+                                    {
+                                        "code": "side_face_alignment_fallback",
+                                        "severity": "warning",
+                                        "message": "侧面人脸检测失败，已使用整图等比留白对齐兜底",
+                                        "recommended_action": "复核侧面轮廓和术前术后构图，必要时换片",
+                                    }
+                                ],
+                                "metrics": {"fallback": "contain_after_face_detection_error"},
+                            },
+                        })
+                    return (
+                        render_mod.whiten_background(render_mod.CASE_LAYOUT.cv_to_pil(before_arr)),
+                        render_mod.whiten_background(render_mod.CASE_LAYOUT.cv_to_pil(after_arr)),
+                    )
+                except Exception as fallback_exc:
+                    fallback_errors.append(f"{Path(path).name}: {fallback_exc}")
+            joined = "; ".join(fallback_errors) if fallback_errors else "无可用术后图"
+            raise RuntimeError(f"{exc}; 侧面 contain 兜底失败: {joined}") from exc
+
+    _render_aligned_pair_with_side_contain_fallback._case_workbench_side_contain_fallback = True
+    render_mod.render_aligned_pair = _render_aligned_pair_with_side_contain_fallback
 
 
 def _find_env_file(filename: str) -> Path | None:
@@ -132,10 +314,10 @@ def _load_all_provider_envs(provider_order: list[str]) -> dict[str, str]:
             continue
         raw = _load_env_from_file(env_path)
         if name == "ai_studio":
-            for k, v in raw.items():
-                mapped = AI_STUDIO_KEY_REMAP.get(k)
-                if mapped:
-                    merged[mapped] = v
+            for key in ("GOOGLE_GENAI_API_KEY", "GEMINI_API_KEY", "AI_STUDIO_IMAGE_MODEL"):
+                value = raw.get(key) or os.environ.get(key)
+                if value:
+                    merged[key] = value
             continue
         remap_prefix = PROVIDER_PREFIX_REMAP.get(name)
         if remap_prefix:
@@ -149,6 +331,18 @@ def _load_all_provider_envs(provider_order: list[str]) -> dict[str, str]:
     if len(provider_order) > 1:
         merged["PANEL_IMAGE_PROVIDERS"] = ",".join(provider_order)
 
+    return merged
+
+
+def _apply_enhance_model_to_provider_env(
+    env: dict[str, str],
+    provider_order: list[str],
+    enhance_model: str,
+) -> dict[str, str]:
+    merged = dict(env)
+    model = (enhance_model or "").strip()
+    if model.lower().startswith("gemini") and "ai_studio" in provider_order:
+        merged["AI_STUDIO_IMAGE_MODEL"] = model
     return merged
 
 
@@ -176,6 +370,38 @@ def _bytes_to_pil(data: bytes) -> Image.Image:
 # 内容寻址缓存：key = sha256(送 AI 的 PNG 字节 + prompt)。只缓存成功结果，
 # 失败不落盘 → 重跑只补失败的 cell，不重烧已成功的（应对 provider 过载）。
 AI_CACHE_DIR = Path.home() / ".cache" / "case-workbench-ai-enhance-boards"
+AI_PROGRESS_FILENAME = "ai_enhance_progress.jsonl"
+
+
+def _write_progress(progress_path: Path | None, event: str, **fields) -> None:
+    if progress_path is None:
+        return
+    try:
+        progress_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "ts": round(time.time(), 3),
+            "event": event,
+            **fields,
+        }
+        with progress_path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")
+            fh.flush()
+    except Exception:
+        logger.debug("failed to write AI progress event", exc_info=True)
+
+
+def _provider_progress_summary(provider) -> dict:
+    base_url = getattr(provider, "base_url", "") or ""
+    return {
+        "name": getattr(provider, "name", ""),
+        "api_format": getattr(provider, "api_format", ""),
+        "base_host": urlparse(base_url).netloc if base_url else "",
+        "model": getattr(provider, "model", ""),
+        "timeout_ms": getattr(provider, "timeout_ms", None),
+        "sizes": list(getattr(provider, "sizes", ()) or ()),
+        "quality": getattr(provider, "quality", ""),
+        "stream": bool(getattr(provider, "stream", False)),
+    }
 
 
 def _ai_cache_key(png_bytes: bytes, prompt: str, size_sig: str = "") -> str:
@@ -540,6 +766,708 @@ def _log_manifest_pose_info(manifest: dict) -> None:
                     no_cand = [r for r in rejections if r.get("slot") == slot]
                     if no_cand:
                         logger.info("  [pose] %s: 排除 (%s)", slot, no_cand[0].get("reason", "unknown"))
+
+
+def _load_json_object_file(path: Path | None) -> dict:
+    if not path:
+        return {}
+    try:
+        if not path.is_file():
+            return {}
+        parsed = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, TypeError, ValueError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _selection_plan_overrides(selection_plan: dict) -> dict[str, dict]:
+    slots = selection_plan.get("slots") if isinstance(selection_plan, dict) else {}
+    if not isinstance(slots, dict):
+        return {}
+    overrides: dict[str, dict] = {}
+    for view, slot in slots.items():
+        if view not in {"front", "oblique", "side"} or not isinstance(slot, dict):
+            continue
+        for role in ("before", "after"):
+            item = slot.get(role)
+            if not isinstance(item, dict):
+                continue
+            filename = str(item.get("render_filename") or item.get("filename") or "").strip()
+            if not filename:
+                continue
+            override = {
+                "phase": item.get("phase") if item.get("phase") in {"before", "after"} else role,
+                "view": item.get("view") if item.get("view") in {"front", "oblique", "side"} else view,
+                "phase_source": item.get("phase_source") or "source_selection",
+                "view_source": item.get("view_source") or item.get("angle_source") or "source_selection",
+                "review_verdict": item.get("review_verdict"),
+                "angle_confidence": item.get("angle_confidence"),
+                "selection_score": item.get("selection_score"),
+                "selection_reasons": item.get("selection_reasons") or [],
+                "quality_warnings": item.get("quality_warnings") or [],
+                "risk_level": item.get("risk_level"),
+                "selection_source": "source_selection_plan",
+            }
+            for key in (filename, Path(filename).name):
+                current = dict(overrides.get(key) or {})
+                current.update({k: v for k, v in override.items() if v is not None})
+                overrides[key] = current
+    return overrides
+
+
+def _unwrap_selection_plan_payload(payload: dict) -> dict:
+    if isinstance(payload.get("slots"), dict):
+        return payload
+    gate = payload.get("gate")
+    if isinstance(gate, dict) and isinstance(gate.get("selection_plan"), dict):
+        return gate["selection_plan"]
+    return payload
+
+
+def _merge_workbench_overrides(manual_overrides: dict, selection_plan: dict) -> dict[str, dict]:
+    merged: dict[str, dict] = {
+        str(key): dict(value)
+        for key, value in manual_overrides.items()
+        if isinstance(value, dict)
+    }
+    for key, value in _selection_plan_overrides(selection_plan).items():
+        current = dict(merged.get(key) or {})
+        current.update(value)
+        merged[key] = current
+    return merged
+
+
+def _entry_match_keys(entry: dict | None, case_root: Path | None = None) -> set[str]:
+    if not isinstance(entry, dict):
+        return set()
+    keys = {
+        str(value)
+        for value in (
+            entry.get("name"),
+            entry.get("relative_path"),
+            entry.get("group_relative_path"),
+            entry.get("filename"),
+            entry.get("render_filename"),
+            entry.get("source_filename"),
+        )
+        if value
+    }
+    path_value = entry.get("path")
+    if path_value:
+        path = Path(str(path_value))
+        keys.add(path.name)
+        keys.add(str(path))
+        if case_root is not None:
+            try:
+                keys.add(str(path.resolve().relative_to(case_root.resolve())))
+            except Exception:
+                pass
+    return _expand_image_match_keys(keys)
+
+
+def _plan_match_keys(candidate: dict | None) -> set[str]:
+    if not isinstance(candidate, dict):
+        return set()
+    keys = {
+        candidate.get("render_filename"),
+        candidate.get("filename"),
+        candidate.get("relative_path"),
+        candidate.get("group_relative_path"),
+        candidate.get("source_filename"),
+    }
+    return _expand_image_match_keys({str(key) for key in keys if key})
+
+
+def _expand_image_match_keys(keys: set[str]) -> set[str]:
+    """Add stable aliases for workbench HEIC -> JPEG transcodes.
+
+    The case-layout skill materializes HEIC files under
+    `.case-workbench-heic-jpeg/<stem>.jpg`, while source_selection still refers
+    to the original `<stem>.HEIC`. Matching by stem keeps the front slot from
+    being dropped when the formal AI path applies the workbench selection plan.
+    """
+    expanded = {key for key in keys if key}
+    image_suffixes = {".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif"}
+    for key in list(expanded):
+        path = Path(key)
+        suffix = path.suffix.lower()
+        if suffix not in image_suffixes:
+            continue
+        expanded.add(path.stem)
+        expanded.add(path.name)
+        if suffix in {".heic", ".heif"}:
+            expanded.add(f"{path.stem}.jpg")
+            expanded.add(f"{path.stem}.jpeg")
+            expanded.add(str(Path(".case-workbench-heic-jpeg") / f"{path.stem}.jpg"))
+        elif ".case-workbench-heic-jpeg" in path.parts or suffix in {".jpg", ".jpeg"}:
+            expanded.add(f"{path.stem}.HEIC")
+            expanded.add(f"{path.stem}.heic")
+    return {key for key in expanded if key}
+
+
+def _raw_entry_match_keys(entry: dict | None, case_root: Path | None = None) -> set[str]:
+    if not isinstance(entry, dict):
+        return set()
+    keys = {
+        str(value)
+        for value in (
+            entry.get("name"),
+            entry.get("relative_path"),
+            entry.get("group_relative_path"),
+            entry.get("filename"),
+            entry.get("render_filename"),
+            entry.get("source_filename"),
+        )
+        if value
+    }
+    path_value = entry.get("path")
+    if path_value:
+        path = Path(str(path_value))
+        keys.add(str(path))
+        if case_root is not None:
+            try:
+                keys.add(str(path.resolve().relative_to(case_root.resolve())))
+            except Exception:
+                pass
+    return {key for key in keys if key}
+
+
+def _raw_plan_match_keys(candidate: dict | None) -> set[str]:
+    if not isinstance(candidate, dict):
+        return set()
+    return {
+        str(value)
+        for value in (
+            candidate.get("render_filename"),
+            candidate.get("filename"),
+            candidate.get("relative_path"),
+            candidate.get("group_relative_path"),
+            candidate.get("source_filename"),
+        )
+        if value
+    }
+
+
+def _find_group_entry(group: dict, candidate: dict, case_root: Path | None = None) -> dict | None:
+    targets = _plan_match_keys(candidate)
+    if not targets:
+        return None
+
+    # Prefer exact relative/path keys before basename/stem aliases. Old source
+    # dirs often split files into `术前/正面.jpg` and `术后/正面.jpg`; basename
+    # fallback alone would let after plans match the before image.
+    raw_targets = _raw_plan_match_keys(candidate)
+    candidate_entries: list[dict] = [
+        entry for entry in (group.get("entries") or []) if isinstance(entry, dict)
+    ]
+    for selection in (group.get("selected_slots") or {}).values():
+        if not isinstance(selection, dict):
+            continue
+        for role in ("before", "after"):
+            entry = selection.get(role)
+            if isinstance(entry, dict):
+                candidate_entries.append(entry)
+
+    if raw_targets:
+        for entry in candidate_entries:
+            if _raw_entry_match_keys(entry, case_root) & raw_targets:
+                return entry
+        if any("/" in key or "\\" in key for key in raw_targets):
+            return None
+    for entry in candidate_entries:
+        if _entry_match_keys(entry, case_root) & targets:
+            return entry
+    return None
+
+
+def _float_or_zero(value) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _basic_pose_delta(before_pose, after_pose) -> dict:
+    before_pose = before_pose or {}
+    after_pose = after_pose or {}
+    yaw = abs(_float_or_zero(before_pose.get("yaw")) - _float_or_zero(after_pose.get("yaw")))
+    pitch = abs(_float_or_zero(before_pose.get("pitch")) - _float_or_zero(after_pose.get("pitch")))
+    roll = abs(_float_or_zero(before_pose.get("roll")) - _float_or_zero(after_pose.get("roll")))
+    return {
+        "yaw": round(yaw, 2),
+        "pitch": round(pitch, 2),
+        "roll": round(roll, 2),
+        "weighted": round(yaw + pitch + roll * 0.5, 2),
+    }
+
+
+def _profile_pose_delta(slot: str, before_item: dict, after_item: dict, raw_delta: dict) -> dict:
+    if slot not in {"oblique", "side"}:
+        return raw_delta
+    before_direction = before_item.get("direction")
+    after_direction = after_item.get("direction")
+    same_direction = (
+        before_direction
+        and after_direction
+        and before_direction == after_direction
+        and before_direction not in {"center", "unknown", "unspecified"}
+    )
+    manual_same_slot = (
+        before_item.get("angle_source") == "manual"
+        and after_item.get("angle_source") == "manual"
+        and before_item.get("angle") == after_item.get("angle") == slot
+    )
+    if not same_direction and not manual_same_slot:
+        return raw_delta
+    before_pose = before_item.get("pose") or {}
+    after_pose = after_item.get("pose") or {}
+    yaw = abs(abs(_float_or_zero(before_pose.get("yaw"))) - abs(_float_or_zero(after_pose.get("yaw"))))
+    pitch = abs(_float_or_zero(before_pose.get("pitch")) - _float_or_zero(after_pose.get("pitch")))
+    roll = abs(_float_or_zero(before_pose.get("roll")) - _float_or_zero(after_pose.get("roll")))
+    normalized = {
+        "yaw": round(yaw, 2),
+        "pitch": round(pitch, 2),
+        "roll": round(roll, 2),
+        "weighted": round(yaw + pitch + roll * 0.5, 2),
+        "normalization": "profile_abs_yaw_same_direction",
+        "raw": raw_delta,
+    }
+    if _float_or_zero(normalized.get("weighted")) < _float_or_zero((raw_delta or {}).get("weighted")):
+        return normalized
+    return raw_delta
+
+
+def _selection_pose_delta(case_layout, slot: str, before_item: dict, after_item: dict) -> dict:
+    if hasattr(case_layout, "compute_pose_delta"):
+        raw_delta = case_layout.compute_pose_delta(before_item.get("pose"), after_item.get("pose"))
+    else:
+        raw_delta = _basic_pose_delta(before_item.get("pose"), after_item.get("pose"))
+    if not isinstance(raw_delta, dict):
+        raw_delta = _basic_pose_delta(before_item.get("pose"), after_item.get("pose"))
+    return _profile_pose_delta(slot, before_item, after_item, raw_delta)
+
+
+def _entry_from_selection_plan(entry: dict, candidate: dict, role: str, policy: str) -> dict:
+    item = dict(entry)
+    item["render_selection_role"] = role
+    item["render_selection_policy"] = policy
+    for field in (
+        "case_id",
+        "source_role",
+        "filename",
+        "render_filename",
+        "phase",
+        "phase_source",
+        "view",
+        "view_source",
+        "review_verdict",
+        "angle_confidence",
+        "selection_score",
+        "selection_reasons",
+        "quality_warnings",
+        "risk_level",
+    ):
+        if field in candidate and candidate.get(field) is not None:
+            target_field = "source_case_id" if field == "case_id" else field
+            item[target_field] = candidate.get(field)
+    if candidate.get("phase") in {"before", "after"}:
+        item["phase"] = candidate.get("phase")
+    if candidate.get("view") in {"front", "oblique", "side"}:
+        view = item.get("view") if isinstance(item.get("view"), dict) else {}
+        view = dict(view)
+        view["bucket"] = candidate.get("view")
+        if candidate.get("angle_confidence") is not None:
+            view["confidence"] = candidate.get("angle_confidence")
+        item["view"] = view
+        item["angle"] = candidate.get("view")
+        item["direction"] = candidate.get("direction") or item.get("direction")
+    return item
+
+
+def _slot_selection_summary(selection: dict | None) -> dict | None:
+    if not isinstance(selection, dict):
+        return None
+    return {
+        "before": (selection.get("before") or {}).get("name") if isinstance(selection.get("before"), dict) else None,
+        "after": (selection.get("after") or {}).get("name") if isinstance(selection.get("after"), dict) else None,
+        "pose_delta": selection.get("pose_delta"),
+    }
+
+
+def _apply_selection_plan_to_manifest(manifest: dict, selection_plan: dict, case_layout, case_root: Path | None = None) -> dict:
+    """Make workbench source_selection the hard source of truth for AI enhancement.
+
+    `analyze_image` overrides are not sufficient: build_manifest still scans all
+    image-like files in the case root, so old comparison boards can win by score.
+    This pass rewrites selected_slots after manifest construction and removes
+    slots that are not in the workbench plan before any AI calls are made.
+    """
+    slots_plan = selection_plan.get("slots") if isinstance(selection_plan, dict) else None
+    if not isinstance(slots_plan, dict) or not slots_plan:
+        manifest["render_selection_plan"] = selection_plan if isinstance(selection_plan, dict) else {}
+        return {"policy": (selection_plan or {}).get("policy"), "applied_slots": [], "missing_entries": [], "overrode": []}
+
+    policy = selection_plan.get("policy") or "source_selection_v1"
+    angle_slots = list(getattr(case_layout, "ANGLE_SLOTS", ["front", "oblique", "side"]))
+    labels = getattr(case_layout, "ANGLE_LABELS", {})
+    planned_slot_set = {
+        slot
+        for slot in angle_slots
+        if isinstance((slots_plan.get(slot) or {}).get("before"), dict)
+        and isinstance((slots_plan.get(slot) or {}).get("after"), dict)
+    }
+    renderable_hint = [
+        str(slot)
+        for slot in (selection_plan.get("renderable_slots") or [])
+        if str(slot) in planned_slot_set
+    ] or [slot for slot in angle_slots if slot in planned_slot_set]
+    dropped_slot_set = {
+        str(item.get("view") or "")
+        for item in (selection_plan.get("dropped_slots") or [])
+        if isinstance(item, dict) and item.get("view")
+    }
+    audit = {
+        "policy": policy,
+        "applied_slots": [],
+        "dropped_slots": list(selection_plan.get("dropped_slots") or []),
+        "removed_unplanned_slots": [],
+        "missing_entries": [],
+        "overrode": [],
+        "cross_group_group_created": False,
+    }
+
+    for group in manifest.get("groups") or []:
+        if not isinstance(group, dict):
+            continue
+        selected_slots = dict(group.get("selected_slots") or {})
+        original = {
+            slot: _slot_selection_summary(selected_slots.get(slot))
+            for slot in angle_slots
+            if selected_slots.get(slot)
+        }
+        selected_slots_changed = False
+        for slot in angle_slots:
+            if slot in planned_slot_set:
+                continue
+            removed = selected_slots.pop(slot, None)
+            if isinstance(removed, dict):
+                selected_slots_changed = True
+                audit["removed_unplanned_slots"].append({
+                    "group": group.get("name"),
+                    "slot": slot,
+                    "reason": "dropped_by_selection_plan" if slot in dropped_slot_set else "not_in_selection_plan",
+                    "before": _slot_selection_summary(removed),
+                })
+
+        applied_for_group: list[str] = []
+        for slot in angle_slots:
+            slot_plan = slots_plan.get(slot)
+            if not isinstance(slot_plan, dict):
+                continue
+            before_plan = slot_plan.get("before")
+            after_plan = slot_plan.get("after")
+            if not isinstance(before_plan, dict) or not isinstance(after_plan, dict):
+                continue
+            before_entry = _find_group_entry(group, before_plan, case_root)
+            after_entry = _find_group_entry(group, after_plan, case_root)
+            if not isinstance(before_entry, dict) or not isinstance(after_entry, dict):
+                audit["missing_entries"].append({
+                    "group": group.get("name"),
+                    "slot": slot,
+                    "before": before_plan.get("render_filename") or before_plan.get("filename"),
+                    "after": after_plan.get("render_filename") or after_plan.get("filename"),
+                })
+                if selected_slots.pop(slot, None) is not None:
+                    selected_slots_changed = True
+                continue
+            before_item = _entry_from_selection_plan(before_entry, before_plan, "before", policy)
+            after_item = _entry_from_selection_plan(after_entry, after_plan, "after", policy)
+            pose_delta = _selection_pose_delta(case_layout, slot, before_item, after_item)
+            previous = _slot_selection_summary(selected_slots.get(slot))
+            selection = {
+                "label": labels.get(slot, slot),
+                "direction": after_item.get("direction") or before_item.get("direction") or "unknown",
+                "pose_delta": pose_delta,
+                "semantic_pair_review": None,
+                "before": before_item,
+                "after": after_item,
+                "selection_source": policy,
+                "pair_quality": slot_plan.get("pair_quality"),
+            }
+            selected_slots[slot] = selection
+            applied_for_group.append(slot)
+            audit["applied_slots"].append({
+                "group": group.get("name"),
+                "slot": slot,
+                "before": before_item.get("name"),
+                "after": after_item.get("name"),
+                "pose_delta": pose_delta,
+                "pair_quality": slot_plan.get("pair_quality"),
+            })
+            new_summary = _slot_selection_summary(selection)
+            if previous and previous != new_summary:
+                audit["overrode"].append({
+                    "group": group.get("name"),
+                    "slot": slot,
+                    "before": previous,
+                    "after": new_summary,
+                })
+
+        if not applied_for_group:
+            if selected_slots_changed:
+                group["source_selection_original_slots"] = original
+                group["selected_slots"] = selected_slots
+                candidate_slots = [slot for slot in renderable_hint if isinstance(selected_slots.get(slot), dict)]
+                group["render_slots"] = candidate_slots
+                if not candidate_slots:
+                    group.pop("effective_template", None)
+                group["render_selection_note"] = "正式出图已按 source_selection_v1 移除未计划槽位"
+            continue
+        group["source_selection_original_slots"] = original
+        group["source_selection_original_status"] = group.get("status")
+        group["source_selection_original_blocking_issues"] = list(group.get("blocking_issues") or [])
+        group["status"] = "ok"
+        group["blocking_issues"] = []
+        group["selected_slots"] = selected_slots
+        candidate_slots = [slot for slot in renderable_hint if isinstance(selected_slots.get(slot), dict)]
+        if hasattr(case_layout, "derive_effective_template"):
+            effective_template, render_slots = case_layout.derive_effective_template(
+                candidate_slots, manifest.get("angle_priority_profile")
+            )
+            if render_slots:
+                group["render_slots"] = render_slots
+            elif candidate_slots:
+                group["render_slots"] = candidate_slots
+            if effective_template:
+                group["effective_template"] = effective_template
+        elif candidate_slots:
+            group["render_slots"] = candidate_slots
+            if selection_plan.get("effective_template_hint"):
+                group["effective_template"] = selection_plan.get("effective_template_hint")
+        group["render_selection_note"] = f"正式出图已按 source_selection_v1 候选排序覆盖 {len(applied_for_group)} 个槽位"
+
+    if not audit["applied_slots"]:
+        all_entries: list[dict] = []
+        for group in manifest.get("groups") or []:
+            if not isinstance(group, dict):
+                continue
+            for entry in group.get("entries") or []:
+                if isinstance(entry, dict):
+                    all_entries.append(entry)
+            for selection in (group.get("selected_slots") or {}).values():
+                if not isinstance(selection, dict):
+                    continue
+                for role in ("before", "after"):
+                    entry = selection.get(role)
+                    if isinstance(entry, dict):
+                        all_entries.append(entry)
+
+        synthetic_group = {
+            "name": "source_selection_cross_group",
+            "status": "ok",
+            "entries": all_entries,
+            "selected_slots": {},
+            "blocking_issues": [],
+            "warnings": [],
+            "source_selection_synthetic_group": True,
+            "source_selection_original_group_count": len(manifest.get("groups") or []),
+        }
+        applied_for_group: list[str] = []
+        for slot in angle_slots:
+            slot_plan = slots_plan.get(slot)
+            if not isinstance(slot_plan, dict):
+                continue
+            before_plan = slot_plan.get("before")
+            after_plan = slot_plan.get("after")
+            if not isinstance(before_plan, dict) or not isinstance(after_plan, dict):
+                continue
+            before_entry = _find_group_entry(synthetic_group, before_plan, case_root)
+            after_entry = _find_group_entry(synthetic_group, after_plan, case_root)
+            if not isinstance(before_entry, dict) or not isinstance(after_entry, dict):
+                audit["missing_entries"].append({
+                    "group": synthetic_group.get("name"),
+                    "slot": slot,
+                    "before": before_plan.get("render_filename") or before_plan.get("filename"),
+                    "after": after_plan.get("render_filename") or after_plan.get("filename"),
+                })
+                continue
+            before_item = _entry_from_selection_plan(before_entry, before_plan, "before", policy)
+            after_item = _entry_from_selection_plan(after_entry, after_plan, "after", policy)
+            pose_delta = _selection_pose_delta(case_layout, slot, before_item, after_item)
+            selection = {
+                "label": labels.get(slot, slot),
+                "direction": after_item.get("direction") or before_item.get("direction") or "unknown",
+                "pose_delta": pose_delta,
+                "semantic_pair_review": None,
+                "before": before_item,
+                "after": after_item,
+                "selection_source": policy,
+                "pair_quality": slot_plan.get("pair_quality"),
+            }
+            synthetic_group["selected_slots"][slot] = selection
+            applied_for_group.append(slot)
+            audit["applied_slots"].append({
+                "group": synthetic_group.get("name"),
+                "slot": slot,
+                "before": before_item.get("name"),
+                "after": after_item.get("name"),
+                "pose_delta": pose_delta,
+                "pair_quality": slot_plan.get("pair_quality"),
+            })
+
+        if applied_for_group:
+            candidate_slots = [
+                slot for slot in renderable_hint
+                if isinstance(synthetic_group["selected_slots"].get(slot), dict)
+            ]
+            if hasattr(case_layout, "derive_effective_template"):
+                effective_template, render_slots = case_layout.derive_effective_template(
+                    candidate_slots, manifest.get("angle_priority_profile")
+                )
+                synthetic_group["render_slots"] = render_slots or candidate_slots
+                if effective_template:
+                    synthetic_group["effective_template"] = effective_template
+            else:
+                synthetic_group["render_slots"] = candidate_slots
+                if selection_plan.get("effective_template_hint"):
+                    synthetic_group["effective_template"] = selection_plan.get("effective_template_hint")
+            synthetic_group["render_selection_note"] = (
+                f"正式出图已按 source_selection_v1 跨目录合成 {len(applied_for_group)} 个槽位"
+            )
+            manifest["groups"] = [synthetic_group]
+            manifest["status"] = "ok"
+            manifest["blocking_issues"] = []
+            audit["cross_group_group_created"] = True
+
+    manifest["render_selection_plan"] = selection_plan
+    manifest["render_selection_audit"] = audit
+    manifest["render_selection_source_provenance"] = selection_plan.get("source_provenance") if isinstance(selection_plan, dict) else []
+    manifest["render_selection_missing_slots"] = selection_plan.get("missing_slots") if isinstance(selection_plan, dict) else []
+    manifest["render_selection_dropped_slots"] = selection_plan.get("dropped_slots") if isinstance(selection_plan, dict) else []
+    if audit["applied_slots"] and not manifest.get("blocking_issues"):
+        manifest["status"] = "ok"
+    elif audit["applied_slots"] and all((group.get("status") or "ok") == "ok" for group in manifest.get("groups") or []):
+        manifest["source_selection_original_status"] = manifest.get("status")
+        manifest["source_selection_original_blocking_issues"] = list(manifest.get("blocking_issues") or [])
+        manifest["status"] = "ok"
+        manifest["blocking_issues"] = []
+    return audit
+
+
+def _override_lookup_keys(entry: dict, case_root: Path) -> set[str]:
+    keys = {
+        str(value)
+        for value in (
+            entry.get("name"),
+            entry.get("relative_path"),
+            entry.get("group_relative_path"),
+        )
+        if value
+    }
+    path_value = entry.get("path")
+    if path_value:
+        path = Path(str(path_value))
+        keys.add(path.name)
+        keys.add(str(path))
+        try:
+            keys.add(str(path.resolve().relative_to(case_root.resolve())))
+        except Exception:
+            pass
+    return {key for key in keys if key}
+
+
+def _workbench_override_for_entry(entry: dict, case_root: Path, overrides: dict[str, dict]) -> dict | None:
+    if not overrides:
+        return None
+    for key in _override_lookup_keys(entry, case_root):
+        value = overrides.get(key)
+        if isinstance(value, dict):
+            return value
+    return None
+
+
+def _remove_issue_contains(entry: dict, tokens: list[str]) -> None:
+    entry["issues"] = [
+        issue
+        for issue in (entry.get("issues") or [])
+        if not any(token in str(issue) for token in tokens)
+    ]
+
+
+def _apply_workbench_override(entry: dict, override: dict | None) -> dict:
+    if not override:
+        return entry
+    default_source = "source_selection" if override.get("selection_source") == "source_selection_plan" else "manual"
+    phase = override.get("phase")
+    if phase in {"before", "after"}:
+        entry["phase_skill_auto"] = entry.get("phase")
+        entry["phase"] = phase
+        entry["phase_source"] = override.get("phase_source") or default_source
+        _remove_issue_contains(entry, ["缺少术前/术后", "无法判定术前/术后"])
+        if entry.get("rejection_reason") == "phase_missing":
+            entry["rejection_reason"] = None
+
+    view_name = override.get("view")
+    if view_name in {"front", "oblique", "side"}:
+        view = dict(entry.get("view") if isinstance(entry.get("view"), dict) else {})
+        entry["view_skill_auto"] = {"bucket": view.get("bucket"), "angle": entry.get("angle")}
+        view["bucket"] = view_name
+        try:
+            angle_confidence = float(override.get("angle_confidence"))
+        except (TypeError, ValueError):
+            angle_confidence = None
+        if angle_confidence is not None:
+            view["confidence"] = angle_confidence
+            entry["angle_confidence"] = angle_confidence
+        elif (override.get("view_source") or default_source) == "manual":
+            view["confidence"] = 1.0
+            entry["angle_confidence"] = 1.0
+        if view_name == "front":
+            view["direction"] = "center"
+            entry["direction"] = "center"
+        elif entry.get("direction") in {None, "unknown"} and view.get("direction"):
+            entry["direction"] = view.get("direction")
+        entry["view"] = view
+        entry["angle"] = view_name
+        entry["angle_source"] = override.get("view_source") or default_source
+        _remove_issue_contains(entry, ["无法判定角度"])
+        if entry.get("rejection_reason") == "angle_unknown":
+            entry["rejection_reason"] = None
+
+    for field in (
+        "selection_score",
+        "selection_reasons",
+        "quality_warnings",
+        "risk_level",
+        "selection_source",
+    ):
+        if field in override:
+            entry[field] = override.get(field)
+
+    verdict = override.get("review_verdict") or override.get("selection_review_verdict")
+    if verdict:
+        entry["review_verdict"] = verdict
+    if verdict == "usable":
+        entry["selection_priority"] = "reviewed_usable"
+        if entry.get("angle_confidence") is not None:
+            entry["angle_confidence"] = max(float(entry.get("angle_confidence") or 0), 0.92)
+    elif verdict == "needs_repick":
+        entry["selection_priority"] = "blocked_needs_repick"
+        entry["rejection_reason"] = "needs_repick"
+    return entry
+
+
+def _install_workbench_overrides(case_layout, case_root: Path, overrides: dict[str, dict]) -> None:
+    if not overrides or not hasattr(case_layout, "analyze_image"):
+        return
+    original_analyze_image = case_layout.analyze_image
+
+    def _analyze_image_with_workbench_overrides(*args, **kwargs):
+        entry = original_analyze_image(*args, **kwargs)
+        override = _workbench_override_for_entry(entry, case_root, overrides)
+        return _apply_workbench_override(entry, override)
+
+    case_layout.analyze_image = _analyze_image_with_workbench_overrides
 
 
 def _hybrid_pose_revalidate(manifest: dict, case_layout) -> dict:
@@ -1158,6 +2086,17 @@ _LUM_GAIN_DEADBAND = 0.04    # ±4% 内不动，避免无意义微调
 # 肤色色度对齐参数（2026-06-14 defect③(a)：术前/术后源图灯光色温差 → LAB a/b 偏移）
 _LUM_CHROMA_MAX_SHIFT = 8.0  # 单向最大位移（cv2 8-bit LAB a/b，1:1 真 CIELAB），避免抹平合理术前/术后差
 _LUM_CHROMA_DEADBAND = 2.0   # |Δa|,|Δb| 均 < 2 不动，避免无意义微调
+_LUM_CHROMA_WARM_A_FLOOR = 132.0
+_LUM_CHROMA_WARM_B_FLOOR = 136.0
+_LUM_CHROMA_WARM_A_CEIL = 146.0
+_LUM_CHROMA_WARM_B_CEIL = 150.0
+_MIDFACE_REPAIR_MIN_PIXELS = 800
+_MIDFACE_REPAIR_DB_TRIGGER = 1.2
+_MIDFACE_REPAIR_BLUE_TRIGGER = 2.0
+_MIDFACE_REPAIR_MAX_DA = 2.0
+_MIDFACE_REPAIR_MAX_DB = 5.0
+_MIDFACE_REPAIR_STRENGTH = 1.8
+_MIDFACE_REPAIR_MIN_DA_WHEN_COOL = 0.9
 
 
 def _skin_mask(arr) -> "object":
@@ -1185,6 +2124,8 @@ def _match_face_luminance(ref_img: Image.Image, target_img: Image.Image) -> Imag
     叠加局部色块放大「面部颜色不一致」感知（曾玲莉 front 实锤）。把术后肤区 a/b 均值
     对齐术前，单向 clamp ±8 LAB 单位（避免抹平合理术前/术后差），deadband ±2。色度位移
     与亮度一致地按全人物应用并随后强制黑底；fail-safe：任何异常退回纯亮度结果。
+    2026-06-21 #420 偏青复核：允许「把偏冷术后增暖」，但术后肤色本身已有正常 a/b
+    暖调时，不再为了贴近术前而小幅降红/降黄；否则会把术后脸拉灰、偏青。
 
     肤色 mask 任一侧不足 500px 时双方一起回退全人物 mask（禁止混用两种口径）。
     """
@@ -1220,8 +2161,14 @@ def _match_face_luminance(ref_img: Image.Image, target_img: Image.Image) -> Imag
         gained = np.clip(tgt * gain, 0, 255).astype(np.uint8)
         ref_lab = cv2.cvtColor(np.ascontiguousarray(ref.astype(np.uint8)), cv2.COLOR_RGB2LAB).astype(np.float64)
         out_lab = cv2.cvtColor(gained, cv2.COLOR_RGB2LAB).astype(np.float64)
+        tgt_a = float(out_lab[..., 1][tgt_mask].mean())
+        tgt_b = float(out_lab[..., 2][tgt_mask].mean())
         da_raw = float(ref_lab[..., 1][ref_mask].mean() - out_lab[..., 1][tgt_mask].mean())
         db_raw = float(ref_lab[..., 2][ref_mask].mean() - out_lab[..., 2][tgt_mask].mean())
+        if da_raw < 0 and _LUM_CHROMA_WARM_A_FLOOR <= tgt_a <= _LUM_CHROMA_WARM_A_CEIL:
+            da_raw = 0.0
+        if db_raw < 0 and _LUM_CHROMA_WARM_B_FLOOR <= tgt_b <= _LUM_CHROMA_WARM_B_CEIL:
+            db_raw = 0.0
         if abs(da_raw) >= _LUM_CHROMA_DEADBAND or abs(db_raw) >= _LUM_CHROMA_DEADBAND:
             da = min(max(da_raw, -_LUM_CHROMA_MAX_SHIFT), _LUM_CHROMA_MAX_SHIFT)
             db = min(max(db_raw, -_LUM_CHROMA_MAX_SHIFT), _LUM_CHROMA_MAX_SHIFT)
@@ -1245,6 +2192,161 @@ def _match_face_luminance(ref_img: Image.Image, target_img: Image.Image) -> Imag
     return Image.fromarray(out)
 
 
+def _repair_midface_cyan_cast(target_img: Image.Image, *, slot: str = "") -> Image.Image:
+    """局部修复术后正面面中偏青/偏灰。
+
+    T201 #420：整脸 LAB 均值已接近源图，但鼻梁-人中面中区域相对两侧脸颊
+    b 通道偏低、RGB 蓝量偏高，肉眼仍偏青。这里仅对 front 槽做受限修复：
+    - 用黑底后的肤色 mask 定位上半脸；
+    - 以左右脸颊 + 额头作为同图暖色参考；
+    - 仅当面中 b 明显低于参考或蓝量明显高于参考时，局部提升 LAB b/少量 a；
+    - mask 仅覆盖肤色像素，强制保留黑底。
+    """
+    if slot != "front":
+        return target_img
+    try:
+        import cv2
+        import numpy as np
+
+        arr = np.asarray(target_img.convert("RGB"), dtype=np.uint8)
+        skin = _skin_mask(arr.astype(np.float64))
+        if int(skin.sum()) < _MIDFACE_REPAIR_MIN_PIXELS:
+            return target_img
+
+        ys, xs = np.where(skin)
+        y_top = int(np.percentile(ys, 2))
+        y_base = int(np.percentile(ys, 92))
+        face_bottom = min(arr.shape[0] - 1, int(y_top + (y_base - y_top) * 0.58))
+        face_band = skin & (np.arange(arr.shape[0])[:, None] >= y_top) & (np.arange(arr.shape[0])[:, None] <= face_bottom)
+        if int(face_band.sum()) < _MIDFACE_REPAIR_MIN_PIXELS:
+            return target_img
+        fys, fxs = np.where(face_band)
+        x_left = int(np.percentile(fxs, 4))
+        x_right = int(np.percentile(fxs, 96))
+        if x_right <= x_left or face_bottom <= y_top:
+            return target_img
+        fw = x_right - x_left
+        fh = face_bottom - y_top
+
+        def rect(rx0: float, ry0: float, rx1: float, ry1: float) -> tuple[int, int, int, int]:
+            return (
+                max(0, int(x_left + fw * rx0)),
+                max(0, int(y_top + fh * ry0)),
+                min(arr.shape[1], int(x_left + fw * rx1)),
+                min(arr.shape[0], int(y_top + fh * ry1)),
+            )
+
+        dynamic_mid_box = rect(0.36, 0.30, 0.64, 0.82)
+        dynamic_ref_boxes = [
+            rect(0.12, 0.34, 0.34, 0.80),
+            rect(0.66, 0.34, 0.88, 0.80),
+            rect(0.34, 0.04, 0.66, 0.28),
+        ]
+        ih, iw = arr.shape[:2]
+
+        def image_rect(rx0: float, ry0: float, rx1: float, ry1: float) -> tuple[int, int, int, int]:
+            return (
+                max(0, int(iw * rx0)),
+                max(0, int(ih * ry0)),
+                min(iw, int(iw * rx1)),
+                min(ih, int(ih * ry1)),
+            )
+
+        broad_mid_box = image_rect(0.37, 0.34, 0.63, 0.58)
+        broad_ref_boxes = [
+            image_rect(0.22, 0.35, 0.38, 0.58),
+            image_rect(0.62, 0.35, 0.78, 0.58),
+            image_rect(0.38, 0.18, 0.62, 0.32),
+        ]
+        lab = cv2.cvtColor(arr, cv2.COLOR_RGB2LAB).astype(np.float64)
+
+        def masked_pixels(box: tuple[int, int, int, int]) -> tuple[np.ndarray, np.ndarray]:
+            x0, y0, x1, y1 = box
+            region_mask = skin[y0:y1, x0:x1]
+            return arr[y0:y1, x0:x1][region_mask], lab[y0:y1, x0:x1][region_mask]
+
+        def candidate(mid_box: tuple[int, int, int, int], ref_boxes: list[tuple[int, int, int, int]]) -> dict[str, object] | None:
+            mid_rgb, mid_lab = masked_pixels(mid_box)
+            if len(mid_rgb) < _MIDFACE_REPAIR_MIN_PIXELS:
+                return None
+            ref_rgb_parts: list[np.ndarray] = []
+            ref_lab_parts: list[np.ndarray] = []
+            for box in ref_boxes:
+                rgb, lab_part = masked_pixels(box)
+                if len(rgb) >= max(120, _MIDFACE_REPAIR_MIN_PIXELS // 4):
+                    ref_rgb_parts.append(rgb)
+                    ref_lab_parts.append(lab_part)
+            if not ref_rgb_parts:
+                return None
+            ref_rgb = np.concatenate(ref_rgb_parts, axis=0)
+            ref_lab = np.concatenate(ref_lab_parts, axis=0)
+            mid_lab_mean = mid_lab.mean(axis=0)
+            ref_lab_mean = ref_lab.mean(axis=0)
+            mid_rgb_mean = mid_rgb.astype(np.float64).mean(axis=0)
+            ref_rgb_mean = ref_rgb.astype(np.float64).mean(axis=0)
+            db_need = float(ref_lab_mean[2] - mid_lab_mean[2])
+            da_need = float(ref_lab_mean[1] - mid_lab_mean[1])
+            blue_excess = float(mid_rgb_mean[2] - ref_rgb_mean[2])
+            score = max(db_need, 0.0) + max(blue_excess, 0.0) * 0.5
+            return {
+                "mid_box": mid_box,
+                "mid_lab_mean": mid_lab_mean,
+                "ref_lab_mean": ref_lab_mean,
+                "db_need": db_need,
+                "da_need": da_need,
+                "blue_excess": blue_excess,
+                "score": score,
+            }
+
+        candidates = [
+            item
+            for item in (
+                candidate(dynamic_mid_box, dynamic_ref_boxes),
+                candidate(broad_mid_box, broad_ref_boxes),
+            )
+            if item is not None
+        ]
+        if not candidates:
+            return target_img
+        selected = max(candidates, key=lambda item: float(item["score"]))
+        db_need = float(selected["db_need"])
+        da_need = float(selected["da_need"])
+        blue_excess = float(selected["blue_excess"])
+        if db_need < _MIDFACE_REPAIR_DB_TRIGGER and blue_excess < _MIDFACE_REPAIR_BLUE_TRIGGER:
+            return target_img
+
+        db = min(max(db_need * _MIDFACE_REPAIR_STRENGTH, 0.0), _MIDFACE_REPAIR_MAX_DB)
+        da = min(max(da_need * _MIDFACE_REPAIR_STRENGTH, 0.0), _MIDFACE_REPAIR_MAX_DA)
+        if db > 0 and da == 0.0:
+            da = _MIDFACE_REPAIR_MIN_DA_WHEN_COOL
+        x0, y0, x1, y1 = selected["mid_box"]  # type: ignore[misc]
+        region = np.zeros(skin.shape, dtype=np.float64)
+        region[y0:y1, x0:x1] = 1.0
+        sigma = max(8.0, min(x1 - x0, y1 - y0) / 7.0)
+        weight = cv2.GaussianBlur(region, (0, 0), sigmaX=sigma, sigmaY=sigma)
+        if weight.max() > 0:
+            weight = weight / float(weight.max())
+        weight *= skin.astype(np.float64)
+        if weight.max() <= 0:
+            return target_img
+
+        out_lab = lab.copy()
+        out_lab[..., 1] = np.clip(out_lab[..., 1] + (da * weight), 0, 255)
+        out_lab[..., 2] = np.clip(out_lab[..., 2] + (db * weight), 0, 255)
+        out = cv2.cvtColor(out_lab.astype(np.uint8), cv2.COLOR_LAB2RGB)
+        out[arr.max(axis=2) <= 20] = 0
+        logger.info(
+            "  [midface-cyan] slot=%s da=%.1f db=%.1f blue_excess=%.1f mid_lab=(%.1f,%.1f,%.1f) ref_lab=(%.1f,%.1f,%.1f)",
+            slot, da, db, blue_excess,
+            selected["mid_lab_mean"][0], selected["mid_lab_mean"][1], selected["mid_lab_mean"][2],  # type: ignore[index]
+            selected["ref_lab_mean"][0], selected["ref_lab_mean"][1], selected["ref_lab_mean"][2],  # type: ignore[index]
+        )
+        return Image.fromarray(out)
+    except Exception as exc:  # noqa: BLE001 - 色彩修复 fail-open，不能打断正式渲染
+        logger.warning("  [midface-cyan] 修复异常(%s) → 原图", exc)
+        return target_img
+
+
 def _make_matte_black_transform(case_layout, stats: dict):
     """matte + 纯黑底 slot_transform；native-enhance 用（AI 已在 apply_after_enhancements 做完，这里只抠黑底）。
 
@@ -1256,6 +2358,7 @@ def _make_matte_black_transform(case_layout, stats: dict):
         before_img = _rembg_composite_on_black(before_img)
         after_img = _rembg_composite_on_black(after_img)
         after_img = _match_face_luminance(before_img, after_img)
+        after_img = _repair_midface_cyan_cast(after_img, slot=slot)
         stats["ok"] += 1
         return before_img, after_img
     return transform
@@ -1320,6 +2423,7 @@ def _enhance_manifest_sources(
     manifest: dict, providers: list, prompt: str,
     stats: dict, *, enhance_dir: Path, use_cache: bool = True,
     focus_targets: list[str] | None = None, mask_lock: bool = False,
+    progress_path: Path | None = None,
 ) -> dict:
     """render_from_manifest 前，对 manifest 每个 after 源图做全分辨率 AI 增强。
 
@@ -1334,6 +2438,7 @@ def _enhance_manifest_sources(
     ft = focus_targets or []
     if _adaptive_4k_enabled():
         logger.info("  [fullres] 自适应 4K 已启用（按源图比例动态 size，原图直送不 pad）")
+    provider_names = [getattr(p, "name", "") for p in providers]
 
     for group in manifest.get("groups", []):
         # defect① 修复（2026-06-11）：error 组跳过要 WARNING + skipped 计数，ok 组照常。
@@ -1342,6 +2447,14 @@ def _enhance_manifest_sources(
         g_status = group.get("status") or "ok"
         if g_status != "ok":
             n_slots = len(group.get("selected_slots") or {})
+            _write_progress(
+                progress_path,
+                "group_skipped",
+                group=group.get("name"),
+                group_status=g_status,
+                blocking_count=len(group.get("blocking_issues") or []),
+                slot_count=n_slots,
+            )
             logger.warning(
                 "  [fullres] group %s status=%s（blocking=%d）→ 跳过该组 %d 槽增强（其余组照常）",
                 group.get("name", "?"), g_status,
@@ -1354,28 +2467,96 @@ def _enhance_manifest_sources(
             src_path = after_info["path"]
             if not Path(src_path).is_file():
                 logger.warning("  [fullres] %s: 源图不存在 %s", slot, src_path)
+                _write_progress(
+                    progress_path,
+                    "slot_source_missing",
+                    group=group.get("name"),
+                    slot=slot,
+                    after_file=Path(str(src_path)).name,
+                )
                 continue
 
             stats["total"] += 1
             from PIL import ImageOps
             orig_img = ImageOps.exif_transpose(Image.open(src_path)).convert("RGB")
             logger.info("  [fullres] %s: 源图 %dx%d → AI 增强", slot, *orig_img.size)
+            _write_progress(
+                progress_path,
+                "slot_start",
+                group=group.get("name"),
+                slot=slot,
+                after_file=Path(src_path).name,
+                source_size=list(orig_img.size),
+                provider_order=provider_names,
+                use_cache=bool(use_cache),
+            )
 
             # cache_path/png/size_override/restore 与 _check_cache_coverage 同源（_slot_cache_plan）：
             # 自适应 4K=按比例动态 size 原图直送；非adaptive=方形 pad。adaptive key 掺 per-image
             # size（adaptive: 前缀，与旧方形 key 永不碰撞）。
             cache_path, png, size_override, restore = _slot_cache_plan(orig_img, providers, prompt)
+            _write_progress(
+                progress_path,
+                "slot_cache_plan",
+                group=group.get("name"),
+                slot=slot,
+                cache_exists=cache_path.is_file(),
+                size_override=size_override,
+                png_bytes=len(png),
+            )
 
             t0 = time.time()
             try:
                 if use_cache and cache_path.is_file():
                     raw = cache_path.read_bytes()
                     prov = "cache"
+                    stats["cache_hit_count"] = int(stats.get("cache_hit_count") or 0) + 1
+                    _write_progress(
+                        progress_path,
+                        "slot_cache_hit",
+                        group=group.get("name"),
+                        slot=slot,
+                        bytes=len(raw),
+                    )
                 else:
-                    raw, prov = generate_with_fallback(providers, png, prompt,
-                                                       mime="image/png", size_override=size_override)
+                    _write_progress(
+                        progress_path,
+                        "slot_external_call_start",
+                        group=group.get("name"),
+                        slot=slot,
+                        provider_order=provider_names,
+                        size_override=size_override,
+                    )
+
+                    def _provider_progress(payload: dict[str, object]) -> None:
+                        _write_progress(
+                            progress_path,
+                            str(payload.get("event") or "provider_progress"),
+                            group=group.get("name"),
+                            slot=slot,
+                            **{k: v for k, v in payload.items() if k != "event"},
+                        )
+
+                    raw, prov = generate_with_fallback(
+                        providers, png, prompt, mime="image/png",
+                        size_override=size_override,
+                        progress_callback=_provider_progress,
+                    )
                     AI_CACHE_DIR.mkdir(parents=True, exist_ok=True)
                     cache_path.write_bytes(raw)
+                    stats["external_call_count"] = int(stats.get("external_call_count") or 0) + 1
+                    _write_progress(
+                        progress_path,
+                        "slot_external_call_success",
+                        group=group.get("name"),
+                        slot=slot,
+                        provider=prov,
+                        bytes=len(raw),
+                        elapsed_s=round(time.time() - t0, 3),
+                    )
+                provider_counts = stats.setdefault("provider_counts", {})
+                if isinstance(provider_counts, dict):
+                    provider_counts[prov] = int(provider_counts.get(prov) or 0) + 1
 
                 enh = restore(_bytes_to_pil(raw), slot)
 
@@ -1390,11 +2571,36 @@ def _enhance_manifest_sources(
                 enh.save(out, format="PNG")
                 after_info.setdefault("enhancement", {})["enhanced_path"] = str(out)
                 stats["ok"] += 1
+                _write_progress(
+                    progress_path,
+                    "slot_done",
+                    group=group.get("name"),
+                    slot=slot,
+                    provider=prov,
+                    output_file=out.name,
+                    elapsed_s=round(elapsed, 3),
+                )
 
             except Exception as exc:
                 elapsed = time.time() - t0
                 logger.error("  [fullres] %s: FAILED (%.1fs): %s", slot, elapsed, exc)
+                _write_progress(
+                    progress_path,
+                    "slot_failed",
+                    group=group.get("name"),
+                    slot=slot,
+                    elapsed_s=round(elapsed, 3),
+                    error=str(exc)[:500],
+                    error_type=type(exc).__name__,
+                )
                 stats["failed"] += 1
+                errors = stats.setdefault("errors", [])
+                if isinstance(errors, list):
+                    errors.append({
+                        "slot": slot,
+                        "provider_order": [getattr(p, "name", "") for p in providers],
+                        "error": str(exc)[:500],
+                    })
 
     return manifest
 
@@ -1420,8 +2626,8 @@ def main() -> None:
                         help="owner 管线：渲染器原生 focus-scoped 局部增强"
                              "(gpt-image-2 忠实 + 姿态锁 + 稳定回退) → matte 纯黑底；替代 gemini bolt-on")
     parser.add_argument("--enhance-model", default="gemini-3-pro-image",
-                        help="原生增强模型（默认 gemini-3-pro-image 走 AI Studio；"
-                             "失败时单角度退未增强原图）")
+                        help="增强模型名/标签；实际生图 provider 由 --provider-order 决定，"
+                             "只有 provider_order 显式包含 ai_studio 时才作为 AI Studio 模型透传")
     parser.add_argument("--enhance-direction", default="heal", choices=["strict", "heal"],
                         help="增强方向：heal(默认)=恢复预览定向 prompt（身份锁不变 + 往恢复良好理想化，"
                              "4 案例验证一致安全）；strict=旧版忠实严格 prompt（只许极轻、偏保守）")
@@ -1436,11 +2642,34 @@ def main() -> None:
     parser.add_argument("--case-dir", type=Path, default=None,
                         help="单案例入口（server 集成用）：直接渲染指定的治疗目录，绕过 --cases-root 遍历。"
                              "成功后 stdout 打印 'AI_BOARD_RESULT: <board.jpg>' 供父进程解析")
+    parser.add_argument("--customer-name", default="",
+                        help="单案例入口标题覆盖：真实客户名，避免暂存目录名进入正式板标题")
+    parser.add_argument("--case-date", default="",
+                        help="单案例入口标题覆盖：真实治疗日期")
+    parser.add_argument("--case-project", default="",
+                        help="单案例入口标题覆盖：真实项目/治疗说明")
+    parser.add_argument("--manual-overrides-file", type=Path, default=None,
+                        help="工作台人工 phase/view 覆盖 JSON 文件（server 单案例路径使用）")
+    parser.add_argument("--selection-plan-file", type=Path, default=None,
+                        help="工作台 source_selection 选图计划 JSON 文件（server 单案例路径使用）")
     parser.add_argument("--allow-cache-miss-burn", action="store_true",
                         help="授权 cache-miss 烧 API（F2）。默认 off：--case-dir 前端路径遇 cache-miss 不烧、"
                              "打印 'AI_BOARD_CACHE_MISS: <json>' 等用户确认。用户确认后父进程带此 flag 重入即真烧。"
                              "batch（--customers）不受此门约束（args.case_dir is None 直接放行）")
     args = parser.parse_args()
+    progress_path = args.output_dir / AI_PROGRESS_FILENAME
+    _write_progress(
+        progress_path,
+        "script_start",
+        case_dir=str(args.case_dir) if args.case_dir else None,
+        brand=args.brand,
+        provider_order_arg=args.provider_order,
+        enhance_direction=args.enhance_direction,
+        enhance_model=args.enhance_model,
+        no_cache=bool(args.no_cache),
+        allow_cache_miss_burn=bool(args.allow_cache_miss_burn),
+        dry_run=bool(args.dry_run),
+    )
 
     if args.native_enhance:
         # 原生强化器是 node subprocess（继承 os.environ）：注入图像 creds + 顶掉写死的 gemini-4k 死模型。
@@ -1457,6 +2686,13 @@ def main() -> None:
 
     case_layout = _load_module("case_layout_board", SKILL_ROOT / "case_layout_board.py")
     render_mod = _load_module("render_brand_clean", SKILL_ROOT / "render_brand_clean.py")
+    _install_side_contain_fallback(render_mod)
+    manual_overrides = _load_json_object_file(args.manual_overrides_file)
+    selection_plan = _unwrap_selection_plan_payload(_load_json_object_file(args.selection_plan_file))
+    workbench_overrides = _merge_workbench_overrides(manual_overrides, selection_plan)
+    if args.case_dir is not None and workbench_overrides:
+        _install_workbench_overrides(case_layout, args.case_dir.resolve(), workbench_overrides)
+        logger.info("[workbench] 已加载 %d 条 phase/view/selection 覆盖", len(workbench_overrides))
     if args.native_enhance:
         # 关掉渲染器 6-05 新增的「保护区对齐」：对 jawline/法令纹/鼻背 类治疗它会为框住治疗区把
         # 人脸缩成小块 + 留方框（2026-06-06 泛化暴露，郭若煊泪沟不命中关键词才侥幸满脸）。默认满脸
@@ -1465,7 +2701,11 @@ def main() -> None:
 
     provider_order = [PROVIDER_NAME_ALIASES.get(x.strip(), x.strip())
                       for x in args.provider_order.split(",") if x.strip()]
-    env = _load_all_provider_envs(provider_order)
+    env = _apply_enhance_model_to_provider_env(
+        _load_all_provider_envs(provider_order),
+        provider_order,
+        args.enhance_model,
+    )
 
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
     from backend.services.image_providers import resolve_chain
@@ -1475,8 +2715,15 @@ def main() -> None:
     from backend.services import procedure_region_mappings as prm
     providers = resolve_chain(env, explicit=provider_order)
     logger.info("就绪 providers: %s", [p.name for p in providers])
+    _write_progress(
+        progress_path,
+        "providers_resolved",
+        provider_order=provider_order,
+        ready_chain=[_provider_progress_summary(p) for p in providers],
+    )
     if not providers and not args.dry_run and not args.native_enhance:
         logger.error("没有就绪的 image provider，退出")
+        _write_progress(progress_path, "no_ready_provider", provider_order=provider_order)
         sys.exit(1)
 
     board_qa = None
@@ -1503,10 +2750,9 @@ def main() -> None:
 
     single_treatment_name = None
     if args.case_dir is not None:
-        # 单案例入口（server 集成）：--case-dir 是治疗目录，customer = 其父目录名，只渲染这一个
+        # 单案例入口（server 集成）：兼容“治疗目录”和“客户/case 根目录”两种 DB abs_path。
         case_dir_p = args.case_dir.resolve()
-        case_dirs = [case_dir_p.parent]
-        single_treatment_name = case_dir_p.name
+        case_dirs, single_treatment_name = _single_case_entrypoint(case_dir_p)
     else:
         cases_root = args.cases_root
         case_dirs = sorted([
@@ -1535,19 +2781,20 @@ def main() -> None:
         for treatment_dir in treatments:
             treatment = treatment_dir.name
             # 品牌交付标题：客户 日期 项目（parse_case_meta 已剥客户名前缀/提日期）
-            _meta = render_mod.parse_case_meta(treatment_dir)
-            _title_date = _meta["date"] if _meta["date"] != treatment else ""
-            board_title = " ".join(
-                x for x in (customer, _title_date, _meta["project"]) if x)
-            # 标题方案 B（owner 拍板 2026-06-11）：结构化行同步进 manifest；
-            # 解析 fail-open → None（原串 title 字段不动，下游回退单行）
-            try:
-                board_title_lines = render_mod.parse_title_b(
-                    _meta["project"], customer=customer)
-            except Exception:
-                board_title_lines = None
+            title_meta = _resolve_board_title(
+                render_mod,
+                treatment_dir,
+                customer,
+                treatment,
+                customer_name=args.customer_name if args.case_dir is not None else "",
+                case_date=args.case_date if args.case_dir is not None else "",
+                case_project=args.case_project if args.case_dir is not None else "",
+            )
+            display_customer = title_meta["customer"]
+            board_title = title_meta["title"]
+            board_title_lines = title_meta["title_lines"]
             print(f"\n{'=' * 50}")
-            print(f"  {customer} / {treatment}")
+            print(f"  {display_customer} / {treatment}")
 
             native_focus = _native_focus_targets(case_layout, prm, treatment) if args.native_enhance else None
             try:
@@ -1555,16 +2802,37 @@ def main() -> None:
                     treatment_dir, brand, "tri-compare",
                     focus_targets=native_focus, semantic_judge_mode="off",
                 )
+                _apply_board_title_to_manifest(manifest, title_meta)
             except Exception as exc:
                 logger.warning("  build_manifest 失败: %s", exc)
                 results.append({
-                    "customer": customer, "treatment": treatment, "title": board_title,
+                    "customer": display_customer, "source_customer": customer,
+                    "treatment": treatment, "title": board_title,
                     "status": "MANIFEST_FAILED", "error": str(exc)[:200],
                 })
                 continue
 
             _log_manifest_pose_info(manifest)
             manifest = _hybrid_pose_revalidate(manifest, case_layout)
+            selection_audit = _apply_selection_plan_to_manifest(
+                manifest,
+                selection_plan,
+                case_layout,
+                case_root=args.case_dir.resolve() if args.case_dir is not None else treatment_dir,
+            )
+            if selection_audit.get("applied_slots"):
+                logger.info(
+                    "  [workbench] source_selection 强制覆盖槽位: %s",
+                    [
+                        f"{item.get('slot')}={item.get('before')}->{item.get('after')}"
+                        for item in selection_audit.get("applied_slots") or []
+                    ],
+                )
+            elif isinstance(selection_plan, dict) and selection_plan.get("slots"):
+                logger.warning(
+                    "  [workbench] source_selection 未能应用到 manifest: missing=%s",
+                    selection_audit.get("missing_entries"),
+                )
 
             # G1 角度覆盖 gate（审核标准 v1 B 条）：项目部位必需角度缺失 → 板级 HELD 不出板。
             # 零烧钱结构核对，在 AI 增强/渲染之前短路；fail-open 不误杀（详见 board_angle_gate）。
@@ -1588,14 +2856,26 @@ def main() -> None:
                         {"gate": "angle", "reason": _missing_desc, "board": None},
                         ensure_ascii=False))
                 results.append({
-                    "customer": customer, "treatment": treatment, "title": board_title,
+                    "customer": display_customer, "source_customer": customer,
+                    "treatment": treatment, "title": board_title,
                     "status": "ANGLE_GATE_HELD", "angle_gate": angle_gate,
                     # 区分「有素材但缺角度」vs「manifest 本身没选出槽」（avail=[] 类）
                     "manifest_status": manifest.get("status"),
                 })
                 continue
 
-            stats = {"total": 0, "ok": 0, "failed": 0, "skipped": 0, "locked": 0}
+            stats = {
+                "total": 0,
+                "ok": 0,
+                "failed": 0,
+                "skipped": 0,
+                "locked": 0,
+                "cache_hit_count": 0,
+                "external_call_count": 0,
+                "provider_counts": {},
+                "provider_order": [getattr(p, "name", "") for p in providers],
+                "errors": [],
+            }
             if args.native_enhance:
                 print(f"  [native] focus = {[f['area'] for f in (native_focus or [])]}")
                 if args.dry_run:
@@ -1627,6 +2907,15 @@ def main() -> None:
                     if cov["miss_count"] > 0:
                         est_cost = round(cov["miss_count"] * _EST_BURN_USD_PER_SLOT, 3)
                         est_seconds = cov["miss_count"] * _EST_BURN_SEC_PER_SLOT
+                        _write_progress(
+                            progress_path,
+                            "cache_miss_hold",
+                            miss_slots=cov["miss_slots"],
+                            miss_count=cov["miss_count"],
+                            total_slots=cov["total_slots"],
+                            est_cost_usd=est_cost,
+                            est_seconds=est_seconds,
+                        )
                         print("AI_BOARD_CACHE_MISS: " + json.dumps({
                             "miss_slots": cov["miss_slots"],
                             "miss_count": cov["miss_count"],
@@ -1638,7 +2927,8 @@ def main() -> None:
                         print(f"  💸 CACHE_MISS_HOLD: {cov['miss_count']}/{cov['total_slots']} 槽未命中 cache"
                               f"（预估 ${est_cost} / ~{est_seconds}s）→ 不烧，等前端确认")
                         results.append({
-                            "customer": customer, "treatment": treatment, "title": board_title,
+                            "customer": display_customer, "source_customer": customer,
+                            "treatment": treatment, "title": board_title,
                             "status": "CACHE_MISS_HELD", "cache_miss": cov,
                         })
                         continue
@@ -1658,6 +2948,7 @@ def main() -> None:
                         manifest, providers, ENHANCE_PROMPT_V2, stats,
                         enhance_dir=enhance_dir, use_cache=not args.no_cache,
                         focus_targets=focus_targets, mask_lock=args.mask_lock,
+                        progress_path=progress_path,
                     )
                 else:
                     logger.info("  [DRY-RUN] 跳过全分辨率 AI 增强")
@@ -1684,14 +2975,27 @@ def main() -> None:
                 )
 
                 # G2 配对 gate（审核标准 v1 C 条灾难级兜底）：front 终格眼距比
-                # 出 [0.78, 1.30] → 板级 HELD 不交付（板文件保留供诊断）。
-                # 信号 = render_from_manifest 写回的 render_plan pair_eye_signal，
-                # 解析零成本；fail-open 不误杀（详见 board_pair_gate）。
+                # 或眼位偏差越界 → 板级 HELD 不交付（板文件保留供诊断）。
+                # 信号 = render_from_manifest 写回的 render_plan 解析信号，
+                # 零额外检测成本；fail-open 不误杀（详见 board_pair_gate）。
                 pair_gate = board_pair_gate.evaluate_pair_coverage(
                     manifest.get("render_plan"))
                 if pair_gate["verdict"] == board_pair_gate.VERDICT_HELD:
+                    def _format_pair_violation(v: dict) -> str:
+                        metric = str(v.get("metric") or "pair_metric")
+                        value = v.get("value")
+                        if metric == "eye_ratio":
+                            value = v.get("eye_ratio", value)
+                        elif metric == "eye_center_dy_panel_ratio":
+                            value = v.get("eye_center_dy_panel_ratio", value)
+                            return (
+                                f"{v.get('slot')} {metric}={value}"
+                                f"（dy_px={v.get('eye_center_dy_px')}，允许 {v.get('allowed')}）"
+                            )
+                        return f"{v.get('slot')} {metric}={value}（允许 {v.get('allowed')}）"
+
                     _viol_desc = "；".join(
-                        f"{v['slot']} eye_ratio={v['eye_ratio']}（允许 {v['allowed']}）"
+                        _format_pair_violation(v)
                         for v in pair_gate["violations"])
                     print(f"  🚫 PAIR_GATE_HELD: {_viol_desc}")
                     if args.case_dir is not None:
@@ -1700,7 +3004,8 @@ def main() -> None:
                             {"gate": "pair", "reason": _viol_desc, "board": str(out_path)},
                             ensure_ascii=False))
                     results.append({
-                        "customer": customer, "treatment": treatment, "title": board_title,
+                        "customer": display_customer, "source_customer": customer,
+                        "treatment": treatment, "title": board_title,
                         "status": "PAIR_GATE_HELD", "board": str(out_path),
                         "pair_gate": pair_gate, "angle_gate": angle_gate,
                     })
@@ -1710,6 +3015,22 @@ def main() -> None:
                 print(f"  ✅ {out_path} (增强 {stats['ok']}/{stats['total']})")
                 if args.case_dir is not None:
                     # 单案例入口：machine-parseable 标记供 server 父进程解析 board 路径
+                    print("AI_BOARD_EVIDENCE: " + json.dumps({
+                        "board_title": board_title,
+                        "title_lines": board_title_lines,
+                        "customer": display_customer,
+                        "source_customer": customer,
+                        "treatment": treatment,
+                        "generated_count": stats["ok"],
+                        "total_slots": stats["total"],
+                        "failed_count": stats["failed"],
+                        "skipped_count": stats["skipped"],
+                        "cache_hit_count": stats.get("cache_hit_count", 0),
+                        "external_call_count": stats.get("external_call_count", 0),
+                        "provider_counts": stats.get("provider_counts") or {},
+                        "provider_order": stats.get("provider_order") or [],
+                        "errors": stats.get("errors") or [],
+                    }, ensure_ascii=False))
                     print(f"AI_BOARD_RESULT: {out_path}")
                 qa_result = {}
                 if board_qa is not None:
@@ -1729,7 +3050,8 @@ def main() -> None:
                         logger.warning("  [D6-QA] 评估失败: %s", qa_exc)
                         qa_result = {"qa_verdict": "unavailable", "qa_held": True}
                 results.append({
-                    "customer": customer, "treatment": treatment, "title": board_title,
+                    "customer": display_customer, "source_customer": customer,
+                    "treatment": treatment, "title": board_title,
                     "title_lines": board_title_lines,
                     "status": status, "board": str(out_path), **stats, **qa_result,
                     "angle_gate": angle_gate, "pair_gate": pair_gate,
@@ -1738,7 +3060,8 @@ def main() -> None:
             except Exception as exc:
                 logger.error("  ❌ 渲染失败: %s", exc)
                 results.append({
-                    "customer": customer, "treatment": treatment, "title": board_title,
+                    "customer": display_customer, "source_customer": customer,
+                    "treatment": treatment, "title": board_title,
                     "status": "RENDER_FAILED", "error": str(exc)[:200],
                 })
 

@@ -4,7 +4,196 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 
+from PIL import Image
+
+from backend import render_quality as rq
 from backend.render_quality import evaluate_render_result
+
+
+def test_render_quality_metrics_include_evaluation_version(tmp_path):
+    output = tmp_path / "final-board.jpg"
+    Image.new("RGB", (64, 64), (24, 24, 24)).save(output, "JPEG")
+
+    quality = evaluate_render_result(
+        {
+            "output_path": str(output),
+            "status": "ok",
+            "blocking_issue_count": 0,
+            "warning_count": 0,
+            "ai_usage": {},
+        }
+    )
+
+    assert quality["metrics"]["quality_evaluation_version"] == rq.QUALITY_EVALUATION_VERSION
+
+
+def test_backfill_recomputes_stale_quality_version(temp_db, seed_case, tmp_path, monkeypatch):
+    from backend import db
+
+    case_id = seed_case(abs_path="/tmp/case-stale-quality-version", customer_raw="小质")
+    now = datetime.now(timezone.utc).isoformat()
+    final_board = tmp_path / "final-board.jpg"
+    Image.new("RGB", (64, 64), (24, 24, 24)).save(final_board, "JPEG")
+    with db.connect() as conn:
+        job_id = conn.execute(
+            """
+            INSERT INTO render_jobs
+              (case_id, brand, template, status, enqueued_at, finished_at, output_path,
+               semantic_judge, meta_json)
+            VALUES (?, 'fumei', 'tri-compare', 'done', ?, ?, ?, 'off', '{}')
+            """,
+            (case_id, now, now, str(final_board)),
+        ).lastrowid
+        conn.execute(
+            """
+            INSERT INTO render_quality
+              (render_job_id, quality_status, quality_score, can_publish, artifact_mode,
+               manifest_status, blocking_count, warning_count, metrics_json, created_at, updated_at)
+            VALUES (?, 'done', 100, 1, 'real_layout', 'done', 0, 0, ?, ?, ?)
+            """,
+            (job_id, json.dumps({"quality_evaluation_version": 0}, ensure_ascii=False), now, now),
+        )
+
+    calls: list[dict] = []
+
+    def _blocked_quality(result: dict) -> dict:
+        calls.append(result)
+        return {
+            "quality_status": "blocked",
+            "quality_score": 85.0,
+            "can_publish": False,
+            "artifact_mode": "real_layout",
+            "manifest_status": "done",
+            "blocking_count": 1,
+            "warning_count": 0,
+            "metrics": {
+                "quality_evaluation_version": rq.QUALITY_EVALUATION_VERSION,
+                "policy_blockers": ["new gate"],
+                "pixel_metrics": {"flags": ["cutout_artifact"], "cv_penalty": 15.0},
+            },
+        }
+
+    monkeypatch.setattr(rq, "evaluate_render_result", _blocked_quality)
+
+    with db.connect() as conn:
+        assert rq.backfill_existing_render_quality(conn) == 1
+        qrow = conn.execute(
+            "SELECT * FROM render_quality WHERE render_job_id = ?", (job_id,)
+        ).fetchone()
+        jrow = conn.execute("SELECT status FROM render_jobs WHERE id = ?", (job_id,)).fetchone()
+
+    assert calls and calls[0]["output_path"] == str(final_board)
+    assert qrow["quality_status"] == "blocked"
+    assert qrow["can_publish"] == 0
+    assert json.loads(qrow["metrics_json"])["quality_evaluation_version"] == rq.QUALITY_EVALUATION_VERSION
+    assert jrow["status"] == "blocked"
+
+
+def test_backfill_skips_current_quality_version(temp_db, seed_case, tmp_path, monkeypatch):
+    from backend import db
+
+    case_id = seed_case(abs_path="/tmp/case-current-quality-version", customer_raw="小稳")
+    now = datetime.now(timezone.utc).isoformat()
+    final_board = tmp_path / "final-board.jpg"
+    Image.new("RGB", (64, 64), (24, 24, 24)).save(final_board, "JPEG")
+    with db.connect() as conn:
+        job_id = conn.execute(
+            """
+            INSERT INTO render_jobs
+              (case_id, brand, template, status, enqueued_at, finished_at, output_path,
+               semantic_judge, meta_json)
+            VALUES (?, 'fumei', 'tri-compare', 'done', ?, ?, ?, 'off', '{}')
+            """,
+            (case_id, now, now, str(final_board)),
+        ).lastrowid
+        conn.execute(
+            """
+            INSERT INTO render_quality
+              (render_job_id, quality_status, quality_score, can_publish, artifact_mode,
+               manifest_status, blocking_count, warning_count, metrics_json, created_at, updated_at)
+            VALUES (?, 'done', 100, 1, 'real_layout', 'done', 0, 0, ?, ?, ?)
+            """,
+            (
+                job_id,
+                json.dumps(
+                    {"quality_evaluation_version": rq.QUALITY_EVALUATION_VERSION},
+                    ensure_ascii=False,
+                ),
+                now,
+                now,
+            ),
+        )
+
+    def _unexpected_recompute(result: dict) -> dict:
+        raise AssertionError(f"current quality row should not be recomputed: {result}")
+
+    monkeypatch.setattr(rq, "evaluate_render_result", _unexpected_recompute)
+
+    with db.connect() as conn:
+        assert rq.backfill_existing_render_quality(conn) == 0
+        qrow = conn.execute(
+            "SELECT quality_status, can_publish FROM render_quality WHERE render_job_id = ?",
+            (job_id,),
+        ).fetchone()
+
+    assert qrow["quality_status"] == "done"
+    assert qrow["can_publish"] == 1
+
+
+def test_backfill_recomputes_existing_cancelled_quality_without_status_change(
+    temp_db, seed_case, tmp_path, monkeypatch
+):
+    from backend import db
+
+    case_id = seed_case(abs_path="/tmp/case-cancelled-quality-version", customer_raw="小停")
+    now = datetime.now(timezone.utc).isoformat()
+    with db.connect() as conn:
+        job_id = conn.execute(
+            """
+            INSERT INTO render_jobs
+              (case_id, brand, template, status, enqueued_at, finished_at, output_path,
+               semantic_judge, meta_json)
+            VALUES (?, 'fumei', 'tri-compare', 'cancelled', ?, ?, NULL, 'off', '{}')
+            """,
+            (case_id, now, now),
+        ).lastrowid
+        conn.execute(
+            """
+            INSERT INTO render_quality
+              (render_job_id, quality_status, quality_score, can_publish, artifact_mode,
+               manifest_status, blocking_count, warning_count, metrics_json, created_at, updated_at)
+            VALUES (?, 'blocked', 5, 0, 'real_layout', 'error', 1, 0, ?, ?, ?)
+            """,
+            (job_id, json.dumps({"quality_evaluation_version": 0}, ensure_ascii=False), now, now),
+        )
+
+    def _blocked_quality(result: dict) -> dict:
+        return {
+            "quality_status": "blocked",
+            "quality_score": 5.0,
+            "can_publish": False,
+            "artifact_mode": "real_layout",
+            "manifest_status": "error",
+            "blocking_count": 1,
+            "warning_count": 0,
+            "metrics": {"quality_evaluation_version": rq.QUALITY_EVALUATION_VERSION},
+        }
+
+    monkeypatch.setattr(rq, "evaluate_render_result", _blocked_quality)
+
+    with db.connect() as conn:
+        assert rq.backfill_existing_render_quality(conn) == 1
+        row = conn.execute(
+            """
+            SELECT j.status, q.metrics_json
+            FROM render_jobs j JOIN render_quality q ON q.render_job_id = j.id
+            WHERE j.id = ?
+            """,
+            (job_id,),
+        ).fetchone()
+
+    assert row["status"] == "cancelled"
+    assert json.loads(row["metrics_json"])["quality_evaluation_version"] == rq.QUALITY_EVALUATION_VERSION
 
 
 def test_render_quality_marks_composition_alerts_as_review(tmp_path):
@@ -120,6 +309,609 @@ def test_render_quality_uses_warning_layers_for_actionable_count(tmp_path):
         "侧面 术前术后姿态差过大(yaw=90)",
     ]
     assert quality["metrics"]["warning_buckets"]["stale_pose_noise"] == 1
+
+
+def test_ai_board_done_status_is_clean_when_only_light_pixel_signal(tmp_path, monkeypatch):
+    """AI-enhanced board CLI returns status='done', not manifest status='ok'.
+
+    A light CV signal such as cutout_artifact should remain visible and lower
+    the score, but it must not be misread as a manifest error or hard blocker.
+    """
+    output = tmp_path / "final-board.jpg"
+    output.write_bytes(b"jpeg")
+    monkeypatch.setattr(
+        rq,
+        "compute_pixel_metrics",
+        lambda _path: {
+            "available": True,
+            "flags": ["cutout_artifact"],
+            "cv_penalty": 12.5,
+        },
+    )
+
+    quality = evaluate_render_result(
+        {
+            "output_path": str(output),
+            "status": "done",
+            "blocking_issue_count": 0,
+            "warning_count": 0,
+            "ai_usage": {"used_after_enhancement": False, "used_ai_padfill": False},
+        }
+    )
+
+    assert quality["quality_score"] == 87.5
+    assert quality["quality_status"] == "done"
+    assert quality["can_publish"] is True
+    assert quality["manifest_status"] == "done"
+    assert quality["metrics"]["cv_flags"] == ["cutout_artifact"]
+
+
+def test_render_quality_blocks_workbench_staging_title(tmp_path, monkeypatch):
+    output = tmp_path / "final-board.jpg"
+    output.write_bytes(b"jpeg")
+    monkeypatch.setattr(
+        rq,
+        "compute_pixel_metrics",
+        lambda _path: {"available": True, "flags": [], "cv_penalty": 0.0},
+    )
+
+    quality = evaluate_render_result(
+        {
+            "output_path": str(output),
+            "status": "done",
+            "blocking_issue_count": 0,
+            "warning_count": 0,
+            "board_title": ".case-workbench-bound-render job-1006",
+            "ai_usage": {
+                "formal_ai_enhancement_run": True,
+                "used_after_enhancement": True,
+                "generated_artifact_count": 2,
+                "external_call_count": 2,
+                "cache_hit_count": 0,
+                "fresh_ai_call": True,
+            },
+        }
+    )
+
+    assert quality["quality_status"] == "blocked"
+    assert quality["can_publish"] is False
+    assert quality["metrics"]["title_integrity"] == "blocked"
+    assert any("staging/job" in item for item in quality["metrics"]["policy_blockers"])
+
+
+def test_render_quality_blocks_bound_staging_without_title_context(tmp_path, monkeypatch):
+    output = tmp_path / "final-board.jpg"
+    output.write_bytes(b"jpeg")
+    monkeypatch.setattr(
+        rq,
+        "compute_pixel_metrics",
+        lambda _path: {"available": True, "flags": [], "cv_penalty": 0.0},
+    )
+
+    quality = evaluate_render_result(
+        {
+            "output_path": str(output),
+            "status": "done",
+            "case_mode": "ai_enhanced_board",
+            "blocking_issue_count": 0,
+            "warning_count": 0,
+            "ai_usage": {
+                "formal_ai_enhancement_run": True,
+                "used_after_enhancement": True,
+                "generated_artifact_count": 2,
+                "external_call_count": 2,
+                "cache_hit_count": 0,
+                "ai_enhance_command": {
+                    "args": [
+                        "python",
+                        "render_ai_enhanced_boards.py",
+                        "--case-dir",
+                        "/x/.case-workbench-bound-render/job-1006",
+                    ]
+                },
+            },
+        }
+    )
+
+    assert quality["quality_status"] == "blocked"
+    assert quality["can_publish"] is False
+    assert quality["metrics"]["title_integrity"] == "blocked"
+    assert any("缺少真实标题证据" in item for item in quality["metrics"]["policy_blockers"])
+
+
+def test_render_quality_blocks_stage_token_in_project_title(tmp_path, monkeypatch):
+    output = tmp_path / "final-board.jpg"
+    output.write_bytes(b"jpeg")
+    monkeypatch.setattr(
+        rq,
+        "compute_pixel_metrics",
+        lambda _path: {"available": True, "flags": [], "cv_penalty": 0.0},
+    )
+
+    quality = evaluate_render_result(
+        {
+            "output_path": str(output),
+            "status": "done",
+            "blocking_issue_count": 0,
+            "warning_count": 0,
+            "board_title": "骆萍 2026.3.31 塑公主2支注射下巴术前，衡力150u注射下颌缘颈阔肌咬肌",
+            "ai_usage": {
+                "formal_ai_enhancement_run": True,
+                "used_after_enhancement": True,
+                "generated_artifact_count": 3,
+                "external_call_count": 3,
+                "cache_hit_count": 0,
+                "fresh_ai_call": True,
+                "board_title_context": {
+                    "customer_name": "骆萍",
+                    "date": "2026.3.31",
+                    "project": "塑公主2支注射下巴术前，衡力150u注射下颌缘颈阔肌咬肌",
+                },
+            },
+        }
+    )
+
+    assert quality["quality_status"] == "blocked"
+    assert quality["quality_score"] == 60.0
+    assert quality["can_publish"] is False
+    assert quality["metrics"]["title_integrity"] == "blocked"
+    assert any("阶段词" in item for item in quality["metrics"]["policy_blockers"])
+
+
+def test_render_quality_allows_source_treatment_stage_token_when_board_title_clean(tmp_path, monkeypatch):
+    output = tmp_path / "final-board.jpg"
+    output.write_bytes(b"jpeg")
+    monkeypatch.setattr(
+        rq,
+        "compute_pixel_metrics",
+        lambda _path: {"available": True, "flags": [], "cv_penalty": 0.0},
+    )
+
+    quality = evaluate_render_result(
+        {
+            "output_path": str(output),
+            "status": "done",
+            "template": "tri-compare",
+            "blocking_issue_count": 0,
+            "warning_count": 0,
+            "board_title": "林惠贞 2026.3.31 盈致2支注射面颊，娇兰注射唇2026.3.31塑公主4支注射耳基地",
+            "ai_usage": {
+                "formal_ai_enhancement_run": True,
+                "used_after_enhancement": True,
+                "generated_artifact_count": 3,
+                "external_call_count": 3,
+                "cache_hit_count": 0,
+                "fresh_ai_call": True,
+                "enhancement_evidence": {
+                    "board_title": "林惠贞 2026.3.31 盈致2支注射面颊，娇兰注射唇2026.3.31塑公主4支注射耳基地",
+                    "treatment": "2026.3.31盈致2支注射面颊，娇兰注射唇2026.3.31塑公主4支注射耳基地术前",
+                    "board_title_context": {
+                        "customer_name": "林惠贞",
+                        "date": "",
+                        "project": "",
+                    },
+                },
+            },
+        }
+    )
+
+    assert quality["quality_status"] == "done"
+    assert quality["can_publish"] is True
+    assert quality["metrics"]["title_integrity"] == "ok"
+    assert not any("阶段词" in item for item in quality["metrics"]["policy_blockers"])
+
+
+def test_render_quality_blocks_postop_cyan_cast_pixel_flag(tmp_path, monkeypatch):
+    output = tmp_path / "final-board.jpg"
+    output.write_bytes(b"jpeg")
+    monkeypatch.setattr(
+        rq,
+        "compute_pixel_metrics",
+        lambda _path: {
+            "available": True,
+            "flags": ["postop_cyan_cast"],
+            "cv_penalty": 10.0,
+            "postop_skin_cast": {
+                "evaluated": True,
+                "flagged": True,
+                "before": {"r_minus_g": 21.0, "r_minus_b": 36.0},
+                "after": {"r_minus_g": 12.4, "r_minus_b": 28.8},
+            },
+        },
+    )
+
+    quality = evaluate_render_result(
+        {
+            "output_path": str(output),
+            "status": "done",
+            "template": "single-compare",
+            "blocking_issue_count": 0,
+            "warning_count": 0,
+            "board_title": "黄靖榕 2026.03.31 弗缦1支注射泪沟，薇旖美1支注射眼下",
+            "ai_usage": {
+                "formal_ai_enhancement_run": True,
+                "used_after_enhancement": True,
+                "generated_artifact_count": 1,
+                "external_call_count": 1,
+                "cache_hit_count": 0,
+                "source_profile": {"before_count": 1, "after_count": 1},
+            },
+        }
+    )
+
+    assert quality["quality_status"] == "blocked"
+    assert quality["can_publish"] is False
+    assert any("术后肤色偏青" in item for item in quality["metrics"]["policy_blockers"])
+
+
+def test_render_quality_blocks_side_source_scale_mismatch_from_inferred_manifest(tmp_path, monkeypatch):
+    render_dir = tmp_path / "render"
+    render_dir.mkdir()
+    output = render_dir / "final-board.jpg"
+    output.write_bytes(b"jpeg")
+    before = tmp_path / "before-side.jpg"
+    after = tmp_path / "after-side.jpg"
+    Image.new("RGB", (1000, 1000), (20, 20, 20)).save(before)
+    Image.new("RGB", (1000, 1000), (20, 20, 20)).save(after)
+    (render_dir / "manifest.final.json").write_text(
+        json.dumps(
+            {
+                "groups": [
+                    {
+                        "selected_slots": {
+                            "side": {
+                                "before": {
+                                    "name": "before-side.jpg",
+                                    "path": str(before),
+                                    "crop_box": {"x1": 150, "y1": 120, "x2": 780, "y2": 780},
+                                },
+                                "after": {
+                                    "name": "after-side.jpg",
+                                    "path": str(after),
+                                    "crop_box": {"x1": 260, "y1": 220, "x2": 760, "y2": 700},
+                                },
+                            }
+                        }
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        rq,
+        "compute_pixel_metrics",
+        lambda _path: {"available": True, "flags": [], "cv_penalty": 0.0},
+    )
+
+    quality = evaluate_render_result(
+        {
+            "output_path": str(output),
+            "status": "done",
+            "template": "bi-compare",
+            "blocking_issue_count": 0,
+            "warning_count": 0,
+            "ai_usage": {},
+        }
+    )
+
+    assert quality["quality_status"] == "blocked"
+    assert quality["can_publish"] is False
+    assert quality["metrics"]["source_scale_policy"]["status"] == "blocked"
+    assert any("侧面对比人物尺度不一致" in item for item in quality["metrics"]["policy_blockers"])
+
+
+def test_bi_compare_blocks_cutout_penalty_at_policy_ceiling(tmp_path, monkeypatch):
+    output = tmp_path / "final-board.jpg"
+    output.write_bytes(b"jpeg")
+    monkeypatch.setattr(
+        rq,
+        "compute_pixel_metrics",
+        lambda _path: {
+            "available": True,
+            "flags": ["cutout_artifact"],
+            "cv_penalty": 15.0,
+        },
+    )
+
+    quality = evaluate_render_result(
+        {
+            "output_path": str(output),
+            "status": "done",
+            "template": "tri-compare",
+            "effective_templates": ["bi-compare"],
+            "blocking_issue_count": 0,
+            "warning_count": 0,
+            "ai_usage": {
+                "used_after_enhancement": True,
+                "external_call_count": 2,
+                "cache_hit_count": 0,
+                "generated_artifact_count": 2,
+            },
+        }
+    )
+
+    assert quality["quality_status"] == "blocked"
+    assert quality["can_publish"] is False
+    assert quality["metrics"]["edge_integrity"] == "blocked"
+    assert quality["metrics"]["quality_template_tier"] == "bi"
+    assert quality["metrics"]["template_quality_policy"]["max_cv_penalty"] == 15.0
+    assert "达到或超过" in quality["metrics"]["policy_blockers"][0]
+
+
+def test_bi_compare_blocks_side_scale_mismatch_cv_flag(tmp_path, monkeypatch):
+    output = tmp_path / "final-board.jpg"
+    output.write_bytes(b"jpeg")
+    monkeypatch.setattr(
+        rq,
+        "compute_pixel_metrics",
+        lambda _path: {
+            "available": True,
+            "flags": ["side_scale_mismatch"],
+            "cv_penalty": 12.0,
+            "side_scale_mismatch": {
+                "flagged": True,
+                "ratios": {"skin_height": 1.26, "skin_area": 1.47},
+            },
+        },
+    )
+
+    quality = evaluate_render_result(
+        {
+            "output_path": str(output),
+            "status": "done",
+            "template": "bi-compare",
+            "blocking_issue_count": 0,
+            "warning_count": 0,
+            "ai_usage": {
+                "used_after_enhancement": True,
+                "external_call_count": 2,
+                "cache_hit_count": 0,
+                "generated_artifact_count": 2,
+            },
+        }
+    )
+
+    assert quality["quality_status"] == "blocked"
+    assert quality["can_publish"] is False
+    assert quality["quality_score"] == 70.0
+    assert quality["metrics"]["angle_match"] == "review"
+    assert "侧面对比人物尺度不一致" in quality["metrics"]["policy_blockers"][0]
+
+
+def test_ai_board_blocks_combined_cutout_and_blank_region(tmp_path, monkeypatch):
+    output = tmp_path / "final-board.jpg"
+    output.write_bytes(b"jpeg")
+    monkeypatch.setattr(
+        rq,
+        "compute_pixel_metrics",
+        lambda _path: {
+            "available": True,
+            "flags": ["cutout_artifact", "blank_region"],
+            "cv_penalty": 14.8,
+        },
+    )
+
+    quality = evaluate_render_result(
+        {
+            "output_path": str(output),
+            "status": "done",
+            "template": "tri-compare",
+            "effective_templates": ["bi-compare"],
+            "blocking_issue_count": 0,
+            "warning_count": 0,
+            "ai_usage": {
+                "used_after_enhancement": True,
+                "used_ai_padfill": False,
+                "external_call_count": 1,
+                "cache_hit_count": 0,
+                "generated_artifact_count": 1,
+            },
+        }
+    )
+
+    assert quality["quality_status"] == "blocked"
+    assert quality["can_publish"] is False
+    assert quality["metrics"]["quality_template_tier"] == "bi"
+    assert quality["metrics"]["cv_flags"] == ["cutout_artifact", "blank_region"]
+    assert "cutout_artifact + blank_region" in quality["metrics"]["policy_blockers"][0]
+
+
+def test_bi_compare_can_publish_under_template_policy(tmp_path, monkeypatch):
+    output = tmp_path / "final-board.jpg"
+    output.write_bytes(b"jpeg")
+    monkeypatch.setattr(
+        rq,
+        "compute_pixel_metrics",
+        lambda _path: {"available": True, "flags": [], "cv_penalty": 5.0},
+    )
+
+    quality = evaluate_render_result(
+        {
+            "output_path": str(output),
+            "status": "ok",
+            "template": "tri-compare",
+            "effective_templates": ["bi-compare"],
+            "blocking_issue_count": 0,
+            "warning_count": 0,
+            "ai_usage": {
+                "source_profile": {"before_count": 1, "after_count": 1},
+                "render_selection_slot_count": 2,
+            },
+        }
+    )
+
+    assert quality["quality_status"] == "done"
+    assert quality["can_publish"] is True
+    assert quality["metrics"]["quality_template_tier"] == "bi"
+    assert quality["metrics"]["template_quality_policy"]["label"] == "bi_publishable"
+
+
+def test_single_compare_blocks_without_info_or_copy(tmp_path, monkeypatch):
+    output = tmp_path / "final-board.jpg"
+    output.write_bytes(b"jpeg")
+    monkeypatch.setattr(
+        rq,
+        "compute_pixel_metrics",
+        lambda _path: {"available": True, "flags": [], "cv_penalty": 3.0},
+    )
+
+    quality = evaluate_render_result(
+        {
+            "output_path": str(output),
+            "status": "ok",
+            "template": "single-compare",
+            "blocking_issue_count": 0,
+            "warning_count": 0,
+            "ai_usage": {"source_profile": {"before_count": 1, "after_count": 0}},
+        }
+    )
+
+    assert quality["quality_status"] == "blocked"
+    assert quality["can_publish"] is False
+    assert quality["blocking_count"] == 2
+    assert quality["metrics"]["quality_template_tier"] == "single"
+    assert quality["metrics"]["single_info_complete"] is False
+    assert quality["metrics"]["single_explanation_present"] is False
+
+
+def test_single_compare_can_publish_with_strict_policy(tmp_path, monkeypatch):
+    output = tmp_path / "final-board.jpg"
+    output.write_bytes(b"jpeg")
+    monkeypatch.setattr(
+        rq,
+        "compute_pixel_metrics",
+        lambda _path: {"available": True, "flags": [], "cv_penalty": 6.0},
+    )
+
+    quality = evaluate_render_result(
+        {
+            "output_path": str(output),
+            "status": "ok",
+            "template": "single-compare",
+            "blocking_issue_count": 0,
+            "warning_count": 0,
+            "explanatory_copy": "术前术后单角度对比，项目信息完整。",
+            "ai_usage": {
+                "source_profile": {"before_count": 1, "after_count": 1},
+                "render_selection_slot_count": 1,
+            },
+        }
+    )
+
+    assert quality["quality_status"] == "done"
+    assert quality["can_publish"] is True
+    assert quality["metrics"]["single_info_complete"] is True
+    assert quality["metrics"]["single_explanation_present"] is True
+
+
+def test_formal_ai_enhancement_requires_real_evidence(tmp_path, monkeypatch):
+    output = tmp_path / "final-board.jpg"
+    output.write_bytes(b"jpeg")
+    monkeypatch.setattr(
+        rq,
+        "compute_pixel_metrics",
+        lambda _path: {"available": True, "flags": [], "cv_penalty": 4.0},
+    )
+
+    quality = evaluate_render_result(
+        {
+            "output_path": str(output),
+            "status": "done",
+            "case_mode": "ai_enhanced_board",
+            "enhance": {"direction": "heal", "model": "gemini-3-pro-image"},
+            "blocking_issue_count": 0,
+            "warning_count": 0,
+            "ai_usage": {"formal_ai_enhancement_run": True},
+        }
+    )
+
+    assert quality["quality_status"] == "blocked"
+    assert quality["can_publish"] is False
+    assert quality["metrics"]["formal_ai_enhancement_required"] is True
+    assert quality["metrics"]["formal_ai_enhancement_verified"] is False
+    assert quality["metrics"]["formal_ai_enhancement_gate"] == "missing_evidence"
+
+
+def test_formal_ai_enhancement_with_cache_evidence_can_publish(tmp_path, monkeypatch):
+    output = tmp_path / "final-board.jpg"
+    output.write_bytes(b"jpeg")
+    monkeypatch.setattr(
+        rq,
+        "compute_pixel_metrics",
+        lambda _path: {"available": True, "flags": [], "cv_penalty": 4.0},
+    )
+
+    quality = evaluate_render_result(
+        {
+            "output_path": str(output),
+            "status": "done",
+            "case_mode": "ai_enhanced_board",
+            "enhance": {"direction": "heal", "model": "gemini-3-pro-image"},
+            "blocking_issue_count": 0,
+            "warning_count": 0,
+            "ai_usage": {
+                "formal_ai_enhancement_run": True,
+                "used_after_enhancement": True,
+                "generated_artifact_count": 3,
+                "cache_hit_count": 3,
+                "enhancement_evidence": {
+                    "generated_count": 3,
+                    "cache_hit_count": 3,
+                    "external_call_count": 0,
+                    "provider_counts": {"cache": 3},
+                },
+            },
+        }
+    )
+
+    assert quality["quality_status"] == "done"
+    assert quality["can_publish"] is True
+    assert quality["artifact_mode"] == "ai_after_simulation"
+    assert quality["metrics"]["formal_ai_enhancement_gate"] == "verified"
+    assert quality["metrics"]["fresh_ai_enhancement_verified"] is False
+
+
+def test_fresh_ai_enhancement_blocks_when_only_cache_evidence(tmp_path, monkeypatch):
+    output = tmp_path / "final-board.jpg"
+    output.write_bytes(b"jpeg")
+    monkeypatch.setattr(
+        rq,
+        "compute_pixel_metrics",
+        lambda _path: {"available": True, "flags": [], "cv_penalty": 4.0},
+    )
+
+    quality = evaluate_render_result(
+        {
+            "output_path": str(output),
+            "status": "done",
+            "case_mode": "ai_enhanced_board",
+            "enhance": {"direction": "heal", "model": "gemini-3-pro-image"},
+            "require_fresh_ai_enhancement": True,
+            "blocking_issue_count": 0,
+            "warning_count": 0,
+            "ai_usage": {
+                "formal_ai_enhancement_run": True,
+                "used_after_enhancement": True,
+                "generated_artifact_count": 2,
+                "cache_hit_count": 2,
+                "enhancement_evidence": {
+                    "generated_count": 2,
+                    "cache_hit_count": 2,
+                    "external_call_count": 0,
+                    "provider_counts": {"cache": 2},
+                },
+            },
+        }
+    )
+
+    assert quality["quality_status"] == "blocked"
+    assert quality["can_publish"] is False
+    assert quality["metrics"]["formal_ai_enhancement_verified"] is True
+    assert quality["metrics"]["fresh_ai_enhancement_required"] is True
+    assert quality["metrics"]["fresh_ai_enhancement_verified"] is False
+    assert quality["metrics"]["formal_ai_enhancement_gate"] == "missing_external_call_evidence"
 
 
 def test_render_quality_review_updates_row(client, seed_case):

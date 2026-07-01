@@ -1,0 +1,133 @@
+{
+  "version": 1,
+  "updated_at": "2026-05-11T00:00:00Z",
+  "model_root_env": "COMFYUI_MODEL_ROOT",
+  "notes": [
+    "First production-candidate stack for local ComfyUI validation on M4/16GB.",
+    "Files must exist locally and be visible in ComfyUI object_info after restart before a capability is ready.",
+    "SD1.5 inpaint/control models are validation candidates; SDXL/BRIA commercial stack remains a later A/B decision."
+  ],
+  "models": [
+    {
+      "id": "birefnet_background_removal",
+      "display_name": "Comfy-Org BiRefNet background removal",
+      "capability": "background_removal",
+      "relative_path": "background_removal/birefnet.safetensors",
+      "source_model": "Comfy-Org/BiRefNet",
+      "source_url": "https://huggingface.co/Comfy-Org/BiRefNet/resolve/main/background_removal/birefnet.safetensors",
+      "license": "mit",
+      "expected_size_bytes": 444473596,
+      "expected_sha256": "9ab37426bf4de0567af6b5d21b16151357149139362e6e8992021b8ce356a154",
+      "required_for_production": true,
+      "production_candidate": true
+    },
+    {
+      "id": "realesrgan_x4",
+      "display_name": "RealESRGAN x4",
+      "capability": "final_upscale",
+      "relative_path": "upscale_models/RealESRGAN_x4.pth",
+      "source_model": "ai-forever/Real-ESRGAN",
+      "source_url": "https://huggingface.co/ai-forever/Real-ESRGAN/resolve/main/RealESRGAN_x4.pth",
+      "license": "unknown",
+      "expected_size_bytes": 67040989,
+      "expected_sha256": "aa00f09ad753d88576b21ed977e97d634976377031b178acc3b5b238df463400",
+      "required_for_production": true,
+      "production_candidate": true
+    },
+    {
+      "id": "sam_vit_base",
+      "display_name": "SAM ViT-B mask refinement",
+      "capability": "sam_mask_refine",
+      "relative_path": "sams/sam_vit_b_01ec64.pth",
+      "source_model": "facebook/sam-vit-base",
+      "source_url": "https://huggingface.co/facebook/sam-vit-base",
+      "license": "apache-2.0",
+      "required_for_production": true,
+      "production_candidate": true
+    },
+    {
+      "id": "sd15_inpainting",
+      "display_name": "Stable Diffusion v1.5 Inpainting",
+      "capability": "inpaint_checkpoint",
+      "relative_path": "checkpoints/sd-v1-5-inpainting.ckpt",
+      "source_model": "stable-diffusion-v1-5/stable-diffusion-inpainting",
+      "source_url": "https://huggingface.co/stable-diffusion-v1-5/stable-diffusion-inpainting/resolve/main/sd-v1-5-inpainting.ckpt",
+      "license": "creativeml-openrail-m",
+      "expected_size_bytes": 4265437280,
+      "expected_sha256": "c6bbc15e3224e6973459ba78de4998b80b50112b0ae5b5c67113d56b4e366b19",
+      "required_for_production": true,
+      "production_candidate": true
+    },
+    {
+      "id": "instantid_ip_adapter",
+      "display_name": "InstantID identity A/B candidate",
+      "capability": "identity_candidate",
+      "relative_path": "instantid/ip-adapter.bin",
+      "source_model": "InstantX/InstantID",
+      "source_url": "https://huggingface.co/InstantX/InstantID",
+      "license": "apache-2.0",
+      "required_for_production": false,
+      "production_candidate": true,
+      "install_state_note": "A/B only; do not use as default formal render identity gate."
+    },
+    {
+      "id": "controlnet_sd15_openpose",
+      "display_name": "ControlNet v1.1 SD1.5 OpenPose",
+      "capability": "control_pose",
+      "relative_path": "controlnet/control_v11p_sd15_openpose.pth",
+      "source_model": "lllyasviel/ControlNet-v1-1",
+      "source_url": "https://huggingface.co/lllyasviel/ControlNet-v1-1/resolve/main/control_v11p_sd15_openpose.pth",
+      "sidecar_urls": [
+        {
+          "relative_path": "controlnet/control_v11p_sd15_openpose.yaml",
+          "source_url": "https://huggingface.co/lllyasviel/ControlNet-v1-1/resolve/main/control_v11p_sd15_openpose.yaml"
+        }
+      ],
+      "license": "openrail",
+      "expected_size_bytes": 1445235707,
+      "expected_sha256": "db97becd92cd19aff71352a60e93c2508decba3dee64f01f686727b9b406a9dd",
+      "required_for_production": true,
+      "production_candidate": true
+    },
+    {
+      "id": "comfy_org_sdpose",
+      "display_name": "Comfy-Org SDPose checkpoint candidate",
+      "capability": "sdpose_candidate",
+      "relative_path": "checkpoints/sdpose.safetensors",
+      "source_model": "Comfy-Org/SDPose",
+      "license": "unknown",
+      "required_for_production": false,
+      "production_candidate": true,
+      "install_state_note": "Candidate only; current portrait workflow uses face keypoints + ControlNet OpenPose. Update this registry path if the installed checkpoint filename differs."
+    },
+    {
+      "id": "controlnet_sd15_depth",
+      "display_name": "ControlNet v1.1 SD1.5 Depth",
+      "capability": "control_depth",
+      "relative_path": "controlnet/control_v11f1p_sd15_depth.pth",
+      "source_model": "lllyasviel/ControlNet-v1-1",
+      "source_url": "https://huggingface.co/lllyasviel/ControlNet-v1-1/resolve/main/control_v11f1p_sd15_depth.pth",
+      "sidecar_urls": [
+        {
+          "relative_path": "controlnet/control_v11f1p_sd15_depth.yaml",
+          "source_url": "https://huggingface.co/lllyasviel/ControlNet-v1-1/resolve/main/control_v11f1p_sd15_depth.yaml"
+        }
+      ],
+      "license": "openrail",
+      "required_for_production": false,
+      "production_candidate": true
+    },
+    {
+      "id": "sdxl_inpainting_future",
+      "display_name": "SDXL Inpainting 0.1 future A/B candidate",
+      "capability": "future_inpaint_checkpoint",
+      "relative_path": "checkpoints/sdxl-inpainting-0.1.safetensors",
+      "source_model": "diffusers/stable-diffusion-xl-1.0-inpainting-0.1",
+      "source_url": "https://huggingface.co/diffusers/stable-diffusion-xl-1.0-inpainting-0.1",
+      "license": "openrail++",
+      "required_for_production": false,
+      "production_candidate": false,
+      "install_state_note": "Do not install by default on M4/16GB until SD1.5 chain wins stability A/B."
+    }
+  ]
+}

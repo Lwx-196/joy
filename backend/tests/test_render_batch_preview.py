@@ -420,6 +420,126 @@ def test_case_source_group_surfaces_bound_images_and_edits_source_case(client, s
     assert updated_after["review_state"]["verdict"] == "usable"
 
 
+def test_case_source_group_prefers_manual_single_template_hint(client, seed_case, tmp_path):
+    from backend import db
+
+    case_dir = tmp_path / "case-manual-single"
+    _touch_case_files(
+        str(case_dir),
+        ["front-before.jpg", "front-after.jpg", "side-before.jpg", "side-after.jpg"],
+    )
+    case_id = seed_case(abs_path=str(case_dir), category="standard_face", template_tier="tri")
+    with db.connect() as conn:
+        conn.execute(
+            "UPDATE cases SET meta_json = ?, manual_template_tier = ? WHERE id = ?",
+            (
+                json.dumps(
+                    {"image_files": ["front-before.jpg", "front-after.jpg", "side-before.jpg", "side-after.jpg"]},
+                    ensure_ascii=False,
+                ),
+                "single",
+                case_id,
+            ),
+        )
+
+    group = client.get(f"/api/cases/{case_id}/source-group")
+    assert group.status_code == 200, group.text
+    manifest = group.json()["preflight"]["formal_candidate_manifest"]
+    assert manifest["renderable_slot_count"] == 2
+    assert manifest["effective_template_hint"] == "single-compare"
+    assert manifest["effective_template_source"] == "manual_template_tier"
+
+
+def test_source_group_manifest_prediction_blocks_block_pair_quality():
+    from backend.routes.cases_support import _slot_quality_prediction
+
+    prediction = _slot_quality_prediction(
+        "front",
+        {
+            "selected_before": {"filename": "before.jpg", "view_source": "manual"},
+            "selected_after": {"filename": "after.jpg", "view_source": "manual"},
+            "pair_quality": {
+                "score": 55,
+                "label": "risky",
+                "severity": "block",
+                "warnings": [
+                    {
+                        "code": "target_effect_near_duplicate_lip",
+                        "message": "丰唇术前术后疑似近重复且目标部位无可见差异，阻断正式配对",
+                    }
+                ],
+            },
+        },
+    )
+
+    assert prediction["decision"] == "block"
+    assert prediction["blocks_render"] is True
+    assert prediction["pair_score"] == 55
+    assert prediction["warning_codes"] == ["target_effect_near_duplicate_lip"]
+    assert prediction["recommended_action"] == "该角度配对存在硬阻断，回到源组候选重选"
+
+
+def test_case_source_group_uses_nested_relative_path_skill_metadata(client, seed_case, tmp_path):
+    from backend import db
+
+    case_dir = tmp_path / "case-nested-sources"
+    image_files = [
+        "2025.12.27/术前1.jpg",
+        "2025.12.27/术后1.jpg",
+    ]
+    _touch_case_files(str(case_dir), image_files)
+    case_id = seed_case(abs_path=str(case_dir), customer_raw="江李欣", category="standard_face")
+    skill_metadata = [
+        {
+            "filename": "术前1.jpg",
+            "relative_path": "2025.12.27/术前1.jpg",
+            "phase": "before",
+            "phase_source": "skill",
+            "view_bucket": "front",
+            "angle": "front",
+            "angle_source": "skill",
+            "sharpness_score": 88.0,
+        },
+        {
+            "filename": "术后1.jpg",
+            "relative_path": "2025.12.27/术后1.jpg",
+            "phase": "after",
+            "phase_source": "skill",
+            "view_bucket": "front",
+            "angle": "front",
+            "angle_source": "skill",
+            "sharpness_score": 82.0,
+        },
+    ]
+    with db.connect() as conn:
+        conn.execute(
+            "UPDATE cases SET meta_json = ?, skill_image_metadata_json = ? WHERE id = ?",
+            (
+                json.dumps({"image_files": image_files}, ensure_ascii=False),
+                json.dumps(skill_metadata, ensure_ascii=False),
+                case_id,
+            ),
+        )
+
+    group = client.get(f"/api/cases/{case_id}/source-group")
+    assert group.status_code == 200, group.text
+    body = group.json()
+    by_filename = {
+        image["filename"]: image
+        for source in body["sources"]
+        for image in source["images"]
+    }
+    assert by_filename["2025.12.27/术前1.jpg"]["view"] == "front"
+    assert by_filename["2025.12.27/术前1.jpg"]["view_source"] == "skill"
+    assert by_filename["2025.12.27/术前1.jpg"]["sharpness_score"] == 88.0
+    assert by_filename["2025.12.27/术后1.jpg"]["view"] == "front"
+    assert by_filename["2025.12.27/术后1.jpg"]["view_source"] == "skill"
+    assert body["preflight"]["needs_manual_count"] == 0
+    assert "classification_open" not in {
+        blocker["code"] for blocker in body["preflight"]["hard_blockers"]
+    }
+
+
 def test_case_detail_render_gate_uses_ready_source_group_authority(client, seed_case, tmp_path):
     from backend import db
 

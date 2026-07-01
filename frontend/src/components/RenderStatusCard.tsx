@@ -18,6 +18,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { renderJobOutputUrl, type CompositionAlert, type RenderJob } from "../api";
+import { resolveFreshAiRenderTemplate, resolveFreshAiSlotCount } from "../features/case-detail/renderPayload";
 import {
   useCancelRenderJob,
   useJobStream,
@@ -35,6 +36,9 @@ interface Props {
   brand?: string;
   /** Absolute case directory, used for local reveal/copy helpers. */
   caseAbsPath?: string;
+  /** Current source-group effective template; avoids reusing stale latest-job templates for fresh AI. */
+  effectiveTemplate?: string | null;
+  renderableSlotCount?: number | null;
 }
 
 const STATUS_BG: Record<string, { bg: string; fg: string }> = {
@@ -91,7 +95,16 @@ function formatDuration(startIso: string | null, endIso: string | null): string 
   return `${Math.floor(sec / 60)}m${sec % 60}s`;
 }
 
-export function RenderStatusCard({ caseId, brand: brandOverride, caseAbsPath }: Props) {
+const FRESH_AI_EST_USD_PER_SLOT = 0.057;
+const FRESH_AI_EST_SECONDS_PER_SLOT = 150;
+
+export function RenderStatusCard({
+  caseId,
+  brand: brandOverride,
+  caseAbsPath,
+  effectiveTemplate,
+  renderableSlotCount,
+}: Props) {
   const { t } = useTranslation("render");
   const globalBrand = useBrand();
   const brand = brandOverride || globalBrand;
@@ -195,6 +208,23 @@ export function RenderStatusCard({ caseId, brand: brandOverride, caseAbsPath }: 
       : cacheMissSeconds >= 60
         ? t("cacheMiss.minutes", { n: Math.round(cacheMissSeconds / 60) })
         : t("cacheMiss.seconds", { n: Math.round(cacheMissSeconds) });
+  const aiUsageMeta = (job.meta?.ai_usage ?? {}) as {
+    render_selection_slot_count?: number | string | null;
+    generated_artifact_count?: number | string | null;
+  };
+  const freshAiSlotCount = resolveFreshAiSlotCount(
+    renderableSlotCount,
+    Number(aiUsageMeta.render_selection_slot_count ?? 0),
+    job.meta?.cache_miss_total,
+    Number(aiUsageMeta.generated_artifact_count ?? 0),
+  );
+  const freshAiTemplate = resolveFreshAiRenderTemplate(effectiveTemplate, freshAiSlotCount, job.template);
+  const freshAiCostLabel = `$${(freshAiSlotCount * FRESH_AI_EST_USD_PER_SLOT).toFixed(2)}`;
+  const freshAiSeconds = freshAiSlotCount * FRESH_AI_EST_SECONDS_PER_SLOT;
+  const freshAiTimeLabel =
+    freshAiSeconds >= 60
+      ? t("cacheMiss.minutes", { n: Math.round(freshAiSeconds / 60) })
+      : t("cacheMiss.seconds", { n: freshAiSeconds });
   const heldImageFailed = heldPreviewUrl != null && failedPreviewUrl === heldPreviewUrl;
   const copyText = async (text: string, message: string) => {
     await navigator.clipboard.writeText(text);
@@ -218,6 +248,43 @@ export function RenderStatusCard({ caseId, brand: brandOverride, caseAbsPath }: 
     }
     window.setTimeout(() => setActionMessage(null), 1800);
   };
+  const freshAiRender = () => {
+    const confirmed = window.confirm(
+      t("freshAi.confirm", {
+        count: freshAiSlotCount,
+        cost: freshAiCostLabel,
+        time: freshAiTimeLabel,
+      }),
+    );
+    if (!confirmed) return;
+    renderMut.mutate({
+      caseId,
+      payload: {
+        brand: job.brand,
+        template: freshAiTemplate,
+        semantic_judge: job.semantic_judge === "auto" ? "auto" : "off",
+        confirm_burn: true,
+        options: {
+          enhance_direction: "heal",
+          no_cache: true,
+        },
+      },
+    });
+  };
+  const renderFreshAiButton = (style = {}) => (
+    <button
+      type="button"
+      className="btn sm"
+      data-testid="render-fresh-ai"
+      onClick={freshAiRender}
+      disabled={renderMut.isPending}
+      title={t("actions.freshAiTitle")}
+      style={style}
+    >
+      <Ico name="refresh" size={11} />
+      {t("actions.freshAi")}
+    </button>
+  );
 
   return (
     <div style={cardStyle} data-testid="render-status-card">
@@ -369,6 +436,7 @@ export function RenderStatusCard({ caseId, brand: brandOverride, caseAbsPath }: 
                   <Ico name="link" size={11} />
                   {t("actions.openInNewTab")}
                 </a>
+                {renderFreshAiButton()}
               </div>
               {actionMessage && (
                 <div style={{ marginTop: 5, color: "var(--ink-3)", fontSize: 11 }} data-testid="render-action-message">
@@ -467,6 +535,7 @@ export function RenderStatusCard({ caseId, brand: brandOverride, caseAbsPath }: 
               <Ico name="refresh" size={11} />
               {t("actions.retry")}
             </button>
+            {renderFreshAiButton({ marginLeft: 8 })}
           </div>
           <RenderBlockingDetail job={job} />
         </div>
@@ -537,6 +606,7 @@ export function RenderStatusCard({ caseId, brand: brandOverride, caseAbsPath }: 
             <Ico name="scan" size={11} />
             {t("actions.visionRetry")}
           </button>
+          {renderFreshAiButton({ marginTop: 8, marginLeft: 8 })}
           <RenderBlockingDetail job={job} />
         </div>
       )}
@@ -582,6 +652,7 @@ export function RenderStatusCard({ caseId, brand: brandOverride, caseAbsPath }: 
             <Ico name="scan" size={11} />
             {t("actions.visionRetry")}
           </button>
+          {renderFreshAiButton({ marginTop: 6, marginLeft: 8 })}
           <RenderBlockingDetail job={job} />
         </div>
       )}
@@ -677,6 +748,7 @@ export function RenderStatusCard({ caseId, brand: brandOverride, caseAbsPath }: 
           >
             {t("messages.rerunButton")}
           </button>
+          {renderFreshAiButton({ marginLeft: 8 })}
         </div>
       )}
 
@@ -703,6 +775,7 @@ export function RenderStatusCard({ caseId, brand: brandOverride, caseAbsPath }: 
             <Ico name="image" size={11} />
             {t("actions.rerender")}
           </button>
+          {renderFreshAiButton({ marginLeft: 8 })}
         </div>
       )}
     </div>

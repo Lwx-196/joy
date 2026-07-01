@@ -408,7 +408,8 @@ def case_source_group(case_id: int) -> dict[str, Any]:
     with db.connect() as conn:
         row = conn.execute(
             """
-            SELECT id, abs_path, customer_raw, customer_id, meta_json, skill_image_metadata_json
+            SELECT id, abs_path, customer_raw, customer_id, meta_json, skill_image_metadata_json,
+                   manual_template_tier
             FROM cases
             WHERE id = ? AND trashed_at IS NULL
             """,
@@ -444,6 +445,7 @@ def case_source_group(case_id: int) -> dict[str, Any]:
             render_feedback,
             selection_controls,
             primary_render_metadata,
+            row["manual_template_tier"] if "manual_template_tier" in row.keys() else None,
         )
     return {
         "case_id": case_id,

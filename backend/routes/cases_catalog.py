@@ -227,12 +227,7 @@ def case_detail(case_id: int) -> CaseDetail:
         meta["source_case_bindings_bound_case_ids"] = [int(item["id"]) for item in bound_rows]
     image_review_states = _image_review_states_from_meta(meta)
     if image_files:
-        active_files = set(image_files)
-        skill_image_metadata = [
-            item
-            for item in skill_image_metadata
-            if str(item.get("filename") or item.get("relative_path") or "") in active_files
-        ]
+        skill_image_metadata = _filter_active_image_metadata(skill_image_metadata, image_files)
 
     # Stage B: 合并 case_image_overrides — 手动覆盖优先于 skill 自动判读。
     with db.connect() as ov_conn:
