@@ -394,12 +394,7 @@ def _delivery_audit_from_job_meta(meta: dict[str, Any], quality: dict[str, Any] 
         "selected_slots": selected_slots,
         "dropped_slots": dropped,
         "source_provenance": meta.get("render_selection_source_provenance") if isinstance(meta.get("render_selection_source_provenance"), list) else [],
-        "quality_summary": {
-            "quality_status": quality.get("quality_status"),
-            "quality_score": quality.get("quality_score"),
-            "can_publish": bool(quality.get("can_publish")) if "can_publish" in quality else False,
-            "actionable_warning_count": ((quality.get("metrics") or {}).get("actionable_warning_count") if isinstance(quality.get("metrics"), dict) else None),
-        },
+        "quality_summary": render_quality.build_quality_summary(quality),
     }
 
 

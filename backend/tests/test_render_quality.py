@@ -1426,3 +1426,61 @@ def test_render_quality_queue_hides_stale_pose_noise_from_summary(client, seed_c
     assert resp.status_code == 200, resp.text
     item = next(row for row in resp.json()["items"] if row["job"]["id"] == job_id)
     assert item["warning_summary"] == []
+
+
+def test_build_quality_summary_blocked_carries_actionable_cause():
+    """回归：policy_blockers 逼出的 blocked 必须携带 blocking_count + blocking_issues。
+
+    之前紧凑 quality_summary 只投影 actionable_warning_count，导致 policy 拦下的板
+    在 meta_json / job 详情里呈现为「score 100 / 0 warning / 0 blocking / 却 blocked」，
+    operator 看不到阻断原因，无法处置。"""
+    quality = {
+        "quality_status": "blocked",
+        "quality_score": 100.0,
+        "can_publish": False,
+        "blocking_count": 2,
+        "metrics": {
+            "actionable_warning_count": 0,
+            "blocking_issues": [
+                "single-compare 缺少可证明的术前/术后完整信息",
+                "single-compare 缺少说明文案/项目标题",
+            ],
+        },
+    }
+    summary = rq.build_quality_summary(quality)
+    assert summary["quality_status"] == "blocked"
+    assert summary["can_publish"] is False
+    assert summary["blocking_count"] == 2
+    assert summary["blocking_issues"] == [
+        "single-compare 缺少可证明的术前/术后完整信息",
+        "single-compare 缺少说明文案/项目标题",
+    ]
+    # 核心不变量：blocked 绝不可同时 blocking_count 为空且无 blocking_issues（不可诉状态）。
+    assert not (
+        summary["quality_status"] == "blocked"
+        and not summary["blocking_count"]
+        and not summary["blocking_issues"]
+    )
+
+
+def test_build_quality_summary_clean_board_reports_zero_blocking():
+    """clean done 板：blocking_count=0 / blocking_issues=[] / can_publish=True，不误报阻断。"""
+    quality = {
+        "quality_status": "done",
+        "quality_score": 100.0,
+        "can_publish": True,
+        "blocking_count": 0,
+        "metrics": {"actionable_warning_count": 0, "blocking_issues": []},
+    }
+    summary = rq.build_quality_summary(quality)
+    assert summary["quality_status"] == "done"
+    assert summary["can_publish"] is True
+    assert summary["blocking_count"] == 0
+    assert summary["blocking_issues"] == []
+
+
+def test_build_quality_summary_tolerates_malformed_quality():
+    """None / 缺 metrics 的畸形输入不崩，blocking_issues 退化为 []（fail-safe 投影）。"""
+    assert rq.build_quality_summary(None)["blocking_issues"] == []
+    assert rq.build_quality_summary({"quality_status": "blocked"})["can_publish"] is False
+    assert rq.build_quality_summary({"metrics": "not-a-dict"})["blocking_issues"] == []

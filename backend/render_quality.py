@@ -920,6 +920,32 @@ def evaluate_render_result(result: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def build_quality_summary(quality: dict[str, Any] | None) -> dict[str, Any]:
+    """Compact quality projection embedded in ``render_jobs.meta_json`` and the
+    job-detail API response.
+
+    A ``quality_status == "blocked"`` must always travel with a visible cause.
+    Policy blockers (single-compare 信息不全 / AI 增强证据缺失 / 抠图白边 /
+    术后偏色 / 侧面尺度不一致 …) already drive ``blocking_count`` (== effective
+    blocking) and are listed in ``metrics.blocking_issues``. This projection used
+    to carry only ``actionable_warning_count``, so a policy-blocked board surfaced
+    as "score 100 / 0 warning / 0 blocking / 却 blocked" —— an unactionable state.
+    Always include ``blocking_count`` + ``blocking_issues`` so the block is
+    self-explaining wherever the compact summary is consumed.
+    """
+    quality = quality if isinstance(quality, dict) else {}
+    metrics = quality.get("metrics") if isinstance(quality.get("metrics"), dict) else {}
+    blocking_issues = metrics.get("blocking_issues")
+    return {
+        "quality_status": quality.get("quality_status"),
+        "quality_score": quality.get("quality_score"),
+        "can_publish": bool(quality.get("can_publish")) if "can_publish" in quality else False,
+        "actionable_warning_count": metrics.get("actionable_warning_count"),
+        "blocking_count": quality.get("blocking_count"),
+        "blocking_issues": list(blocking_issues) if isinstance(blocking_issues, list) else [],
+    }
+
+
 def persist_render_quality(conn: sqlite3.Connection, job_id: int, quality: dict[str, Any]) -> None:
     now = _now_iso()
     conn.execute(

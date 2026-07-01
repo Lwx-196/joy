@@ -2932,16 +2932,7 @@ class RenderQueue:
 		                                "code_version": _code_version_summary(),
 		                                "source_manifest_hash": _source_manifest_hash(result),
 		                                **job_context,
-		                                "quality_summary": {
-	                                    "quality_status": quality.get("quality_status"),
-	                                    "quality_score": quality.get("quality_score"),
-	                                    "can_publish": quality.get("can_publish"),
-	                                    "actionable_warning_count": (
-	                                        (quality.get("metrics") or {}).get("actionable_warning_count")
-	                                        if isinstance(quality.get("metrics"), dict)
-	                                        else None
-	                                    ),
-	                                },
+		                                "quality_summary": render_quality.build_quality_summary(quality),
 	                                **{
 	                                    k: result.get(k)
 	                                    for k in (
