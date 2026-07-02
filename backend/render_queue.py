@@ -249,14 +249,26 @@ def _parse_job_options(raw_meta: str | None) -> dict[str, Any]:
     return options if isinstance(options, dict) else {}
 
 
-def _resolve_ai_enhance_direction(options: dict[str, Any], render_mode: str) -> str:
+def _resolve_ai_enhance_direction(
+    options: dict[str, Any], render_mode: str, job_id: int | None = None
+) -> str:
     """Resolve AI enhancement mode while preserving explicit opt-out.
 
     `enhance_direction=""` is the contract used by manual standard render to
     disable the default AI-enhanced board path.
     """
     if "enhance_direction" in options:
-        return str(options.get("enhance_direction") or "").strip()
+        direction = str(options.get("enhance_direction") or "").strip()
+        if not direction and render_mode == "ai":
+            # 跨版本行为变更告警：main 期执行侧曾把显式 "" 回填成 heal（违背
+            # opt-out 意图烧钱）；现契约尊重 opt-out 走纯排版。遗留 job 重入时
+            # 产物从增强板变纯排版板，必须留痕可追查，不许静默。
+            LOGGER.warning(
+                "render job %s：render_mode=ai 且显式 enhance_direction=\"\"（手动标准渲染 opt-out）"
+                "→ 本次走纯排版不增强；若这是 main 期入队的遗留 job，其当年执行曾被回填 heal，重入行为已变更",
+                job_id if job_id is not None else "?",
+            )
+        return direction
     if render_mode == "ai":
         return "heal"
     return ""
@@ -2511,7 +2523,7 @@ class RenderQueue:
             # 补上默认值，确保不会静默退化成纯排版。
             _job_options = _parse_job_options(row["meta_json"] if "meta_json" in row.keys() else None)
             render_mode = row["render_mode"] if "render_mode" in row.keys() else "ai"
-            ai_enhance_direction = _resolve_ai_enhance_direction(_job_options, render_mode)
+            ai_enhance_direction = _resolve_ai_enhance_direction(_job_options, render_mode, job_id=job_id)
             ai_enhance_model = str(_job_options.get("enhance_model") or "").strip()
             ai_no_cache = bool(_job_options.get("no_cache"))
             # F2（frugal-cache-guard）：用户在确认卡点「确认出图」后，路由把 confirm_burn 译成

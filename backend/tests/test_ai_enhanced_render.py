@@ -1328,3 +1328,19 @@ def test_runtime_resolve_explicit_empty_direction_disables_ai_enhance():
 
 def test_runtime_resolve_missing_direction_defaults_heal_for_ai_mode():
     assert render_queue._resolve_ai_enhance_direction({}, "ai") == "heal"
+
+
+def test_runtime_resolve_explicit_empty_direction_warns_with_job_id(caplog):
+    """遗留 job 重入语义变更（main 期 "" 被回填 heal → 现走纯排版）必须留告警可追查。"""
+    with caplog.at_level("WARNING", logger=render_queue.LOGGER.name):
+        direction = render_queue._resolve_ai_enhance_direction(
+            {"enhance_direction": ""}, "ai", job_id=810
+        )
+    assert direction == ""
+    assert any("810" in record.getMessage() and "opt-out" in record.getMessage() for record in caplog.records)
+
+
+def test_runtime_resolve_missing_direction_backfill_does_not_warn(caplog):
+    with caplog.at_level("WARNING", logger=render_queue.LOGGER.name):
+        assert render_queue._resolve_ai_enhance_direction({}, "ai", job_id=1) == "heal"
+    assert not caplog.records
