@@ -23,8 +23,11 @@ export const resolveFreshAiRenderTemplate = (
   renderableSlotCount: number | null | undefined,
   latestJobTemplate: string | null | undefined,
 ): string => (
-  compareTemplateFromRenderableSlotCount(renderableSlotCount) ??
+  // effectiveTemplate = 后端 preflight effective_template_hint（manual_template_tier
+  // 优先于槽位数推断的契约在后端已生效）；槽位数只在无 tier 时兜底，否则手选
+  // 模板会被（可能来自 stale job 计数的）槽位推断顶掉，与标准出图按钮漂移。
   compareTemplateFromTier(effectiveTemplate) ??
+  compareTemplateFromRenderableSlotCount(renderableSlotCount) ??
   compareTemplateFromTier(latestJobTemplate) ??
   "tri-compare"
 );

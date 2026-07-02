@@ -41,12 +41,18 @@ describe("case detail render payload", () => {
     expect(compareTemplateFromRenderableSlotCount(0)).toBeNull();
   });
 
-  it("uses current renderable slots for fresh AI instead of stale templates", () => {
-    expect(resolveFreshAiRenderTemplate("single-compare", 2, "single-compare")).toBe("bi-compare");
+  it("honors effective template tier over slot inference (backend manual_template_tier contract)", () => {
+    // effectiveTemplate 来自活的 preflight effective_template_hint，后端已按
+    // manual_template_tier > 槽位推断定序；fresh-AI 按钮不得用槽位数反超手选模板。
+    expect(resolveFreshAiRenderTemplate("single-compare", 2, "single-compare")).toBe("single-compare");
     expect(resolveFreshAiRenderTemplate("bi-compare", 2, "single-compare")).toBe("bi-compare");
-    expect(resolveFreshAiRenderTemplate("tri-compare", 2, "tri-compare")).toBe("bi-compare");
+    expect(resolveFreshAiRenderTemplate("tri-compare", 2, "tri-compare")).toBe("tri-compare");
+  });
+
+  it("falls back to renderable slots then latest job template when no effective tier", () => {
     expect(resolveFreshAiRenderTemplate(null, 2, "single-compare")).toBe("bi-compare");
     expect(resolveFreshAiRenderTemplate(null, 0, "single-compare")).toBe("single-compare");
+    expect(resolveFreshAiRenderTemplate(null, 0, null)).toBe("tri-compare");
   });
 
   it("uses current renderable slots for fresh AI cost instead of stale generated artifacts", () => {
