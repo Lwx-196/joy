@@ -420,6 +420,9 @@ def _ai_evidence_policy(result: dict[str, Any], ai_usage: dict[str, Any]) -> dic
         _truthy(result.get("require_fresh_ai_enhancement"))
         or _truthy(ai_usage.get("require_fresh_ai_enhancement"))
         or _truthy(ai_usage.get("require_external_ai_call"))
+        # 执行器以 no_cache 重新出图时写 cache_disabled（render_executor ai_usage）——
+        # 用户既然要求绕缓存，成品必须携带真实外部调用证据，否则说明缓存泄漏。
+        or _truthy(ai_usage.get("cache_disabled"))
     )
     generated_count = _int_value(
         ai_usage.get("enhanced_artifact_count")
@@ -442,6 +445,8 @@ def _ai_evidence_policy(result: dict[str, Any], ai_usage: dict[str, Any]) -> dic
     if external_count > 0:
         evidence.append("external_call_count")
         fresh_evidence.append("external_call_count")
+    if _truthy(ai_usage.get("fresh_ai_call")):
+        fresh_evidence.append("fresh_ai_call")
     provider_counts = evidence_payload.get("provider_counts")
     if isinstance(provider_counts, dict):
         for provider, count in provider_counts.items():

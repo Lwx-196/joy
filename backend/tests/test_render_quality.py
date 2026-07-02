@@ -1020,6 +1020,82 @@ def test_fresh_ai_enhancement_blocks_when_only_cache_evidence(tmp_path, monkeypa
     assert quality["metrics"]["formal_ai_enhancement_gate"] == "missing_external_call_evidence"
 
 
+def test_fresh_gate_required_by_executor_cache_disabled(tmp_path, monkeypatch):
+    """no_cache 重出的 job 只带缓存证据 → fresh gate 必须拦（执行器 cache_disabled 接线）。"""
+    output = tmp_path / "final-board.jpg"
+    output.write_bytes(b"jpeg")
+    monkeypatch.setattr(
+        rq,
+        "compute_pixel_metrics",
+        lambda _path: {"available": True, "flags": [], "cv_penalty": 0.0},
+    )
+
+    quality = evaluate_render_result(
+        {
+            "output_path": str(output),
+            "status": "done",
+            "case_mode": "ai_enhanced_board",
+            "enhance": {"direction": "heal", "model": "gemini-3-pro-image"},
+            "blocking_issue_count": 0,
+            "warning_count": 0,
+            "ai_usage": {
+                "formal_ai_enhancement_run": True,
+                "used_after_enhancement": True,
+                "generated_artifact_count": 2,
+                "cache_hit_count": 2,
+                "cache_disabled": True,
+                "fresh_ai_call": False,
+                "enhancement_evidence": {
+                    "generated_count": 2,
+                    "cache_hit_count": 2,
+                    "external_call_count": 0,
+                    "provider_counts": {"cache": 2},
+                },
+            },
+        }
+    )
+
+    assert quality["quality_status"] == "blocked"
+    assert quality["metrics"]["fresh_ai_enhancement_required"] is True
+    assert quality["metrics"]["fresh_ai_enhancement_verified"] is False
+    assert quality["metrics"]["formal_ai_enhancement_gate"] == "missing_external_call_evidence"
+
+
+def test_fresh_gate_accepts_executor_fresh_ai_call_evidence(tmp_path, monkeypatch):
+    """cache_disabled 重出且执行器标记 fresh_ai_call → 即使计数字段缺失也应放行。"""
+    output = tmp_path / "final-board.jpg"
+    output.write_bytes(b"jpeg")
+    monkeypatch.setattr(
+        rq,
+        "compute_pixel_metrics",
+        lambda _path: {"available": True, "flags": [], "cv_penalty": 0.0},
+    )
+
+    quality = evaluate_render_result(
+        {
+            "output_path": str(output),
+            "status": "done",
+            "case_mode": "ai_enhanced_board",
+            "enhance": {"direction": "heal", "model": "gemini-3-pro-image"},
+            "blocking_issue_count": 0,
+            "warning_count": 0,
+            "ai_usage": {
+                "formal_ai_enhancement_run": True,
+                "used_after_enhancement": True,
+                "generated_artifact_count": 2,
+                "cache_disabled": True,
+                "fresh_ai_call": True,
+            },
+        }
+    )
+
+    assert quality["quality_status"] == "done"
+    assert quality["metrics"]["fresh_ai_enhancement_required"] is True
+    assert quality["metrics"]["fresh_ai_enhancement_verified"] is True
+    assert quality["metrics"]["formal_ai_enhancement_gate"] == "verified"
+    assert "fresh_ai_call" in quality["metrics"]["fresh_ai_enhancement_evidence"]
+
+
 def test_render_quality_review_updates_row(client, seed_case):
     case_id = seed_case(abs_path="/tmp/case-quality")
     from backend import db
