@@ -880,6 +880,49 @@ def test_render_ai_enhanced_boards_does_not_reuse_vlm_proxy_key_for_ai_studio(tm
     assert "GEMINI_API_KEY" not in env
 
 
+def test_render_ai_enhanced_boards_warns_when_ai_studio_has_no_credential(tmp_path, monkeypatch, caplog):
+    """ai_studio 腿无 key 不许静默降级——必须给出配置级根因告警（review finding 8）。"""
+    script = Path(__file__).resolve().parents[1] / "scripts" / "render_ai_enhanced_boards.py"
+    spec = importlib.util.spec_from_file_location("render_ai_enhanced_boards", script)
+    module = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    spec.loader.exec_module(module)
+
+    env_file = tmp_path / "t52_vlm_judge.local.env"
+    env_file.write_text(
+        "CASE_WORKBENCH_VLM_JUDGE_API_KEY=flashapi-proxy-key\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("GOOGLE_GENAI_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.setattr(module, "_find_env_file", lambda filename: env_file if filename == "t52_vlm_judge.local.env" else None)
+
+    with caplog.at_level("WARNING", logger=module.logger.name):
+        module._load_all_provider_envs(["ai_studio"])
+
+    assert any("ai_studio 腿无可用凭证" in record.getMessage() for record in caplog.records)
+
+
+def test_render_ai_enhanced_boards_no_credential_warning_when_key_present(tmp_path, monkeypatch, caplog):
+    script = Path(__file__).resolve().parents[1] / "scripts" / "render_ai_enhanced_boards.py"
+    spec = importlib.util.spec_from_file_location("render_ai_enhanced_boards", script)
+    module = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    spec.loader.exec_module(module)
+
+    env_file = tmp_path / "t52_vlm_judge.local.env"
+    env_file.write_text("GOOGLE_GENAI_API_KEY=real-key\n", encoding="utf-8")
+    monkeypatch.delenv("GOOGLE_GENAI_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.setattr(module, "_find_env_file", lambda filename: env_file if filename == "t52_vlm_judge.local.env" else None)
+
+    with caplog.at_level("WARNING", logger=module.logger.name):
+        env = module._load_all_provider_envs(["ai_studio"])
+
+    assert env["GOOGLE_GENAI_API_KEY"] == "real-key"
+    assert not any("ai_studio 腿无可用凭证" in record.getMessage() for record in caplog.records)
+
+
 def test_render_ai_enhanced_single_case_entrypoint_accepts_case_root_and_treatment_dir(tmp_path):
     module = _load_ai_enhance_script_module()
 

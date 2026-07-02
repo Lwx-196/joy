@@ -318,6 +318,16 @@ def _load_all_provider_envs(provider_order: list[str]) -> dict[str, str]:
                 value = raw.get(key) or os.environ.get(key)
                 if value:
                     merged[key] = value
+            if not (merged.get("GOOGLE_GENAI_API_KEY") or merged.get("GEMINI_API_KEY")):
+                # t52 env 的 CASE_WORKBENCH_VLM_JUDGE_API_KEY 是 VLM judge 代理 key，
+                # 对 Google AI Studio 是无效凭证，刻意不复用（见 non-reuse 测试）。
+                # 这里必须把配置级根因喊出来，否则只能看到下游 provider 调用失败。
+                logger.warning(
+                    "ai_studio 腿无可用凭证：%s 与进程环境均未提供 "
+                    "GOOGLE_GENAI_API_KEY/GEMINI_API_KEY（VLM judge 代理 key 不复用）"
+                    "→ ai_studio 将无凭证降级到后续 provider",
+                    env_path,
+                )
             continue
         remap_prefix = PROVIDER_PREFIX_REMAP.get(name)
         if remap_prefix:
