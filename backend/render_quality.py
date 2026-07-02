@@ -1040,6 +1040,7 @@ def backfill_existing_render_quality(conn: sqlite3.Connection) -> int:
         meta = _json_load(row["meta_json"], {})
         result = {
             "output_path": row["output_path"],
+            "manifest_path": row["manifest_path"] or meta.get("manifest_path"),
             "status": meta.get("status") or row["status"],
             "requested_template": row["template"],
             "template": row["template"],
@@ -1051,10 +1052,18 @@ def backfill_existing_render_quality(conn: sqlite3.Connection) -> int:
         }
         quality = evaluate_render_result(result)
         persist_render_quality(conn, row["id"], quality)
-        if row["status"] == "done" and quality["quality_status"] != "done":
+        demote = row["status"] == "done" and quality["quality_status"] != "done"
+        if demote and quality_id is not None and not _manifest_dict(_resolve_manifest_path(result)):
+            # 版本门重评的输入重建自 meta_json；manifest 不可解析时配对/标题元数据缺失，
+            # policy 门会把缺数据误判成违规。有损重评只刷新 quality 行，不对历史 done 板
+            # 单向降级（降级无提升回路，留给真渲染或显式 recompute）。
+            demote = False
+        if demote:
             conn.execute(
                 "UPDATE render_jobs SET status = ? WHERE id = ?",
                 (quality["quality_status"], row["id"]),
             )
         count += 1
+        # 逐行 commit：后台线程跑版本门全量重评时不长持 SQLite 写锁
+        conn.commit()
     return count

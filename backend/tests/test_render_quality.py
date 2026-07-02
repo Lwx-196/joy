@@ -34,15 +34,17 @@ def test_backfill_recomputes_stale_quality_version(temp_db, seed_case, tmp_path,
     now = datetime.now(timezone.utc).isoformat()
     final_board = tmp_path / "final-board.jpg"
     Image.new("RGB", (64, 64), (24, 24, 24)).save(final_board, "JPEG")
+    manifest = tmp_path / "manifest.final.json"
+    manifest.write_text(json.dumps({"slots": []}, ensure_ascii=False), encoding="utf-8")
     with db.connect() as conn:
         job_id = conn.execute(
             """
             INSERT INTO render_jobs
               (case_id, brand, template, status, enqueued_at, finished_at, output_path,
-               semantic_judge, meta_json)
-            VALUES (?, 'fumei', 'tri-compare', 'done', ?, ?, ?, 'off', '{}')
+               manifest_path, semantic_judge, meta_json)
+            VALUES (?, 'fumei', 'tri-compare', 'done', ?, ?, ?, ?, 'off', '{}')
             """,
-            (case_id, now, now, str(final_board)),
+            (case_id, now, now, str(final_board), str(manifest)),
         ).lastrowid
         conn.execute(
             """
@@ -83,9 +85,113 @@ def test_backfill_recomputes_stale_quality_version(temp_db, seed_case, tmp_path,
         jrow = conn.execute("SELECT status FROM render_jobs WHERE id = ?", (job_id,)).fetchone()
 
     assert calls and calls[0]["output_path"] == str(final_board)
+    assert calls[0]["manifest_path"] == str(manifest)
     assert qrow["quality_status"] == "blocked"
     assert qrow["can_publish"] == 0
     assert json.loads(qrow["metrics_json"])["quality_evaluation_version"] == rq.QUALITY_EVALUATION_VERSION
+    assert jrow["status"] == "blocked"
+
+
+def test_backfill_lossy_reeval_refreshes_quality_without_demoting_done(
+    temp_db, seed_case, tmp_path, monkeypatch
+):
+    from backend import db
+
+    case_id = seed_case(abs_path="/tmp/case-lossy-reeval", customer_raw="小损")
+    now = datetime.now(timezone.utc).isoformat()
+    final_board = tmp_path / "final-board.jpg"
+    Image.new("RGB", (64, 64), (24, 24, 24)).save(final_board, "JPEG")
+    # manifest_path 列为 NULL 且目录无 manifest.final.json = 有损重评输入
+    with db.connect() as conn:
+        job_id = conn.execute(
+            """
+            INSERT INTO render_jobs
+              (case_id, brand, template, status, enqueued_at, finished_at, output_path,
+               semantic_judge, meta_json)
+            VALUES (?, 'fumei', 'tri-compare', 'done', ?, ?, ?, 'off', '{}')
+            """,
+            (case_id, now, now, str(final_board)),
+        ).lastrowid
+        conn.execute(
+            """
+            INSERT INTO render_quality
+              (render_job_id, quality_status, quality_score, can_publish, artifact_mode,
+               manifest_status, blocking_count, warning_count, metrics_json, created_at, updated_at)
+            VALUES (?, 'done', 100, 1, 'real_layout', 'done', 0, 0, ?, ?, ?)
+            """,
+            (job_id, json.dumps({"quality_evaluation_version": 0}, ensure_ascii=False), now, now),
+        )
+
+    def _blocked_quality(result: dict) -> dict:
+        return {
+            "quality_status": "blocked",
+            "quality_score": 40.0,
+            "can_publish": False,
+            "artifact_mode": "real_layout",
+            "manifest_status": "done",
+            "blocking_count": 1,
+            "warning_count": 0,
+            "metrics": {
+                "quality_evaluation_version": rq.QUALITY_EVALUATION_VERSION,
+                "policy_blockers": ["missing pair metadata"],
+            },
+        }
+
+    monkeypatch.setattr(rq, "evaluate_render_result", _blocked_quality)
+
+    with db.connect() as conn:
+        assert rq.backfill_existing_render_quality(conn) == 1
+        qrow = conn.execute(
+            "SELECT quality_status, metrics_json FROM render_quality WHERE render_job_id = ?",
+            (job_id,),
+        ).fetchone()
+        jrow = conn.execute("SELECT status FROM render_jobs WHERE id = ?", (job_id,)).fetchone()
+
+    # quality 行照常刷新到新版本/新裁决，但历史 done 板不因有损输入被单向降级
+    assert qrow["quality_status"] == "blocked"
+    assert json.loads(qrow["metrics_json"])["quality_evaluation_version"] == rq.QUALITY_EVALUATION_VERSION
+    assert jrow["status"] == "done"
+
+
+def test_backfill_first_time_row_still_demotes_without_manifest(
+    temp_db, seed_case, tmp_path, monkeypatch
+):
+    from backend import db
+
+    case_id = seed_case(abs_path="/tmp/case-first-time-demote", customer_raw="小初")
+    now = datetime.now(timezone.utc).isoformat()
+    final_board = tmp_path / "final-board.jpg"
+    Image.new("RGB", (64, 64), (24, 24, 24)).save(final_board, "JPEG")
+    with db.connect() as conn:
+        job_id = conn.execute(
+            """
+            INSERT INTO render_jobs
+              (case_id, brand, template, status, enqueued_at, finished_at, output_path,
+               semantic_judge, meta_json)
+            VALUES (?, 'fumei', 'tri-compare', 'done', ?, ?, ?, 'off', '{}')
+            """,
+            (case_id, now, now, str(final_board)),
+        ).lastrowid
+
+    def _blocked_quality(result: dict) -> dict:
+        return {
+            "quality_status": "blocked",
+            "quality_score": 40.0,
+            "can_publish": False,
+            "artifact_mode": "real_layout",
+            "manifest_status": "done",
+            "blocking_count": 1,
+            "warning_count": 0,
+            "metrics": {"quality_evaluation_version": rq.QUALITY_EVALUATION_VERSION},
+        }
+
+    monkeypatch.setattr(rq, "evaluate_render_result", _blocked_quality)
+
+    with db.connect() as conn:
+        assert rq.backfill_existing_render_quality(conn) == 1
+        jrow = conn.execute("SELECT status FROM render_jobs WHERE id = ?", (job_id,)).fetchone()
+
+    # 首评（此前无 quality 行）保持 main 语义：照常降级
     assert jrow["status"] == "blocked"
 
 

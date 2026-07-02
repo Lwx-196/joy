@@ -1,6 +1,9 @@
 """FastAPI entrypoint for case-workbench Phase 1."""
 from __future__ import annotations
 
+import logging
+import threading
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -19,8 +22,23 @@ app.add_middleware(
 )
 
 db.init_schema()
-with db.connect() as _conn:
-    render_quality.backfill_existing_render_quality(_conn)
+
+
+def _backfill_render_quality_async() -> None:
+    # 版本门重评在 bump 后是全库 CV 扫描（数百板），同步跑会阻塞服务启动几十分钟；
+    # backfill 内部逐行 commit，后台线程不长持写锁。
+    try:
+        with db.connect() as conn:
+            count = render_quality.backfill_existing_render_quality(conn)
+        if count:
+            logging.getLogger(__name__).info("render_quality backfill 完成：%s 行", count)
+    except Exception:
+        logging.getLogger(__name__).exception("render_quality backfill 后台线程失败")
+
+
+threading.Thread(
+    target=_backfill_render_quality_async, name="render-quality-backfill", daemon=True
+).start()
 RENDER_QUEUE.recover()
 UPGRADE_QUEUE.recover()
 
