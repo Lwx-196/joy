@@ -428,7 +428,7 @@ def test_ai_board_done_status_is_clean_when_only_light_pixel_signal(tmp_path, mo
     monkeypatch.setattr(
         rq,
         "compute_pixel_metrics",
-        lambda _path: {
+        lambda _path, **_: {
             "available": True,
             "flags": ["cutout_artifact"],
             "cv_penalty": 12.5,
@@ -458,7 +458,7 @@ def test_render_quality_blocks_workbench_staging_title(tmp_path, monkeypatch):
     monkeypatch.setattr(
         rq,
         "compute_pixel_metrics",
-        lambda _path: {"available": True, "flags": [], "cv_penalty": 0.0},
+        lambda _path, **_: {"available": True, "flags": [], "cv_penalty": 0.0},
     )
 
     quality = evaluate_render_result(
@@ -491,7 +491,7 @@ def test_render_quality_blocks_bound_staging_without_title_context(tmp_path, mon
     monkeypatch.setattr(
         rq,
         "compute_pixel_metrics",
-        lambda _path: {"available": True, "flags": [], "cv_penalty": 0.0},
+        lambda _path, **_: {"available": True, "flags": [], "cv_penalty": 0.0},
     )
 
     quality = evaluate_render_result(
@@ -531,7 +531,7 @@ def test_render_quality_blocks_stage_token_in_project_title(tmp_path, monkeypatc
     monkeypatch.setattr(
         rq,
         "compute_pixel_metrics",
-        lambda _path: {"available": True, "flags": [], "cv_penalty": 0.0},
+        lambda _path, **_: {"available": True, "flags": [], "cv_penalty": 0.0},
     )
 
     quality = evaluate_render_result(
@@ -570,7 +570,7 @@ def test_render_quality_allows_source_treatment_stage_token_when_board_title_cle
     monkeypatch.setattr(
         rq,
         "compute_pixel_metrics",
-        lambda _path: {"available": True, "flags": [], "cv_penalty": 0.0},
+        lambda _path, **_: {"available": True, "flags": [], "cv_penalty": 0.0},
     )
 
     quality = evaluate_render_result(
@@ -613,7 +613,7 @@ def test_render_quality_blocks_postop_cyan_cast_pixel_flag(tmp_path, monkeypatch
     monkeypatch.setattr(
         rq,
         "compute_pixel_metrics",
-        lambda _path: {
+        lambda _path, **_: {
             "available": True,
             "flags": ["postop_cyan_cast"],
             "cv_penalty": 10.0,
@@ -688,7 +688,7 @@ def test_render_quality_blocks_side_source_scale_mismatch_from_inferred_manifest
     monkeypatch.setattr(
         rq,
         "compute_pixel_metrics",
-        lambda _path: {"available": True, "flags": [], "cv_penalty": 0.0},
+        lambda _path, **_: {"available": True, "flags": [], "cv_penalty": 0.0},
     )
 
     quality = evaluate_render_result(
@@ -706,6 +706,38 @@ def test_render_quality_blocks_side_source_scale_mismatch_from_inferred_manifest
     assert quality["can_publish"] is False
     assert quality["metrics"]["source_scale_policy"]["status"] == "blocked"
     assert any("侧面对比人物尺度不一致" in item for item in quality["metrics"]["policy_blockers"])
+
+
+def test_pixel_metrics_receive_manifest_closeup_section_flag(tmp_path, monkeypatch):
+    """manifest 带 G3 closeup_section → compute_pixel_metrics 必须收到 has_closeup_section=True。"""
+    render_dir = tmp_path / "render"
+    render_dir.mkdir()
+    output = render_dir / "final-board.jpg"
+    output.write_bytes(b"jpeg")
+    (render_dir / "manifest.final.json").write_text(
+        json.dumps({"closeup_section": {"region": "川字纹", "slots": []}}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    seen: dict = {}
+
+    def _fake_pixel_metrics(_path, **kwargs):
+        seen.update(kwargs)
+        return {"available": True, "flags": [], "cv_penalty": 0.0}
+
+    monkeypatch.setattr(rq, "compute_pixel_metrics", _fake_pixel_metrics)
+
+    evaluate_render_result(
+        {
+            "output_path": str(output),
+            "manifest_path": str(render_dir / "manifest.final.json"),
+            "status": "done",
+            "blocking_issue_count": 0,
+            "warning_count": 0,
+            "ai_usage": {},
+        }
+    )
+
+    assert seen.get("has_closeup_section") is True
 
 
 def test_source_scale_policy_skips_pair_when_source_image_missing(tmp_path, monkeypatch):
@@ -748,7 +780,7 @@ def test_source_scale_policy_skips_pair_when_source_image_missing(tmp_path, monk
     monkeypatch.setattr(
         rq,
         "compute_pixel_metrics",
-        lambda _path: {"available": True, "flags": [], "cv_penalty": 0.0},
+        lambda _path, **_: {"available": True, "flags": [], "cv_penalty": 0.0},
     )
 
     quality = evaluate_render_result(
@@ -776,7 +808,7 @@ def test_bi_compare_blocks_cutout_penalty_at_policy_ceiling(tmp_path, monkeypatc
     monkeypatch.setattr(
         rq,
         "compute_pixel_metrics",
-        lambda _path: {
+        lambda _path, **_: {
             "available": True,
             "flags": ["cutout_artifact"],
             "cv_penalty": 15.0,
@@ -814,7 +846,7 @@ def test_bi_compare_blocks_side_scale_mismatch_cv_flag(tmp_path, monkeypatch):
     monkeypatch.setattr(
         rq,
         "compute_pixel_metrics",
-        lambda _path: {
+        lambda _path, **_: {
             "available": True,
             "flags": ["side_scale_mismatch"],
             "cv_penalty": 12.0,
@@ -854,7 +886,7 @@ def test_ai_board_blocks_combined_cutout_and_blank_region(tmp_path, monkeypatch)
     monkeypatch.setattr(
         rq,
         "compute_pixel_metrics",
-        lambda _path: {
+        lambda _path, **_: {
             "available": True,
             "flags": ["cutout_artifact", "blank_region"],
             "cv_penalty": 14.8,
@@ -892,7 +924,7 @@ def test_bi_compare_can_publish_under_template_policy(tmp_path, monkeypatch):
     monkeypatch.setattr(
         rq,
         "compute_pixel_metrics",
-        lambda _path: {"available": True, "flags": [], "cv_penalty": 5.0},
+        lambda _path, **_: {"available": True, "flags": [], "cv_penalty": 5.0},
     )
 
     quality = evaluate_render_result(
@@ -922,7 +954,7 @@ def test_single_compare_blocks_without_info_or_copy(tmp_path, monkeypatch):
     monkeypatch.setattr(
         rq,
         "compute_pixel_metrics",
-        lambda _path: {"available": True, "flags": [], "cv_penalty": 3.0},
+        lambda _path, **_: {"available": True, "flags": [], "cv_penalty": 3.0},
     )
 
     quality = evaluate_render_result(
@@ -950,7 +982,7 @@ def test_single_compare_can_publish_with_strict_policy(tmp_path, monkeypatch):
     monkeypatch.setattr(
         rq,
         "compute_pixel_metrics",
-        lambda _path: {"available": True, "flags": [], "cv_penalty": 6.0},
+        lambda _path, **_: {"available": True, "flags": [], "cv_penalty": 6.0},
     )
 
     quality = evaluate_render_result(
@@ -980,7 +1012,7 @@ def test_formal_ai_enhancement_requires_real_evidence(tmp_path, monkeypatch):
     monkeypatch.setattr(
         rq,
         "compute_pixel_metrics",
-        lambda _path: {"available": True, "flags": [], "cv_penalty": 4.0},
+        lambda _path, **_: {"available": True, "flags": [], "cv_penalty": 4.0},
     )
 
     quality = evaluate_render_result(
@@ -1008,7 +1040,7 @@ def test_formal_ai_enhancement_with_cache_evidence_can_publish(tmp_path, monkeyp
     monkeypatch.setattr(
         rq,
         "compute_pixel_metrics",
-        lambda _path: {"available": True, "flags": [], "cv_penalty": 4.0},
+        lambda _path, **_: {"available": True, "flags": [], "cv_penalty": 4.0},
     )
 
     quality = evaluate_render_result(
@@ -1047,7 +1079,7 @@ def test_fresh_ai_enhancement_blocks_when_only_cache_evidence(tmp_path, monkeypa
     monkeypatch.setattr(
         rq,
         "compute_pixel_metrics",
-        lambda _path: {"available": True, "flags": [], "cv_penalty": 4.0},
+        lambda _path, **_: {"available": True, "flags": [], "cv_penalty": 4.0},
     )
 
     quality = evaluate_render_result(
@@ -1089,7 +1121,7 @@ def test_fresh_gate_required_by_executor_cache_disabled(tmp_path, monkeypatch):
     monkeypatch.setattr(
         rq,
         "compute_pixel_metrics",
-        lambda _path: {"available": True, "flags": [], "cv_penalty": 0.0},
+        lambda _path, **_: {"available": True, "flags": [], "cv_penalty": 0.0},
     )
 
     quality = evaluate_render_result(
@@ -1130,7 +1162,7 @@ def test_fresh_gate_accepts_executor_fresh_ai_call_evidence(tmp_path, monkeypatc
     monkeypatch.setattr(
         rq,
         "compute_pixel_metrics",
-        lambda _path: {"available": True, "flags": [], "cv_penalty": 0.0},
+        lambda _path, **_: {"available": True, "flags": [], "cv_penalty": 0.0},
     )
 
     quality = evaluate_render_result(

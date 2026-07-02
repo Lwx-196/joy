@@ -44,11 +44,14 @@ _TILE_SIZE = 8
 _EDGE_MAX_SIDE = 256
 
 
-def compute_pixel_metrics(board_path: str | None) -> dict[str, Any]:
+def compute_pixel_metrics(board_path: str | None, *, has_closeup_section: bool = False) -> dict[str, Any]:
     """Compute low-cost CV telemetry for a rendered board image.
 
     Failure is fail-open on the signal side: unavailable metrics contribute no
     penalty and no flags. D6 remains the delivery recall gate.
+
+    has_closeup_section: manifest 带 G3 纹类近景对比区（板尾追加行，非配对行），
+    side 尺度检测需把板尾行剔除。
     """
     if not board_path:
         return _unavailable("missing_path")
@@ -68,7 +71,7 @@ def compute_pixel_metrics(board_path: str | None) -> dict[str, Any]:
         photo_boxes = _photo_panel_boxes(image)
         cutout_boxes = photo_boxes or cell_boxes
         postop_skin_cast = _postop_skin_cast_metrics(image, photo_boxes)
-        side_scale_mismatch = _side_scale_mismatch_metrics(image, photo_boxes)
+        side_scale_mismatch = _side_scale_mismatch_metrics(image, photo_boxes, has_closeup_section=has_closeup_section)
 
         cell_fill_ratios = [_cell_fill_ratio(image.crop(box)) for box in cell_boxes]
         min_cell_fill_ratio = min(cell_fill_ratios) if cell_fill_ratios else 1.0
@@ -518,6 +521,8 @@ def _postop_skin_cast_metrics(
 def _side_scale_mismatch_metrics(
     image: Image.Image,
     photo_boxes: list[tuple[int, int, int, int]],
+    *,
+    has_closeup_section: bool = False,
 ) -> dict[str, Any]:
     result: dict[str, Any] = {
         "evaluated": False,
@@ -533,6 +538,10 @@ def _side_scale_mismatch_metrics(
         result["reason"] = "numpy_unavailable" if np is None else "no_photo_panels"
         return result
     rows = _photo_cell_rows(_photo_panel_cells(photo_boxes))
+    if has_closeup_section and rows:
+        # G3 近景对比区渲在板尾追加一行（manifest.closeup_section），是同一人
+        # 术前/术后局部特写而非 side 配对——留在候选里会顶替真 side 行被误测。
+        rows = sorted(rows, key=lambda row: _row_center_y(row))[:-1]
     if len(rows) < 2:
         return result
     side_row = sorted(rows, key=lambda row: _row_center_y(row))[-1]

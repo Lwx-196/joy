@@ -256,6 +256,67 @@ def test_balanced_side_scale_does_not_flag(tmp_path: Path) -> None:
     assert metrics["side_scale_mismatch"]["flagged"] is False
 
 
+def _draw_subject_cell(draw: ImageDraw.ImageDraw, box: tuple[int, int, int, int], *, scale: float = 1.0) -> None:
+    x0, y0, x1, y1 = box
+    draw.rectangle(box, fill=(0, 0, 0))
+    face_w = int((x1 - x0) * 0.44 * scale)
+    face_h = int((y1 - y0) * 0.32 * scale)
+    fx0 = x0 + 16
+    fy0 = y0 + 30
+    draw.ellipse((fx0, fy0, fx0 + face_w, fy0 + face_h), fill=(178, 136, 112))
+    draw.rectangle((fx0 + 6, fy0 + face_h // 2, fx0 + face_w - 4, fy0 + face_h + 40), fill=(178, 136, 112))
+
+
+def _closeup_tail_board(path: Path, *, row_count: int = 3) -> list[tuple[int, int, int, int]]:
+    """front(/side) 配对行均衡 + 板尾近景行故意尺度悬殊（模拟 G3 特写裁剪）。"""
+    image = Image.new("RGB", (720, 80 + row_count * 320), (234, 228, 220))
+    draw = ImageDraw.Draw(image)
+    boxes: list[tuple[int, int, int, int]] = []
+    for row_idx in range(row_count):
+        y0 = 80 + row_idx * 320
+        for col_idx, x0 in enumerate((80, 400)):
+            box = (x0, y0, x0 + 240, y0 + 250)
+            scale = 1.45 if row_idx == row_count - 1 and col_idx == 1 else 1.0
+            _draw_subject_cell(draw, box, scale=scale)
+            boxes.append(box)
+    image.save(path)
+    return boxes
+
+
+def test_side_scale_skips_closeup_tail_row_when_manifest_flags_it(tmp_path: Path) -> None:
+    """G3 近景行在板尾：不带 flag 时被误测出假 mismatch；带 flag 时评真 side 行不误拦。"""
+    path = tmp_path / "closeup-tail.jpg"
+    boxes = _closeup_tail_board(path, row_count=3)
+    with Image.open(path) as opened:
+        image = opened.convert("RGB")
+
+    legacy = rpm._side_scale_mismatch_metrics(image, boxes)
+    assert legacy["evaluated"] is True
+    assert legacy["flagged"] is True  # 旧行为回归锚：近景行被当 side 配对误测
+
+    fixed = rpm._side_scale_mismatch_metrics(image, boxes, has_closeup_section=True)
+    assert fixed["evaluated"] is True
+    assert fixed["flagged"] is False
+    # 选中的必须是真 side 行（第二行 y∈[400,650]），而非板尾近景行
+    assert 400 <= fixed["before_box"][1] < 650
+
+
+def test_side_scale_closeup_tail_without_side_row_fails_open(tmp_path: Path) -> None:
+    """单配对行 + 板尾近景行：剔除近景后无 side 行可评 → fail-open 不评。"""
+    path = tmp_path / "closeup-tail-2row.jpg"
+    boxes = _closeup_tail_board(path, row_count=2)
+    with Image.open(path) as opened:
+        image = opened.convert("RGB")
+
+    legacy = rpm._side_scale_mismatch_metrics(image, boxes)
+    assert legacy["flagged"] is True  # 旧行为：近景行顶替配对行被误拦
+
+    fixed = rpm._side_scale_mismatch_metrics(image, boxes, has_closeup_section=True)
+    assert fixed["evaluated"] is False
+    assert fixed["flagged"] is False
+    assert fixed["reason"] == "no_evaluable_side_pair"
+
+
 def test_t253_real_case33_side_scale_mismatch_is_flagged() -> None:
     board = Path("/Users/a1234/Desktop/T252-case33-欧美吟-freshAI-accepted-20260629/case33-job1057-final-board.jpg")
     assert board.is_file()

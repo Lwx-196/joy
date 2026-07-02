@@ -728,7 +728,12 @@ def evaluate_render_result(result: dict[str, Any]) -> dict[str, Any]:
     if resolved_manifest_path and resolved_manifest_path != result.get("manifest_path"):
         result = {**result, "manifest_path": resolved_manifest_path}
     output_exists = bool(output_path and Path(str(output_path)).is_file())
-    pixel_metrics = compute_pixel_metrics(str(output_path)) if output_exists else {"available": False, "flags": [], "cv_penalty": 0.0}
+    has_closeup_section = bool(_manifest_dict(result.get("manifest_path")).get("closeup_section"))
+    pixel_metrics = (
+        compute_pixel_metrics(str(output_path), has_closeup_section=has_closeup_section)
+        if output_exists
+        else {"available": False, "flags": [], "cv_penalty": 0.0}
+    )
     ai_usage = result.get("ai_usage") or {}
     if not isinstance(ai_usage, dict):
         ai_usage = {}
