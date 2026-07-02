@@ -48,6 +48,11 @@ import { RevisionsDrawer } from "../components/RevisionsDrawer";
 import { DiagnosticsCard } from "../features/case-detail/DiagnosticsCard";
 import { useCaseDetailDraft, useCustomerCandidates } from "../features/case-detail/hooks";
 import { ManualEditCard } from "../features/case-detail/ManualEditCard";
+import {
+  buildCaseDetailRenderPayload,
+  compareTemplateFromRenderableSlotCount,
+  compareTemplateFromTier,
+} from "../features/case-detail/renderPayload";
 import { SourceGroupPanel } from "../features/case-detail/SourceGroupPanel";
 import { SourceImageThumb } from "../features/case-detail/SourceImageThumb";
 import { SupplementCandidatesPanel } from "../features/case-detail/SupplementCandidatesPanel";
@@ -117,7 +122,7 @@ export default function CaseDetail() {
     renderMut.mutate(
       {
         caseId,
-        payload: { brand, template: "tri-compare", semantic_judge: "auto", ...(force ? { force: true } : {}) },
+        payload: buildCaseDetailRenderPayload(brand, sourceGroupEffectiveTemplate, force),
       },
       { onError: handleRenderError },
     );
@@ -687,27 +692,55 @@ export default function CaseDetail() {
   const sourceGroupMissingSourceCount = sourceGroup?.preflight.missing_source_count ?? sourceGroup?.missing_image_count ?? 0;
   const sourceGroupMissingSlotCount = sourceGroup?.preflight.missing_slots.length ?? 0;
   const sourceGroupNeedsManualCount = sourceGroup?.preflight.needs_manual_count ?? 0;
+  const sourceGroupRenderableSlotCount =
+    sourceGroup?.preflight.formal_candidate_manifest?.renderable_slot_count ??
+    sourceGroup?.preflight.slots.filter((slot) => slot.ready).length ??
+    0;
+  const sourceGroupEffectiveTemplate =
+    compareTemplateFromTier(data?.manual_template_tier) ??
+    sourceGroup?.preflight.formal_candidate_manifest?.effective_template_hint ??
+    compareTemplateFromRenderableSlotCount(sourceGroupRenderableSlotCount);
+  const sourceGroupEffectiveRequiredSlotCount =
+    sourceGroupEffectiveTemplate === "single-compare"
+      ? 1
+      : sourceGroupEffectiveTemplate === "bi-compare"
+        ? 2
+        : 3;
+  const sourceGroupHardBlockerCodes = sourceGroup?.preflight.hard_blockers?.map((blocker) => blocker.code) ?? [];
+  const sourceGroupOnlySkippableSlotBlock =
+    sourceGroupEffectiveTemplate != null &&
+    sourceGroupEffectiveTemplate !== "tri-compare" &&
+    sourceGroupRenderableSlotCount >= sourceGroupEffectiveRequiredSlotCount &&
+    sourceGroupHardBlockerCodes.length > 0 &&
+    sourceGroupHardBlockerCodes.every((code) => code === "missing_render_slots");
+  const sourceGroupMissingSlotBlocksEffective = sourceGroupMissingSlotCount > 0 && !sourceGroupOnlySkippableSlotBlock;
+  const sourceGroupStatusBlocks = Boolean(
+    sourceGroup && sourceGroup.preflight.status === "blocked" && !sourceGroupOnlySkippableSlotBlock,
+  );
   const sourceGroupGateBlocked = Boolean(
     sourceGroup &&
       (
-        sourceGroup.preflight.status === "blocked" ||
+        sourceGroupStatusBlocks ||
         sourceGroupMissingSourceCount > 0 ||
-        sourceGroupMissingSlotCount > 0 ||
+        sourceGroupMissingSlotBlocksEffective ||
         sourceGroupNeedsManualCount > 0
       ),
   );
-  const renderGateBlocked = preflightStatus === "blocked" || sourceGroupGatePending || sourceGroupGateBlocked;
-  const renderGateTitle = preflightStatus === "blocked"
+  const renderClassificationBlocked = !sourceGroup && preflightStatus === "blocked";
+  const renderGateBlocked = renderClassificationBlocked || sourceGroupGatePending || sourceGroupGateBlocked;
+  const renderGateTitle = renderClassificationBlocked
     ? "仍有待补充/低置信/需换片照片，已阻断正式出图"
     : sourceGroupGatePending
       ? "正在读取源组门禁，完成后才能正式出图"
       : sourceGroupMissingSourceCount > 0
         ? `源组有 ${sourceGroupMissingSourceCount} 个历史图片文件在当前磁盘不可读，已阻断正式出图`
-        : sourceGroupMissingSlotCount > 0
-          ? `三联槽位仍有 ${sourceGroupMissingSlotCount} 个缺口，已阻断正式出图`
+        : sourceGroupMissingSlotBlocksEffective
+          ? `有效模板仍有 ${sourceGroupMissingSlotCount} 个槽位缺口，已阻断正式出图`
           : sourceGroupNeedsManualCount > 0
             ? `源组还有 ${sourceGroupNeedsManualCount} 张待补阶段/角度，已阻断正式出图`
-            : t("buttons.renderTooltip", { brand });
+            : sourceGroupStatusBlocks
+              ? "源组门禁仍有阻断，已阻断正式出图"
+              : t("buttons.renderTooltip", { brand });
   const preflightLatest = preflight?.latest_render ?? null;
   const preflightAiUsage = preflightLatest?.ai_usage;
   const preflightRenderGaps = preflight?.render?.gaps ?? [];
@@ -1112,7 +1145,12 @@ export default function CaseDetail() {
           </div>
         )}
         {/* Phase 3: render status card — shows latest render job + live SSE updates. */}
-        <RenderStatusCard caseId={caseId} caseAbsPath={data.abs_path} />
+        <RenderStatusCard
+          caseId={caseId}
+          caseAbsPath={data.abs_path}
+          effectiveTemplate={sourceGroupEffectiveTemplate}
+          renderableSlotCount={sourceGroupRenderableSlotCount}
+        />
       </div>
 
       {/* Body 60/40 */}

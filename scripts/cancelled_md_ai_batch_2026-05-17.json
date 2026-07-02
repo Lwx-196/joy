@@ -1,0 +1,73 @@
+{
+  "cancelled_by": "claude-2026-05-17-color-fix-verification",
+  "user_approval": "option B explicitly confirmed by user",
+  "reason": "owner Phase 3 batch (15:54 UTC) 被 job 557 卡 11h+；为推进 case 129 fumei brand color fix 临时清空 queue；owner 可用本 JSON 一键重发",
+  "cancelled_at_utc": "2026-05-17T02:55:23.687567+00:00",
+  "how_to_replay": "POST /api/cases/render/batch with payload.case_ids = [job.case_id for job in jobs], brand=md_ai, template per-case",
+  "jobs": [
+    {
+      "job_id": 545,
+      "case_id": 128,
+      "brand": "md_ai",
+      "template": "tri-compare",
+      "semantic_judge": "auto",
+      "enqueued_at": "2026-05-16T15:54:48.235232+00:00"
+    },
+    {
+      "job_id": 549,
+      "case_id": 134,
+      "brand": "md_ai",
+      "template": "bi-compare",
+      "semantic_judge": "auto",
+      "enqueued_at": "2026-05-16T15:54:50.353077+00:00"
+    },
+    {
+      "job_id": 550,
+      "case_id": 136,
+      "brand": "md_ai",
+      "template": "tri-compare",
+      "semantic_judge": "auto",
+      "enqueued_at": "2026-05-16T15:54:50.885184+00:00"
+    },
+    {
+      "job_id": 551,
+      "case_id": 137,
+      "brand": "md_ai",
+      "template": "single-compare",
+      "semantic_judge": "auto",
+      "enqueued_at": "2026-05-16T15:54:51.405410+00:00"
+    },
+    {
+      "job_id": 552,
+      "case_id": 138,
+      "brand": "md_ai",
+      "template": "tri-compare",
+      "semantic_judge": "auto",
+      "enqueued_at": "2026-05-16T15:54:51.940679+00:00"
+    },
+    {
+      "job_id": 553,
+      "case_id": 139,
+      "brand": "md_ai",
+      "template": "tri-compare",
+      "semantic_judge": "auto",
+      "enqueued_at": "2026-05-16T15:54:52.450223+00:00"
+    },
+    {
+      "job_id": 554,
+      "case_id": 140,
+      "brand": "md_ai",
+      "template": "tri-compare",
+      "semantic_judge": "auto",
+      "enqueued_at": "2026-05-16T15:54:52.980112+00:00"
+    },
+    {
+      "job_id": 555,
+      "case_id": 141,
+      "brand": "md_ai",
+      "template": "tri-compare",
+      "semantic_judge": "auto",
+      "enqueued_at": "2026-05-16T15:54:53.512928+00:00"
+    }
+  ]
+}

@@ -39,7 +39,8 @@ def _fake_png() -> bytes:
 
 
 def _run(manifest, tmp_path, monkeypatch, calls):
-    def fake_gen(providers, png, prompt, mime="image/png", size_override=None):
+    def fake_gen(providers, png, prompt, mime="image/png", size_override=None,
+                 progress_callback=None, **kwargs):
         calls.append(prompt)
         return _fake_png(), "fake"
 

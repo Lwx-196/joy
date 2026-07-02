@@ -17,7 +17,7 @@ import cv2
 import numpy as np
 from PIL import Image
 
-from backend.scripts.render_ai_enhanced_boards import _match_face_luminance
+from backend.scripts.render_ai_enhanced_boards import _match_face_luminance, _repair_midface_cyan_cast
 
 
 def _cell(face_rgb, sweater_rgb=(25, 25, 25), size=200, face_box=(60, 30, 140, 110),
@@ -49,6 +49,19 @@ def _gain_only_lab_l(tgt: Image.Image, gain: float) -> float:
     """纯亮度 gain（不含色度）后的 face LAB L——亮度方向断言的金标准。"""
     arr = np.clip(np.array(tgt, dtype=np.float64) * gain, 0, 255).astype(np.uint8)
     return _face_lab(Image.fromarray(arr))[0]
+
+
+def _front_face_with_cool_midface() -> Image.Image:
+    img = Image.new("RGB", (320, 420), (0, 0, 0))
+    img.paste(Image.new("RGB", (190, 250), (152, 123, 104)), (65, 55))
+    img.paste(Image.new("RGB", (76, 88), (148, 123, 113)), (122, 108))
+    return img
+
+
+def _region_lab_b(img: Image.Image, box: tuple[int, int, int, int]) -> float:
+    arr = cv2.cvtColor(np.asarray(img.convert("RGB")), cv2.COLOR_RGB2LAB).astype(np.float64)
+    x0, y0, x1, y1 = box
+    return float(arr[y0:y1, x0:x1, 2].mean())
 
 
 def test_overbright_after_pulled_down():
@@ -130,6 +143,41 @@ def test_chroma_pulled_toward_ref():
     assert abs(oa - ra) < abs(ta - ra), "a 通道必须向术前收敛"
     assert abs(ob - rb) < abs(tb - rb), "b 通道必须向术前收敛"
     assert np.array(out)[0:10, 0:10].max() == 0   # 黑底保持
+
+
+def test_chroma_does_not_cool_naturally_warm_after():
+    """#420 回归：术后已有正常暖肤色时，不得为了贴近术前而降红/降黄拉灰偏青。"""
+    ref = _cell(face_rgb=(130, 120, 100))    # 同均值，较中性
+    tgt = _cell(face_rgb=(150, 110, 90))     # 同均值，术后更暖、更有血色
+
+    out = _match_face_luminance(ref, tgt)
+
+    _, ta, tb = _face_lab(tgt)
+    _, oa, ob = _face_lab(out)
+    assert oa >= ta - 1.0, "自然暖调术后不得被明显降 a 通道"
+    assert ob >= tb - 1.0, "自然暖调术后不得被明显降 b 通道"
+    assert np.array(out)[0:10, 0:10].max() == 0
+
+
+def test_midface_cyan_cast_repaired_for_front_only():
+    """#420 回归：front 术后面中局部偏青/偏灰时，只回暖面中肤色，不动黑底。"""
+    img = _front_face_with_cool_midface()
+    mid_box = (126, 120, 194, 170)
+    before_b = _region_lab_b(img, mid_box)
+
+    out = _repair_midface_cyan_cast(img, slot="front")
+    after_b = _region_lab_b(out, mid_box)
+
+    assert after_b > before_b + 0.8
+    assert np.array(out)[0:20, 0:20].max() == 0
+
+
+def test_midface_cyan_cast_repair_ignores_non_front_slot():
+    img = _front_face_with_cool_midface()
+
+    out = _repair_midface_cyan_cast(img, slot="side")
+
+    assert out is img
 
 
 def test_chroma_shift_clamped():

@@ -6,7 +6,12 @@ B2：sharpness 0.0/<=0 视为计算失败 flaky 不假拦；真低清 0<x<=8 仍
 证据：5-case 探针坐实 identity ticket 全是 status='not_verified'/code=None=缺 ArcFace embedding 假阴。
 """
 
-from backend.services.pre_render_gate import _component_ticket, _pair_tickets, _slot_tickets
+from backend.services.pre_render_gate import (
+    _component_ticket,
+    _effective_template_and_required_slots,
+    _pair_tickets,
+    _slot_tickets,
+)
 
 
 # ---------------------------------------------------------------- slot message: dropped vs missing
@@ -59,6 +64,36 @@ def test_slot_message_genuinely_missing_unchanged() -> None:
     assert "降级移除" not in t["message"]
     assert t["evidence"]["dropped_views"] == []
     assert t["evidence"]["recommended_action"] == "slot_fill"
+
+
+def test_tri_request_uses_selection_plan_template_downgrade_hint() -> None:
+    """413 类：renderer 已将侧面低价值降级，gate 必须按 bi 所需槽位判断。"""
+    effective, required = _effective_template_and_required_slots(
+        requested_template="tri-compare",
+        primary={"manual_template_tier": None},
+        selection_plan={
+            "effective_template_hint": "bi-compare",
+            "renderable_slots": ["front", "oblique"],
+        },
+    )
+
+    assert effective == "bi-compare"
+    assert required == ["front", "oblique"]
+
+
+def test_tri_request_does_not_downgrade_to_single_from_plan_hint() -> None:
+    """批量正式出图不把 tri 请求自动降到单槽；front-only 仍应被门禁拦截。"""
+    effective, required = _effective_template_and_required_slots(
+        requested_template="tri-compare",
+        primary={"manual_template_tier": None},
+        selection_plan={
+            "effective_template_hint": "single-compare",
+            "renderable_slots": ["front"],
+        },
+    )
+
+    assert effective == "tri-compare"
+    assert required == ["front", "oblique", "side"]
 
 
 # ---------------------------------------------------------------- B1 identity
@@ -156,3 +191,33 @@ def test_sharpness_low_still_blocks() -> None:
 
 def test_sharpness_sharp_no_ticket() -> None:
     assert _blur_tickets(_plan_with_sharpness(50.0)) == []
+
+
+def test_side_source_scale_review_warning_creates_publish_ticket() -> None:
+    plan = {
+        "slots": {
+            "side": {
+                "before": {"filename": "术前5.JPG"},
+                "after": {"filename": "术后5.JPG"},
+                "pair_quality": {
+                    "metrics": {"primary_judge": {}},
+                    "warnings": [
+                        {
+                            "code": "side_source_scale_mismatch",
+                            "severity": "review",
+                            "message": "侧面源图人物尺度不一致：肤区高比 1.27、面积比 1.44",
+                            "slot": "side",
+                            "selected_files": ["术前5.JPG", "术后5.JPG"],
+                        }
+                    ],
+                },
+            }
+        }
+    }
+
+    tickets = [t for t in _pair_tickets(plan) if t["reason_code"] == "side_source_scale_mismatch"]
+
+    assert len(tickets) == 1
+    assert tickets[0]["blocks_render"] is False
+    assert tickets[0]["blocks_publish"] is True
+    assert tickets[0]["evidence"]["recommended_action"] == "source_repick_side_pair"

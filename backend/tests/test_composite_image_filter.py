@@ -10,8 +10,13 @@ from backend.source_images import (
     COMPOSITE_ASPECT_RATIO_THRESHOLD,
     is_composite_by_dimensions,
     is_composite_image,
+    observation_reasons_indicate_composite,
 )
-from backend.source_selection import detect_treatment_type, TREATMENT_VIEW_BOOST, candidate_quality
+from backend.source_selection import (
+    candidate_quality,
+    detect_treatment_type,
+    detect_treatment_types,
+)
 
 
 class TestIsCompositeByDimensions:
@@ -65,6 +70,28 @@ def _write_png(path: Path, width: int, height: int) -> None:
         f.write(_chunk(b"IEND", b""))
 
 
+def _write_white_canvas_pair(path: Path) -> None:
+    from PIL import Image, ImageDraw
+
+    img = Image.new("RGB", (1200, 900), "white")
+    draw = ImageDraw.Draw(img)
+    draw.rectangle((60, 80, 520, 700), fill=(190, 185, 176))
+    draw.rectangle((680, 80, 1140, 700), fill=(196, 188, 178))
+    draw.rectangle((220, 720, 360, 770), fill=(40, 40, 40))
+    draw.rectangle((840, 720, 980, 770), fill=(40, 40, 40))
+    img.save(path)
+
+
+def _write_light_wall_photo(path: Path) -> None:
+    from PIL import Image, ImageDraw
+
+    img = Image.new("RGB", (1200, 900), (232, 232, 228))
+    draw = ImageDraw.Draw(img)
+    draw.ellipse((430, 180, 770, 560), fill=(207, 172, 148))
+    draw.rectangle((480, 560, 720, 850), fill=(245, 245, 245))
+    img.save(path)
+
+
 class TestIsCompositeImage:
     def test_normal_image(self, tmp_path: Path):
         img = tmp_path / "normal.png"
@@ -81,6 +108,16 @@ class TestIsCompositeImage:
         _write_png(img, 1000, 3000)
         assert is_composite_image(img)
 
+    def test_normal_ratio_white_canvas_pair_is_composite(self, tmp_path: Path):
+        img = tmp_path / "normal-ratio-canvas-pair.jpg"
+        _write_white_canvas_pair(img)
+        assert is_composite_image(img)
+
+    def test_light_wall_single_photo_is_not_composite(self, tmp_path: Path):
+        img = tmp_path / "light-wall-photo.jpg"
+        _write_light_wall_photo(img)
+        assert not is_composite_image(img)
+
     def test_nonexistent_file(self, tmp_path: Path):
         assert not is_composite_image(tmp_path / "missing.png")
 
@@ -93,6 +130,18 @@ class TestIsCompositeImage:
         assert COMPOSITE_ASPECT_RATIO_THRESHOLD == 2.5
 
 
+class TestCompositeObservationReasons:
+    def test_side_by_side_before_after_reason(self):
+        assert observation_reasons_indicate_composite([
+            "The image is a side-by-side before-and-after collage showing the treatment result."
+        ])
+
+    def test_normal_healing_reason(self):
+        assert not observation_reasons_indicate_composite([
+            "Localized redness at treatment site after injection."
+        ])
+
+
 class TestDetectTreatmentType:
     def test_rhinoplasty_chinese(self):
         assert detect_treatment_type("/path/to/云镜隆鼻2025.5.21") == "rhinoplasty"
@@ -102,6 +151,28 @@ class TestDetectTreatmentType:
 
     def test_lip(self):
         assert detect_treatment_type("/path/to/丰唇案例") == "lip"
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "/path/to/2025.12.10娇兰0.5注射唇",
+            "/path/to/2026.1.25玻尿酸卧蚕 唇填充",
+            "/path/to/2025.3.12填充唇",
+            "/path/to/2025.12.27缇颜3支唇，法令纹，口角",
+        ],
+    )
+    def test_lip_common_source_folder_names(self, path):
+        assert detect_treatment_type(path) == "lip"
+
+    def test_multi_treatment_keeps_primary_and_lists_all_matches(self):
+        path = "/path/to/25.6.4嗨体填泪沟，唇，口角溶脂"
+        assert detect_treatment_type(path) == "tear_trough"
+        assert detect_treatment_types(path) == ["tear_trough", "lip"]
+
+    def test_multi_treatment_rhinoplasty_lip(self):
+        path = "/path/to/25.7.2隆鼻，卧蚕，泪沟，唇"
+        assert detect_treatment_type(path) == "rhinoplasty"
+        assert detect_treatment_types(path) == ["rhinoplasty", "tear_trough", "lip"]
 
     def test_chin(self):
         assert detect_treatment_type("/path/to/下巴整形") == "chin"

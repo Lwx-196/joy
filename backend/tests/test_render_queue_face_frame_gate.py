@@ -112,3 +112,60 @@ def test_env_switch_bypasses_gate(temp_db: Path, tmp_path: Path, monkeypatch) ->
     front = context["plan"]["slots"]["front"]
     assert front["before"]["filename"] == "before.png"
     assert front["after"]["filename"] == "after.png"
+
+
+def test_duplicate_basename_metadata_does_not_pollute_phase(temp_db: Path, tmp_path: Path, monkeypatch) -> None:
+    """术前/术后子目录同名图片时，basename metadata 不能串到另一阶段。"""
+    from backend import db, render_queue
+
+    monkeypatch.setenv("SKIP_FACE_FRAME_GATE", "1")
+    before = tmp_path / "术前" / "正面.JPG"
+    after = tmp_path / "术后" / "正面.JPG"
+    before.parent.mkdir(parents=True)
+    after.parent.mkdir(parents=True)
+    _write_tiny_png(before)
+    _write_tiny_png(after)
+    filenames = ["术前/正面.JPG", "术后/正面.JPG"]
+    metadata = [
+        {
+            "filename": "术前/正面.JPG",
+            "phase": "before",
+            "phase_source": "skill",
+            "view_bucket": "front",
+            "angle": "front",
+            "angle_source": "skill",
+            "angle_confidence": 0.91,
+        }
+    ]
+    now = "2026-06-10T00:00:00+00:00"
+    with db.connect() as conn:
+        scan_id = conn.execute(
+            "INSERT INTO scans (started_at, root_paths, mode) VALUES (?, ?, ?)",
+            (now, "[]", "unit"),
+        ).lastrowid
+        conn.execute(
+            """
+            INSERT INTO cases (
+              id, scan_id, abs_path, category, meta_json, skill_image_metadata_json, last_modified, indexed_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                204,
+                scan_id,
+                str(tmp_path),
+                "standard_face",
+                json.dumps({"image_files": filenames}, ensure_ascii=False),
+                json.dumps(metadata, ensure_ascii=False),
+                now,
+                now,
+            ),
+        )
+        row = dict(conn.execute("SELECT * FROM cases WHERE id = ?", (204,)).fetchone())
+        context = render_queue._build_render_selection_context(conn, [row])
+
+    front = context["plan"]["slots"]["front"]
+    assert front["before"]["filename"] == "术前/正面.JPG"
+    assert front["after"]["filename"] == "术后/正面.JPG"
+    assert front["after"]["phase"] == "after"
+    assert {"view": "front", "missing": ["after"]} not in context["plan"]["missing_slots"]

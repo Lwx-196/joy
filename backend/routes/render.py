@@ -394,12 +394,7 @@ def _delivery_audit_from_job_meta(meta: dict[str, Any], quality: dict[str, Any] 
         "selected_slots": selected_slots,
         "dropped_slots": dropped,
         "source_provenance": meta.get("render_selection_source_provenance") if isinstance(meta.get("render_selection_source_provenance"), list) else [],
-        "quality_summary": {
-            "quality_status": quality.get("quality_status"),
-            "quality_score": quality.get("quality_score"),
-            "can_publish": bool(quality.get("can_publish")) if "can_publish" in quality else False,
-            "actionable_warning_count": ((quality.get("metrics") or {}).get("actionable_warning_count") if isinstance(quality.get("metrics"), dict) else None),
-        },
+        "quality_summary": render_quality.build_quality_summary(quality),
     }
 
 
@@ -1057,6 +1052,8 @@ def latest_case_job(case_id: int) -> dict:
     # F2：needs_confirmation = cache-miss 待用户确认的「在途」决策点，必须像 queued/running
     # 一样优先展示确认卡；否则会被旧 done 板（output_row）盖住，用户永远看不到烧钱确认提示。
     if latest["status"] in {"queued", "running", "needs_confirmation"}:
+        job = latest
+    elif latest["status"] == "blocked" and latest.get("output_path"):
         job = latest
     elif output_row is not None:
         job = _row_to_job(output_row)

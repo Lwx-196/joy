@@ -434,6 +434,9 @@ def test_execute_render_translates_manual_phase_into_staging_lookup(
             "blocking_issues": [],
             "warnings": [],
             "composition_alerts": [],
+            # single-compare policy（WIP 质量门）最小合规元数据
+            "render_selection_slot_count": 1,
+            "title": "客户A 2026.01.01 苹果肌",
         }
 
     staging_path_seen: dict[str, str] = {}

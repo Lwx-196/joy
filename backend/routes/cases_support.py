@@ -14,6 +14,7 @@ import re
 import subprocess
 import traceback
 import uuid
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -299,11 +300,59 @@ def _apply_review_states_to_metadata(
     if not review_states:
         return image_metadata
     for entry in image_metadata or []:
-        filename = str(entry.get("filename") or entry.get("relative_path") or "")
-        state = review_states.get(filename)
+        state = next(
+            (
+                review_states[key]
+                for key in _metadata_file_keys(entry)
+                if key in review_states
+            ),
+            None,
+        )
         if state:
             entry["review_state"] = state
     return image_metadata
+
+
+def _metadata_file_keys(item: dict[str, Any]) -> list[str]:
+    keys: list[str] = []
+    for raw in (item.get("relative_path"), item.get("filename")):
+        value = str(raw or "").replace("\\", "/").strip()
+        if not value:
+            continue
+        keys.append(value)
+        basename = Path(value).name
+        if basename:
+            keys.append(basename)
+    return list(dict.fromkeys(keys))
+
+
+def _metadata_matches_active_file(
+    item: dict[str, Any],
+    active_files: set[str],
+    active_basename_counts: Counter[str],
+) -> bool:
+    for key in _metadata_file_keys(item):
+        if key in active_files:
+            return True
+        if "/" not in key and active_basename_counts.get(key) == 1:
+            return True
+    return False
+
+
+def _filter_active_image_metadata(
+    image_metadata: list[dict[str, Any]],
+    image_files: list[str],
+) -> list[dict[str, Any]]:
+    if not image_files:
+        return [item for item in image_metadata or [] if isinstance(item, dict)]
+    active_files = {str(filename).replace("\\", "/").strip() for filename in image_files}
+    active_basename_counts = Counter(Path(filename).name for filename in active_files)
+    return [
+        item
+        for item in image_metadata or []
+        if isinstance(item, dict)
+        and _metadata_matches_active_file(item, active_files, active_basename_counts)
+    ]
 
 
 def _fetch_image_overrides(conn: sqlite3.Connection, case_id: int) -> dict[str, dict[str, Any]]:
@@ -338,7 +387,11 @@ def _apply_overrides_to_metadata(
     每条 entry 新增 `phase_source` / `view_source` 标 'manual' 或 'skill';manual 优先。
     在前端这两字段决定 chip 颜色或图标提示。
     """
-    known = {str(entry.get("filename")) for entry in image_metadata or [] if entry.get("filename")}
+    known = {
+        key
+        for entry in image_metadata or []
+        for key in _metadata_file_keys(entry)
+    }
     # Older cases can have manual overrides but no persisted per-image skill
     # metadata yet. Surface those rows so the source wall still shows the
     # human classification instead of hiding it behind filename fallback.
@@ -372,8 +425,7 @@ def _apply_overrides_to_metadata(
             entry.setdefault("view_override_source", None)
         return image_metadata
     for entry in image_metadata or []:
-        fname = entry.get("filename")
-        ov = overrides.get(fname) if fname else None
+        ov = next((overrides[key] for key in _metadata_file_keys(entry) if key in overrides), None)
         if ov and ov.get("phase"):
             entry["phase"] = ov["phase"]
             entry["phase_override_source"] = "manual"
@@ -875,8 +927,7 @@ def _build_classification_preflight(
     source_profile = source_images.classify_source_profile(raw_image_files or image_files)
     metadata_by_file: dict[str, dict[str, Any]] = {}
     for item in image_metadata or []:
-        key = str(item.get("filename") or item.get("relative_path") or "")
-        if key:
+        for key in _metadata_file_keys(item):
             metadata_by_file[key] = item
 
     slots: dict[str, dict[str, Any]] = {
@@ -3288,13 +3339,7 @@ def _source_group_row_payload(
     skill_image_metadata = _json_field(row, "skill_image_metadata_json", [])
     if not isinstance(skill_image_metadata, list):
         skill_image_metadata = []
-    active_files = set(image_files)
-    skill_image_metadata = [
-        item
-        for item in skill_image_metadata
-        if isinstance(item, dict)
-        and str(item.get("filename") or item.get("relative_path") or "") in active_files
-    ]
+    skill_image_metadata = _filter_active_image_metadata(skill_image_metadata, image_files)
     overrides = _fetch_image_overrides(conn, int(row["id"]))
     skill_image_metadata = _apply_overrides_to_metadata(
         skill_image_metadata,
@@ -3304,8 +3349,7 @@ def _source_group_row_payload(
     skill_image_metadata = _apply_review_states_to_metadata(skill_image_metadata, image_review_states)
     metadata_by_file: dict[str, dict[str, Any]] = {}
     for item in skill_image_metadata:
-        filename = str(item.get("filename") or item.get("relative_path") or "")
-        if filename:
+        for filename in _metadata_file_keys(item):
             metadata_by_file[filename] = item
     default_body_part = "unknown"
     vlm_observations = _vlm_classifier_observations_for_case(conn, case_id)
@@ -3326,6 +3370,7 @@ def _source_group_row_payload(
         image_payload = {
             "case_id": case_id,
             "filename": filename,
+            "source_path": str((Path(abs_path) / filename).resolve()) if abs_path and not Path(filename).is_absolute() else filename,
             "preview_url": f"/api/cases/{case_id}/files?name={quote(filename, safe='')}",
             "phase": phase,
             "phase_source": phase_source,
@@ -3346,10 +3391,15 @@ def _source_group_row_payload(
             "direction": (item or {}).get("direction") if isinstance(item, dict) else None,
             "sharpness_score": (item or {}).get("sharpness_score") if isinstance(item, dict) else None,
         }
-        image_payload = _apply_vlm_observation_to_source_image(
-            image_payload,
-            vlm_observations.get(filename) or vlm_observations.get(Path(filename).name),
-        )
+        observation = vlm_observations.get(filename) or vlm_observations.get(Path(filename).name)
+        image_payload = _apply_vlm_observation_to_source_image(image_payload, observation)
+        source_path = Path(str(image_payload.get("source_path") or ""))
+        if isinstance(observation, dict) and observation.get("is_composite"):
+            image_payload["render_excluded"] = True
+            image_payload["exclusion_reason"] = "vlm_composite_detected"
+        elif source_path.is_file() and source_images.is_composite_image(source_path):
+            image_payload["render_excluded"] = True
+            image_payload["exclusion_reason"] = "composite_image_detected"
         images.append(image_payload)
     return {
         "case_id": case_id,
@@ -3398,10 +3448,8 @@ def _source_group_metadata_index(raw: Any) -> dict[str, dict[str, Any]]:
     for item in items:
         if not isinstance(item, dict):
             continue
-        for key in (item.get("filename"), item.get("relative_path")):
-            if key:
-                out[str(key)] = item
-                out[Path(str(key)).name] = item
+        for key in _metadata_file_keys(item):
+            out[key] = item
     return out
 
 
@@ -3428,7 +3476,7 @@ def _source_group_empty_metadata_value(value: Any) -> bool:
 def _vlm_classifier_observations_for_case(conn: sqlite3.Connection, case_id: int) -> dict[str, dict[str, Any]]:
     rows = conn.execute(
         """
-        SELECT image_path, phase, body_part, view, confidence, reasons_json, updated_at
+        SELECT image_path, phase, body_part, view, confidence, quality_json, reasons_json, updated_at
         FROM image_observations
         WHERE case_id = ?
           AND source = 'vlm_classifier'
@@ -3441,15 +3489,22 @@ def _vlm_classifier_observations_for_case(conn: sqlite3.Connection, case_id: int
         image_path = str(row["image_path"] or "").strip()
         if not image_path:
             continue
+        quality = _json_field(row, "quality_json", {})
+        reasons = _json_field(row, "reasons_json", [])
         obs = {
             "source": "vlm_classifier",
             "phase": row["phase"],
             "body_part": row["body_part"],
             "view": row["view"],
             "confidence": row["confidence"],
-            "reasons": _json_field(row, "reasons_json", []),
+            "reasons": reasons,
             "updated_at": row["updated_at"],
         }
+        if (
+            (isinstance(quality, dict) and quality.get("is_composite"))
+            or source_images.observation_reasons_indicate_composite(reasons)
+        ):
+            obs["is_composite"] = True
         for key in (image_path, Path(image_path).name):
             out.setdefault(key, obs)
     return out
@@ -3656,6 +3711,10 @@ def _slot_quality_prediction(view: str, slot: dict[str, Any]) -> dict[str, Any]:
         decision = "drop"
         recommended_action = "该角度无稳定对比价值，正式出图自动降级"
         blocks_render = False
+    elif pair_quality.get("severity") == "block":
+        decision = "block"
+        recommended_action = "该角度配对存在硬阻断，回到源组候选重选"
+        blocks_render = True
     elif isinstance(before, dict) and isinstance(after, dict):
         decision = "render"
         recommended_action = "进入正式出图候选"
@@ -3691,6 +3750,7 @@ def _formal_candidate_manifest_summary(
     readiness_score: int,
     missing_slots: list[dict[str, Any]],
     hard_blockers: list[dict[str, Any]],
+    manual_template_tier: str | None = None,
 ) -> dict[str, Any]:
     out_slots: dict[str, Any] = {}
     selected_count = 0
@@ -3772,6 +3832,22 @@ def _formal_candidate_manifest_summary(
                 "recommended_action": "补齐该角度术前/术后配对",
             }
         )
+    manual_template_hint = {
+        "single": "single-compare",
+        "single-compare": "single-compare",
+        "bi": "bi-compare",
+        "bi-compare": "bi-compare",
+        "tri": "tri-compare",
+        "tri-compare": "tri-compare",
+    }.get(str(manual_template_tier or "").strip())
+    inferred_template_hint = (
+        "tri-compare"
+        if renderable_slot_count >= 3
+        else "bi-compare"
+        if renderable_slot_count >= 2
+        else None
+    )
+    effective_template_hint = manual_template_hint or inferred_template_hint
     return {
         "version": 1,
         "policy": "source_selection_v1",
@@ -3779,13 +3855,8 @@ def _formal_candidate_manifest_summary(
         "readiness_score": readiness_score,
         "selected_count": selected_count,
         "renderable_slot_count": renderable_slot_count,
-        "effective_template_hint": (
-            "tri-compare"
-            if renderable_slot_count >= 3
-            else "bi-compare"
-            if renderable_slot_count >= 2
-            else None
-        ),
+        "effective_template_hint": effective_template_hint,
+        "effective_template_source": "manual_template_tier" if manual_template_hint else "source_selection",
         "blocking_reasons": blocking_reasons,
         "slots": out_slots,
         "source_provenance": provenance,
@@ -3798,9 +3869,22 @@ def _source_group_preflight(
     render_feedback: dict[str, Any] | None = None,
     selection_controls: dict[str, Any] | None = None,
     primary_render_metadata: dict[str, dict[str, Any]] | None = None,
+    manual_template_tier: str | None = None,
 ) -> dict[str, Any]:
     selection_controls = selection_controls if isinstance(selection_controls, dict) else {}
     locked_slots = selection_controls.get("locked_slots") if isinstance(selection_controls.get("locked_slots"), dict) else {}
+    primary_source = sources[0] if sources else {}
+    primary_treatment_types = source_selection.detect_treatment_types(
+        str(primary_source.get("abs_path") or primary_source.get("case_title") or "")
+    )
+    primary_treatment_type = primary_treatment_types[0] if primary_treatment_types else None
+    source_group_treatment_types: list[str] = []
+    for source in sources:
+        for treatment in source_selection.detect_treatment_types(
+            str(source.get("abs_path") or source.get("case_title") or "")
+        ):
+            if treatment not in source_group_treatment_types:
+                source_group_treatment_types.append(treatment)
     slots = {
         view: {
             "view": view,
@@ -3825,6 +3909,7 @@ def _source_group_preflight(
         source_case_id = int(source["case_id"])
         source_role = str(source.get("role") or "")
         source_title = str(source.get("case_title") or f"case {source_case_id}")
+        source_treatment_type = source_selection.detect_treatment_type(str(source.get("abs_path") or source_title))
         for image in source.get("images") or []:
             filename = str(image.get("filename") or "")
             render_filename = _source_group_render_name(source_case_id, source_title, filename)
@@ -3862,6 +3947,7 @@ def _source_group_preflight(
                 "source_role": source_role,
                 "filename": filename,
                 "render_filename": render_filename,
+                "source_path": image_for_quality.get("source_path"),
                 "preview_url": image.get("preview_url"),
                 "phase": phase,
                 "phase_source": image_for_quality.get("phase_source"),
@@ -3880,7 +3966,7 @@ def _source_group_preflight(
                 "vlm_classification": image_for_quality.get("vlm_classification"),
                 "source": image_for_quality.get("classification_source"),
             }
-            candidate.update(_candidate_quality(image_for_quality, source_role))
+            candidate.update(_candidate_quality(image_for_quality, source_role, treatment_type=source_treatment_type))
             if candidate.get("selection_metadata_source") == "primary_render_history":
                 reasons = [str(item) for item in (candidate.get("selection_reasons") or []) if item]
                 if "复用最近渲染姿态画像" not in reasons:
@@ -3895,6 +3981,8 @@ def _source_group_preflight(
             slot["before_candidates"],
             slot["after_candidates"],
             lock=locked_slots.get(view) if isinstance(locked_slots, dict) else None,
+            treatment_type=primary_treatment_type,
+            treatment_types=source_group_treatment_types,
         )
         slot["selected_before"] = selected_before
         slot["selected_after"] = selected_after
@@ -3934,6 +4022,7 @@ def _source_group_preflight(
         readiness_score=readiness_score,
         missing_slots=missing_slots,
         hard_blockers=hard_blockers,
+        manual_template_tier=manual_template_tier,
     )
     return {
         "status": "ready" if not hard_blockers else "blocked",

@@ -6,10 +6,16 @@ risk all affect whether an image should be selected for formal output.
 """
 from __future__ import annotations
 
+import atexit
+import importlib.util
 import json
+import logging
 import sqlite3
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
+
+from PIL import Image, ImageChops, ImageStat
 
 
 POSE_THRESHOLDS = {
@@ -19,8 +25,40 @@ POSE_THRESHOLDS = {
 }
 LOW_COMPARISON_VALUE_SLOTS = {"oblique", "side"}
 LOW_COMPARISON_VALUE_SCORE = 55
+SIDE_PROFILE_YAW_MIN = 40.0
+SIDE_PROFILE_YAW_STRONG = 44.0
 SOURCE_GROUP_SELECTION_META_KEY = "source_group_selection"
 SLOTS = {"front", "oblique", "side"}
+TARGET_EFFECT_DUP_DHASH_MAX = 2
+TARGET_EFFECT_FULL_MAE_MAX = 16.0
+TARGET_EFFECT_LIP_MAE_MAX = 28.0
+MOUTH_PUCKER_MISMATCH_BLOCK_DELTA = 0.55
+MOUTH_PUCKER_MISMATCH_REVIEW_DELTA = 0.35
+MOUTH_PUCKER_HIGH = 0.65
+MOUTH_PUCKER_LOW = 0.35
+SIDE_SOURCE_SCALE_SKIN_HEIGHT_RATIO_MAX = 1.28
+SIDE_SOURCE_SCALE_SKIN_AREA_RATIO_MAX = 1.35
+SIDE_SOURCE_SCALE_FOREGROUND_WIDTH_RATIO_MAX = 1.18
+FACE_ALIGN_PATH = Path(__file__).resolve().parents[1] / "layout" / "scripts" / "face_align_compare.py"
+LOGGER = logging.getLogger(__name__)
+
+_MOUTH_FA_MODULE: Any = None
+_MOUTH_LANDMARKER: Any = None
+
+
+def _close_mouth_landmarker() -> None:
+    global _MOUTH_LANDMARKER
+    landmarker = _MOUTH_LANDMARKER
+    _MOUTH_LANDMARKER = None
+    if landmarker is None:
+        return
+    try:
+        landmarker.close()
+    except Exception:  # pragma: no cover - interpreter shutdown cleanup only
+        pass
+
+
+atexit.register(_close_mouth_landmarker)
 
 TREATMENT_VIEW_BOOST: dict[str, dict[str, int]] = {
     "rhinoplasty": {"side": 12, "oblique": 8, "front": 0},
@@ -35,7 +73,7 @@ TREATMENT_VIEW_BOOST: dict[str, dict[str, int]] = {
 _TREATMENT_KEYWORDS: list[tuple[str, list[str]]] = [
     ("rhinoplasty", ["隆鼻", "鼻整形", "鼻部", "rhinoplasty", "nose"]),
     ("tear_trough", ["泪沟", "tear_trough", "tear trough"]),
-    ("lip", ["丰唇", "唇部", "lip"]),
+    ("lip", ["丰唇", "唇部", "唇填充", "填充唇", "注射唇", "唇", "lip"]),
     ("cheek", ["面颊", "苹果肌", "颊部", "cheek"]),
     ("chin", ["下巴", "下颌", "chin"]),
     ("forehead", ["额头", "丰额", "forehead"]),
@@ -43,14 +81,473 @@ _TREATMENT_KEYWORDS: list[tuple[str, list[str]]] = [
 ]
 
 
-def detect_treatment_type(case_path: str) -> str | None:
-    """Extract treatment type from case folder name."""
+def detect_treatment_types(case_path: str) -> list[str]:
+    """Extract all treatment types from case folder name, preserving priority order."""
     lowered = str(case_path or "").lower()
+    treatments: list[str] = []
     for treatment, keywords in _TREATMENT_KEYWORDS:
         for kw in keywords:
             if kw.lower() in lowered:
-                return treatment
+                treatments.append(treatment)
+                break
+    return treatments
+
+
+def detect_treatment_type(case_path: str) -> str | None:
+    """Extract primary treatment type from case folder name."""
+    return next(iter(detect_treatment_types(case_path)), None)
+
+
+def _active_treatment_types(
+    treatment_type: str | None,
+    treatment_types: list[str] | tuple[str, ...] | None,
+) -> list[str]:
+    active: list[str] = []
+    for value in [*(treatment_types or []), treatment_type]:
+        text = str(value or "").strip()
+        if text and text not in active:
+            active.append(text)
+    return active
+
+
+def _candidate_source_path(item: dict[str, Any] | None) -> Path | None:
+    if not isinstance(item, dict):
+        return None
+    for key in ("source_path", "path", "abs_path"):
+        raw = str(item.get(key) or "").strip()
+        if raw:
+            path = Path(raw)
+            if path.is_file():
+                return path
     return None
+
+
+def _image_dhash(image: Image.Image, *, size: int = 8) -> int:
+    gray = image.convert("L").resize((size + 1, size), Image.Resampling.LANCZOS)
+    pixels = list(gray.getdata())
+    value = 0
+    for row in range(size):
+        offset = row * (size + 1)
+        for col in range(size):
+            value = (value << 1) | int(pixels[offset + col + 1] > pixels[offset + col])
+    return value
+
+
+def _hash_distance(left: int, right: int) -> int:
+    return int(left ^ right).bit_count()
+
+
+def _relative_crop(image: Image.Image, box: tuple[float, float, float, float]) -> Image.Image:
+    width, height = image.size
+    x1, y1, x2, y2 = box
+    return image.crop((
+        max(0, min(width, int(width * x1))),
+        max(0, min(height, int(height * y1))),
+        max(0, min(width, int(width * x2))),
+        max(0, min(height, int(height * y2))),
+    ))
+
+
+def _mean_abs_diff(left: Image.Image, right: Image.Image, *, size: tuple[int, int]) -> float:
+    lhs = left.convert("RGB").resize(size, Image.Resampling.LANCZOS)
+    rhs = right.convert("RGB").resize(size, Image.Resampling.LANCZOS)
+    diff = ImageChops.difference(lhs, rhs)
+    means = ImageStat.Stat(diff).mean
+    return round(sum(float(v) for v in means) / max(len(means), 1), 3)
+
+
+def _ratio_pair(left: float, right: float) -> float:
+    low = min(abs(left), abs(right))
+    high = max(abs(left), abs(right))
+    if low <= 0:
+        return 1.0
+    return high / low
+
+
+@lru_cache(maxsize=256)
+def _cached_subject_scale_stats(path_str: str, _mtime_ns: int, _size: int) -> dict[str, Any] | None:
+    try:
+        from backend.render_pixel_metrics import _subject_scale_stats
+
+        with Image.open(path_str) as opened:
+            image = opened.convert("RGB")
+        image.thumbnail((1024, 1024), Image.Resampling.BILINEAR)
+        return _subject_scale_stats(image)
+    except Exception as exc:  # noqa: BLE001 - source selection must fail open
+        LOGGER.warning("source scale gate 检测异常（fail-open）: %s: %s", path_str, exc)
+        return None
+
+
+def _candidate_subject_scale_stats(item: dict[str, Any] | None) -> dict[str, Any] | None:
+    path = _candidate_source_path(item)
+    if path is None:
+        return None
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return _cached_subject_scale_stats(str(path), int(stat.st_mtime_ns), int(stat.st_size))
+
+
+def side_source_scale_component(view: str, before: dict[str, Any] | None, after: dict[str, Any] | None) -> dict[str, Any] | None:
+    if view != "side":
+        return None
+    selected_files = [
+        str((before or {}).get("filename") or ""),
+        str((after or {}).get("filename") or ""),
+    ]
+    before_stats = _candidate_subject_scale_stats(before)
+    after_stats = _candidate_subject_scale_stats(after)
+    if not before_stats or not after_stats:
+        return {
+            "method": "side_source_scale_v1",
+            "status": "not_verified",
+            "score": 0,
+            "message": "缺少可用源图尺度指标，侧面人物大小需人工复核",
+            "view": view,
+            "selected_files": selected_files,
+            "fail_open": True,
+        }
+    skin_height_ratio = _ratio_pair(float(before_stats["skin"]["height"]), float(after_stats["skin"]["height"]))
+    skin_area_ratio = _ratio_pair(float(before_stats["skin"]["area"]), float(after_stats["skin"]["area"]))
+    foreground_width_ratio = _ratio_pair(
+        float(before_stats["foreground"]["width"]),
+        float(after_stats["foreground"]["width"]),
+    )
+    flagged = (
+        skin_height_ratio >= SIDE_SOURCE_SCALE_SKIN_HEIGHT_RATIO_MAX
+        and skin_area_ratio >= SIDE_SOURCE_SCALE_SKIN_AREA_RATIO_MAX
+    ) or (
+        foreground_width_ratio >= SIDE_SOURCE_SCALE_FOREGROUND_WIDTH_RATIO_MAX
+        and skin_area_ratio >= SIDE_SOURCE_SCALE_SKIN_AREA_RATIO_MAX
+    )
+    metrics = {
+        "skin_height_ratio": round(skin_height_ratio, 3),
+        "skin_area_ratio": round(skin_area_ratio, 3),
+        "foreground_width_ratio": round(foreground_width_ratio, 3),
+        "before": before_stats,
+        "after": after_stats,
+        "thresholds": {
+            "skin_height_ratio_max": SIDE_SOURCE_SCALE_SKIN_HEIGHT_RATIO_MAX,
+            "skin_area_ratio_max": SIDE_SOURCE_SCALE_SKIN_AREA_RATIO_MAX,
+            "foreground_width_ratio_max": SIDE_SOURCE_SCALE_FOREGROUND_WIDTH_RATIO_MAX,
+        },
+    }
+    if not flagged:
+        return {
+            "method": "side_source_scale_v1",
+            "status": "ok",
+            "score": 0,
+            "message": "侧面源图人物尺度接近",
+            "view": view,
+            "selected_files": selected_files,
+            "metrics": metrics,
+        }
+    return {
+        "method": "side_source_scale_v1",
+        "status": "review",
+        "code": "side_source_scale_mismatch",
+        "score": -18,
+        "message": f"侧面源图人物尺度不一致：肤区高比 {skin_height_ratio:.2f}、面积比 {skin_area_ratio:.2f}",
+        "view": view,
+        "selected_files": selected_files,
+        "metrics": metrics,
+    }
+
+
+def target_effect_component(
+    view: str,
+    before: dict[str, Any] | None,
+    after: dict[str, Any] | None,
+    *,
+    treatment_type: str | None = None,
+    treatment_types: list[str] | tuple[str, ...] | None = None,
+) -> dict[str, Any] | None:
+    """Detect treatment-specific near-duplicate pairs before formal render.
+
+    This is intentionally narrow and deterministic. It only hard-blocks lip/front
+    pairs when the full frame is perceptually near-identical and the lip target
+    crop has very small pixel change. Missing files fail open with audit details.
+    """
+    active_treatments = _active_treatment_types(treatment_type, treatment_types)
+    if "lip" not in active_treatments or view != "front":
+        return None
+    target_treatment = "lip"
+    before_path = _candidate_source_path(before)
+    after_path = _candidate_source_path(after)
+    if before_path is None or after_path is None:
+        return {
+            "method": "target_effect_near_duplicate_v1",
+            "status": "not_verified",
+            "score": 0,
+            "message": "缺少源图路径，无法核验丰唇目标部位前后差异",
+            "treatment_type": target_treatment,
+            "treatment_types": active_treatments,
+            "view": view,
+            "fail_open": True,
+            "selected_files": [
+                str((before or {}).get("filename") or ""),
+                str((after or {}).get("filename") or ""),
+            ],
+        }
+    try:
+        before_image = Image.open(before_path).convert("RGB")
+        after_image = Image.open(after_path).convert("RGB")
+        sha_equal = before_path.read_bytes() == after_path.read_bytes()
+        dhash_distance = _hash_distance(_image_dhash(before_image), _image_dhash(after_image))
+        full_mae = _mean_abs_diff(before_image, after_image, size=(256, 192))
+        # Center lower-face band for lip treatment. It deliberately covers the
+        # upper/lower lip and immediate perioral area, not the full face.
+        before_lip = _relative_crop(before_image, (0.34, 0.42, 0.66, 0.68))
+        after_lip = _relative_crop(after_image, (0.34, 0.42, 0.66, 0.68))
+        lip_mae = _mean_abs_diff(before_lip, after_lip, size=(160, 120))
+    except Exception as exc:  # noqa: BLE001 - source gate must not crash scan
+        return {
+            "method": "target_effect_near_duplicate_v1",
+            "status": "not_verified",
+            "score": 0,
+            "message": f"丰唇目标部位前后差异核验失败：{exc}",
+            "treatment_type": target_treatment,
+            "treatment_types": active_treatments,
+            "view": view,
+            "fail_open": True,
+        }
+    selected_files = [
+        str((before or {}).get("filename") or before_path.name),
+        str((after or {}).get("filename") or after_path.name),
+    ]
+    payload: dict[str, Any] = {
+        "method": "target_effect_near_duplicate_v1",
+        "status": "ok",
+        "score": 0,
+        "message": "丰唇目标部位前后差异通过近重复兜底核验",
+        "treatment_type": target_treatment,
+        "treatment_types": active_treatments,
+        "view": view,
+        "sha_equal": bool(sha_equal),
+        "dhash_distance": dhash_distance,
+        "full_mae": full_mae,
+        "target_crop": "lip_center_lower_face",
+        "target_mae": lip_mae,
+        "selected_files": selected_files,
+        "thresholds": {
+            "dhash_max": TARGET_EFFECT_DUP_DHASH_MAX,
+            "full_mae_max": TARGET_EFFECT_FULL_MAE_MAX,
+            "lip_mae_max": TARGET_EFFECT_LIP_MAE_MAX,
+        },
+    }
+    if sha_equal or (
+        dhash_distance <= TARGET_EFFECT_DUP_DHASH_MAX
+        and full_mae <= TARGET_EFFECT_FULL_MAE_MAX
+        and lip_mae <= TARGET_EFFECT_LIP_MAE_MAX
+    ):
+        payload.update({
+            "status": "block",
+            "score": -38,
+            "code": "target_effect_near_duplicate_lip",
+            "message": "丰唇术前术后疑似近重复且目标部位无可见差异，阻断正式配对",
+            "slot": view,
+            "roles": ["before", "after"],
+        })
+    return payload
+
+
+def _candidate_mouth_expression(item: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(item, dict):
+        return None
+    for key in ("mouth_expression", "expression_metrics"):
+        raw = item.get(key)
+        if isinstance(raw, dict):
+            return {**raw, "source": raw.get("source") or "candidate_metadata"}
+    pucker = float_value(item.get("mouthPucker") or item.get("mouth_pucker"))
+    if pucker is not None:
+        return {
+            "status": "evaluated",
+            "source": "candidate_metadata",
+            "mouthPucker": round(float(pucker), 4),
+        }
+    path = _candidate_source_path(item)
+    if path is None:
+        return None
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return _mouth_expression_signature(str(path), int(stat.st_mtime_ns), int(stat.st_size))
+
+
+def _load_mouth_face_align() -> Any:
+    global _MOUTH_FA_MODULE
+    if _MOUTH_FA_MODULE is not None:
+        return _MOUTH_FA_MODULE
+    try:
+        spec = importlib.util.spec_from_file_location("face_align_compare", FACE_ALIGN_PATH)
+        if spec is None or spec.loader is None:
+            raise RuntimeError(f"无法加载 face_align_compare.py: {FACE_ALIGN_PATH}")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _MOUTH_FA_MODULE = module
+    except Exception as exc:  # fail-open：源图排序不能因本地 CV 依赖问题崩溃
+        LOGGER.warning("mouth expression gate 不可用（face_align_compare 加载失败）: %s", exc)
+        _MOUTH_FA_MODULE = False
+    return _MOUTH_FA_MODULE
+
+
+def _get_mouth_landmarker(fa_module: Any) -> Any:
+    global _MOUTH_LANDMARKER
+    if _MOUTH_LANDMARKER is None:
+        from mediapipe.tasks import python as mp_python
+        from mediapipe.tasks.python import vision
+
+        base_options = mp_python.BaseOptions(model_asset_path=fa_module.ensure_model())
+        options = vision.FaceLandmarkerOptions(
+            base_options=base_options,
+            output_face_blendshapes=True,
+            output_facial_transformation_matrixes=False,
+            num_faces=1,
+            min_face_detection_confidence=0.5,
+            min_face_presence_confidence=0.5,
+        )
+        _MOUTH_LANDMARKER = vision.FaceLandmarker.create_from_options(options)
+    return _MOUTH_LANDMARKER
+
+
+@lru_cache(maxsize=256)
+def _mouth_expression_signature(path_str: str, _mtime_ns: int, _size: int) -> dict[str, Any]:
+    fa_module = _load_mouth_face_align()
+    if not fa_module:
+        return {
+            "status": "not_verified",
+            "source": "mediapipe_face_blendshape_v1",
+            "message": "mouth expression gate unavailable",
+            "fail_open": True,
+        }
+    try:
+        import cv2
+        import mediapipe as mp
+
+        image = cv2.imread(path_str)
+        if image is None:
+            raise FileNotFoundError(f"无法读取图片: {path_str}")
+        image = fa_module.auto_orient(image, path_str)
+        mp_image = mp.Image(
+            image_format=mp.ImageFormat.SRGB,
+            data=cv2.cvtColor(image, cv2.COLOR_BGR2RGB),
+        )
+        result = _get_mouth_landmarker(fa_module).detect(mp_image)
+        if not result.face_landmarks:
+            return {
+                "status": "not_verified",
+                "source": "mediapipe_face_blendshape_v1",
+                "message": "未检测到面部，无法核验嘴型",
+                "fail_open": True,
+            }
+        blendshapes = result.face_blendshapes[0] if result.face_blendshapes else []
+        scores = {item.category_name: round(float(item.score), 4) for item in blendshapes}
+    except Exception as exc:  # noqa: BLE001 - source gate must not crash selection
+        LOGGER.warning("mouth expression gate 检测异常（fail-open）: %s: %s", path_str, exc)
+        return {
+            "status": "not_verified",
+            "source": "mediapipe_face_blendshape_v1",
+            "message": f"嘴型核验失败：{exc}",
+            "fail_open": True,
+        }
+    pucker = float(scores.get("mouthPucker") or 0.0)
+    return {
+        "status": "evaluated",
+        "source": "mediapipe_face_blendshape_v1",
+        "mouthPucker": round(pucker, 4),
+        "mouthFunnel": round(float(scores.get("mouthFunnel") or 0.0), 4),
+        "mouthShrugUpper": round(float(scores.get("mouthShrugUpper") or 0.0), 4),
+        "mouthShrugLower": round(float(scores.get("mouthShrugLower") or 0.0), 4),
+        "jawOpen": round(float(scores.get("jawOpen") or 0.0), 4),
+        "mouthSmileLeft": round(float(scores.get("mouthSmileLeft") or 0.0), 4),
+        "mouthSmileRight": round(float(scores.get("mouthSmileRight") or 0.0), 4),
+    }
+
+
+def mouth_expression_component(
+    view: str,
+    before: dict[str, Any] | None,
+    after: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if view != "front" or not before or not after:
+        return None
+    before_expr = _candidate_mouth_expression(before)
+    after_expr = _candidate_mouth_expression(after)
+    if not before_expr or not after_expr:
+        return {
+            "method": "mouth_expression_consistency_v1",
+            "status": "not_verified",
+            "score": 0,
+            "message": "缺少源图路径或嘴型指标，无法核验 front pair 表情一致性",
+            "view": view,
+            "fail_open": True,
+            "selected_files": [
+                str((before or {}).get("filename") or ""),
+                str((after or {}).get("filename") or ""),
+            ],
+        }
+    if before_expr.get("status") != "evaluated" or after_expr.get("status") != "evaluated":
+        return {
+            "method": "mouth_expression_consistency_v1",
+            "status": "not_verified",
+            "score": 0,
+            "message": "嘴型指标未完成，front pair 表情一致性 fail-open",
+            "view": view,
+            "fail_open": True,
+            "before": before_expr,
+            "after": after_expr,
+        }
+    before_pucker = float_value(before_expr.get("mouthPucker")) or 0.0
+    after_pucker = float_value(after_expr.get("mouthPucker")) or 0.0
+    delta = round(abs(before_pucker - after_pucker), 4)
+    high = max(before_pucker, after_pucker)
+    low = min(before_pucker, after_pucker)
+    selected_files = [
+        str((before or {}).get("filename") or ""),
+        str((after or {}).get("filename") or ""),
+    ]
+    payload: dict[str, Any] = {
+        "method": "mouth_expression_consistency_v1",
+        "status": "ok",
+        "score": 0,
+        "message": "front pair 嘴型/表情一致性通过",
+        "view": view,
+        "mouth_pucker_delta": delta,
+        "before": before_expr,
+        "after": after_expr,
+        "selected_files": selected_files,
+        "thresholds": {
+            "block_delta": MOUTH_PUCKER_MISMATCH_BLOCK_DELTA,
+            "review_delta": MOUTH_PUCKER_MISMATCH_REVIEW_DELTA,
+            "pucker_high": MOUTH_PUCKER_HIGH,
+            "pucker_low": MOUTH_PUCKER_LOW,
+        },
+    }
+    if (
+        delta >= MOUTH_PUCKER_MISMATCH_BLOCK_DELTA
+        and high >= MOUTH_PUCKER_HIGH
+        and low <= MOUTH_PUCKER_LOW
+    ):
+        payload.update({
+            "status": "block",
+            "score": -30,
+            "code": "mouth_expression_mismatch",
+            "message": "正面术前术后嘴型/表情不一致（嘟嘴 vs 中性脸），阻断该配对进入正式出图",
+            "slot": view,
+            "roles": ["before", "after"],
+        })
+    elif delta >= MOUTH_PUCKER_MISMATCH_REVIEW_DELTA and high >= MOUTH_PUCKER_LOW:
+        payload.update({
+            "status": "review",
+            "score": -12,
+            "code": "mouth_expression_mismatch_review",
+            "message": "正面术前术后嘴型/表情差异偏大，建议换片或人工复核",
+            "slot": view,
+            "roles": ["before", "after"],
+        })
+    return payload
 
 
 def float_value(value: Any) -> float | None:
@@ -63,6 +560,16 @@ def float_value(value: Any) -> float | None:
 def _float_or_zero(value: Any) -> float:
     parsed = float_value(value)
     return parsed if parsed is not None else 0.0
+
+
+def _pose_abs_yaw(item: dict[str, Any] | None) -> float | None:
+    if not isinstance(item, dict):
+        return None
+    pose = item.get("pose")
+    if not isinstance(pose, dict):
+        return None
+    yaw = float_value(pose.get("yaw"))
+    return abs(yaw) if yaw is not None else None
 
 
 def _first_numeric_signal(item: dict[str, Any] | None, keys: tuple[str, ...]) -> float | None:
@@ -404,6 +911,7 @@ def render_slot_drop_reason(view: str, quality: dict[str, Any] | None) -> dict[s
     score = int(quality.get("score") or 0)
     should_drop = (
         "pose_delta_large" in warning_codes
+        or "side_source_scale_mismatch" in warning_codes
         or str(quality.get("severity") or "") == "block"
         or str(quality.get("label") or "") == "risky"
         or score < LOW_COMPARISON_VALUE_SCORE
@@ -571,8 +1079,17 @@ def _locked_pair_quality(
     before: dict[str, Any],
     after: dict[str, Any],
     lock: dict[str, Any],
+    *,
+    treatment_type: str | None = None,
+    treatment_types: list[str] | tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
-    quality = slot_pair_quality(view, before, after) or {
+    quality = slot_pair_quality(
+        view,
+        before,
+        after,
+        treatment_type=treatment_type,
+        treatment_types=treatment_types,
+    ) or {
         "score": min(int(before.get("selection_score") or 0), int(after.get("selection_score") or 0)),
         "label": "review",
         "severity": "review",
@@ -1238,6 +1755,21 @@ def candidate_quality(image: dict[str, Any], source_role: str, *, treatment_type
         if inferred:
             image["direction"] = inferred
             image["direction_source"] = "filename_fallback"
+    if view == "side":
+        abs_yaw = _pose_abs_yaw(image)
+        if abs_yaw is not None:
+            if abs_yaw < SIDE_PROFILE_YAW_MIN:
+                score -= 18
+                warnings.append(
+                    {
+                        "code": "side_profile_yaw_weak",
+                        "severity": "review",
+                        "message": "侧面候选偏45°，存在真实侧面候选时应降权或换片",
+                    }
+                )
+            elif abs_yaw >= SIDE_PROFILE_YAW_STRONG:
+                score += 4
+                reasons.append("侧面轮廓角度充足")
     if treatment_type and view:
         boost_map = TREATMENT_VIEW_BOOST.get(treatment_type)
         if boost_map:
@@ -1302,7 +1834,14 @@ def _matched_pair_feedback(view: str, before: dict[str, Any], after: dict[str, A
     return records
 
 
-def slot_pair_quality(view: str, before: dict[str, Any] | None, after: dict[str, Any] | None) -> dict[str, Any] | None:
+def slot_pair_quality(
+    view: str,
+    before: dict[str, Any] | None,
+    after: dict[str, Any] | None,
+    *,
+    treatment_type: str | None = None,
+    treatment_types: list[str] | tuple[str, ...] | None = None,
+) -> dict[str, Any] | None:
     if not before or not after:
         return None
     before_score = int(before.get("selection_score") or 0)
@@ -1362,6 +1901,22 @@ def slot_pair_quality(view: str, before: dict[str, Any] | None, after: dict[str,
         elif before_direction and after_direction and before_direction != after_direction:
             score -= 16
             warnings.append({"code": "direction_mismatch", "severity": "review", "message": "侧向术前术后方向不一致"})
+    source_scale = side_source_scale_component(view, before, after)
+    if isinstance(source_scale, dict):
+        metrics["source_scale"] = source_scale
+        score += int(source_scale.get("score") or 0)
+        code = str(source_scale.get("code") or "")
+        status = str(source_scale.get("status") or "")
+        if code and status in {"block", "review"}:
+            warning_entry: dict[str, Any] = {
+                "code": code,
+                "severity": "block" if status == "block" else "review",
+                "message": str(source_scale.get("message") or code),
+                "slot": view,
+            }
+            if "selected_files" in source_scale:
+                warning_entry["selected_files"] = source_scale["selected_files"]
+            warnings.append(warning_entry)
     combined_warnings = [
         *(before.get("quality_warnings") or []),
         *(after.get("quality_warnings") or []),
@@ -1398,6 +1953,46 @@ def slot_pair_quality(view: str, before: dict[str, Any] | None, after: dict[str,
             for dim_key in ("slot", "selected_files", "message_contains", "source", "roles"):
                 if dim_key in component:
                     warning_entry[dim_key] = component[dim_key]
+            warnings.append(warning_entry)
+    mouth_expression = mouth_expression_component(view, before, after)
+    if isinstance(mouth_expression, dict):
+        metrics["mouth_expression"] = mouth_expression
+        score += int(mouth_expression.get("score") or 0)
+        code = str(mouth_expression.get("code") or "")
+        status = str(mouth_expression.get("status") or "")
+        if code and status in {"block", "review"}:
+            warning_entry = {
+                "code": code,
+                "severity": "block" if status == "block" else "review",
+                "message": str(mouth_expression.get("message") or code),
+                "slot": view,
+            }
+            for dim_key in ("selected_files", "roles"):
+                if dim_key in mouth_expression:
+                    warning_entry[dim_key] = mouth_expression[dim_key]
+            warnings.append(warning_entry)
+    target_effect = target_effect_component(
+        view,
+        before,
+        after,
+        treatment_type=treatment_type,
+        treatment_types=treatment_types,
+    )
+    if isinstance(target_effect, dict):
+        metrics["target_effect"] = target_effect
+        score += int(target_effect.get("score") or 0)
+        code = str(target_effect.get("code") or "")
+        status = str(target_effect.get("status") or "")
+        if code and status in {"block", "review"}:
+            warning_entry: dict[str, Any] = {
+                "code": code,
+                "severity": "block" if status == "block" else "review",
+                "message": str(target_effect.get("message") or code),
+                "slot": view,
+            }
+            for dim_key in ("selected_files", "roles"):
+                if dim_key in target_effect:
+                    warning_entry[dim_key] = target_effect[dim_key]
             warnings.append(warning_entry)
     pair_feedback = _matched_pair_feedback(view, before, after)
     if pair_feedback:
@@ -1456,6 +2051,8 @@ def select_best_pair(
     *,
     limit: int = 8,
     lock: dict[str, Any] | None = None,
+    treatment_type: str | None = None,
+    treatment_types: list[str] | tuple[str, ...] | None = None,
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None, dict[str, Any] | None]:
     if not before_candidates or not after_candidates:
         return (
@@ -1475,7 +2072,14 @@ def select_best_pair(
         if locked_before and locked_after:
             _apply_lock_marker(locked_before, view, lock, "before")
             _apply_lock_marker(locked_after, view, lock, "after")
-            quality = _locked_pair_quality(view, locked_before, locked_after, lock)
+            quality = _locked_pair_quality(
+                view,
+                locked_before,
+                locked_after,
+                lock,
+                treatment_type=treatment_type,
+                treatment_types=treatment_types,
+            )
             drop_reason = render_slot_drop_reason(view, quality)
             if drop_reason:
                 return None, None, _with_render_slot_drop(view, quality, drop_reason)
@@ -1486,7 +2090,13 @@ def select_best_pair(
     severity_rank = {"ok": 0, "review": 1, "block": 2}
     for before in ranked_before:
         for after in ranked_after:
-            quality = slot_pair_quality(view, before, after)
+            quality = slot_pair_quality(
+                view,
+                before,
+                after,
+                treatment_type=treatment_type,
+                treatment_types=treatment_types,
+            )
             if not quality:
                 continue
             rank = (
@@ -1499,7 +2109,13 @@ def select_best_pair(
     if not pair_rows:
         before = before_candidates[0]
         after = after_candidates[0]
-        quality = slot_pair_quality(view, before, after)
+        quality = slot_pair_quality(
+            view,
+            before,
+            after,
+            treatment_type=treatment_type,
+            treatment_types=treatment_types,
+        )
         drop_reason = render_slot_drop_reason(view, quality)
         if drop_reason:
             return None, None, _with_render_slot_drop(view, quality, drop_reason)

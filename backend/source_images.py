@@ -7,6 +7,7 @@ material.
 """
 from __future__ import annotations
 
+from functools import lru_cache
 import logging
 import re
 from pathlib import Path
@@ -67,6 +68,25 @@ def filter_source_image_files(image_files: list[str]) -> list[str]:
 
 
 COMPOSITE_ASPECT_RATIO_THRESHOLD = 2.5
+COMPOSITE_CANVAS_WHITE_THRESHOLD = 238
+COMPOSITE_CANVAS_WHITE_RATIO_MIN = 0.20
+COMPOSITE_CANVAS_BORDER_WHITE_RATIO_MIN = 0.32
+COMPOSITE_CANVAS_VERTICAL_RUN_MIN = 0.045
+COMPOSITE_CANVAS_HORIZONTAL_RUN_MIN = 0.08
+COMPOSITE_CANVAS_STRONG_BLANK_LINE_MIN = 0.95
+
+_COMPOSITE_REASON_RE = re.compile(
+    r"("
+    r"side[-\s]?by[-\s]?side|"
+    r"before[-\s]?and[-\s]?after|"
+    r"before/after|"
+    r"collage|"
+    r"composite|"
+    r"拼图|"
+    r"对比图"
+    r")",
+    re.IGNORECASE,
+)
 
 
 def is_composite_by_dimensions(width: int, height: int) -> bool:
@@ -77,14 +97,130 @@ def is_composite_by_dimensions(width: int, height: int) -> bool:
     return ratio >= COMPOSITE_ASPECT_RATIO_THRESHOLD
 
 
-def is_composite_image(image_path: Path) -> bool:
-    """Content-level composite detection using PIL aspect ratio heuristic.
+def observation_reasons_indicate_composite(raw_reasons: object) -> bool:
+    """Return True when VLM reason text explicitly says this is a comparison collage."""
+    if isinstance(raw_reasons, str):
+        candidates = [raw_reasons]
+    elif isinstance(raw_reasons, list):
+        candidates = [str(item) for item in raw_reasons if item]
+    else:
+        candidates = [str(raw_reasons)] if raw_reasons else []
+    for text in candidates:
+        if not text:
+            continue
+        if _COMPOSITE_REASON_RE.search(text):
+            return True
+        lowered = text.lower()
+        has_cn_pair = "术前" in text and "术后" in text
+        has_en_pair = "before" in lowered and "after" in lowered
+        has_compare_context = any(
+            token in lowered
+            for token in (
+                "comparison",
+                "compare",
+                "labeled",
+                "labelled",
+                "single image",
+                "single composite",
+            )
+        ) or any(token in text for token in ("对比", "标签", "同一张", "单张"))
+        if (has_cn_pair or has_en_pair) and has_compare_context:
+            return True
+    return False
 
-    Returns True for images whose aspect ratio strongly suggests they are
-    side-by-side or stacked composites (e.g. before/after comparison collages).
-    """
-    if not image_path.is_file():
+
+def _max_run_fraction(values: list[float], *, threshold: float, start: int, end: int) -> float:
+    best = 0
+    current = 0
+    for value in values[max(0, start):max(0, end)]:
+        if value >= threshold:
+            current += 1
+            best = max(best, current)
+        else:
+            current = 0
+    return best / max(len(values), 1)
+
+
+def _white_canvas_composite_metrics(image_path: Path) -> dict[str, float] | None:
+    try:
+        from PIL import Image, ImageOps
+    except ImportError:
+        return None
+    try:
+        with Image.open(image_path) as img:
+            transposed = ImageOps.exif_transpose(img).convert("RGB")
+            transposed.thumbnail((512, 512))
+            width, height = transposed.size
+            pixels = list(transposed.getdata())
+    except Exception:
+        return None
+    if width <= 0 or height <= 0 or not pixels:
+        return None
+    row_white = [0] * height
+    col_white = [0] * width
+    white_total = 0
+    threshold = COMPOSITE_CANVAS_WHITE_THRESHOLD
+    for index, (red, green, blue) in enumerate(pixels):
+        if red < threshold or green < threshold or blue < threshold:
+            continue
+        y, x = divmod(index, width)
+        row_white[y] += 1
+        col_white[x] += 1
+        white_total += 1
+    row_ratios = [count / width for count in row_white]
+    col_ratios = [count / height for count in col_white]
+    border = max(1, min(width, height) // 20)
+    border_total = 0
+    border_white = 0
+    for y in range(height):
+        for x in range(width):
+            if y >= border and y < height - border and x >= border and x < width - border:
+                continue
+            border_total += 1
+            if pixels[y * width + x][0] >= threshold and pixels[y * width + x][1] >= threshold and pixels[y * width + x][2] >= threshold:
+                border_white += 1
+    return {
+        "white_ratio": white_total / max(width * height, 1),
+        "border_white_ratio": border_white / max(border_total, 1),
+        "central_vertical_run_fraction": _max_run_fraction(
+            col_ratios,
+            threshold=0.82,
+            start=int(width * 0.12),
+            end=int(width * 0.88),
+        ),
+        "central_horizontal_run_fraction": _max_run_fraction(
+            row_ratios,
+            threshold=0.82,
+            start=int(height * 0.12),
+            end=int(height * 0.88),
+        ),
+        "max_col_white_ratio": max(col_ratios, default=0.0),
+        "max_row_white_ratio": max(row_ratios, default=0.0),
+    }
+
+
+def _looks_like_white_canvas_composite(metrics: dict[str, float] | None) -> bool:
+    if not metrics:
         return False
+    has_canvas = (
+        metrics["white_ratio"] >= COMPOSITE_CANVAS_WHITE_RATIO_MIN
+        and metrics["border_white_ratio"] >= COMPOSITE_CANVAS_BORDER_WHITE_RATIO_MIN
+    )
+    has_internal_gutter = (
+        metrics["central_vertical_run_fraction"] >= COMPOSITE_CANVAS_VERTICAL_RUN_MIN
+        or metrics["central_horizontal_run_fraction"] >= COMPOSITE_CANVAS_HORIZONTAL_RUN_MIN
+    )
+    has_strong_blank_line = (
+        metrics["max_col_white_ratio"] >= COMPOSITE_CANVAS_STRONG_BLANK_LINE_MIN
+        or metrics["max_row_white_ratio"] >= COMPOSITE_CANVAS_STRONG_BLANK_LINE_MIN
+    )
+    return has_canvas and has_internal_gutter and has_strong_blank_line
+
+
+@lru_cache(maxsize=512)
+def _is_composite_image_cached(path_str: str, mtime_ns: int, file_size: int) -> bool:
+    del mtime_ns, file_size
+    image_path = Path(path_str)
     try:
         from PIL import Image, ImageOps
     except ImportError:
@@ -102,7 +238,31 @@ def is_composite_image(image_path: Path) -> bool:
             image_path.name,
         )
         return True
+    metrics = _white_canvas_composite_metrics(image_path)
+    if _looks_like_white_canvas_composite(metrics):
+        logger.info(
+            "composite image detected (white canvas/gutter): %s metrics=%s",
+            image_path.name,
+            {key: round(value, 4) for key, value in (metrics or {}).items()},
+        )
+        return True
     return False
+
+
+def is_composite_image(image_path: Path) -> bool:
+    """Content-level composite detection using aspect ratio and white-canvas gutters.
+
+    Returns True for images whose aspect ratio strongly suggests they are
+    side-by-side or stacked composites, or whose content looks like a
+    before/after comparison board embedded on a white canvas.
+    """
+    if not image_path.is_file():
+        return False
+    try:
+        stat = image_path.stat()
+    except OSError:
+        return False
+    return _is_composite_image_cached(str(image_path), int(stat.st_mtime_ns), int(stat.st_size))
 
 
 def existing_source_image_files(abs_path: str, image_files: list[str]) -> dict[str, object]:

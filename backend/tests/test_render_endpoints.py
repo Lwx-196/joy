@@ -7,6 +7,7 @@ enqueued jobs stay in 'queued' status — we never actually run mediapipe.
 from __future__ import annotations
 
 import json
+import subprocess
 from datetime import datetime, timezone
 
 from backend import db
@@ -133,6 +134,42 @@ def test_latest_job_returns_most_recent(client, seed_case, no_job_pool):
     assert j2 > j1
     body = client.get(f"/api/cases/{case_id}/render/latest").json()
     assert body["job"]["id"] == j2
+
+
+def test_latest_job_prefers_latest_blocked_output_over_older_done(client, seed_case, tmp_path):
+    case_id = seed_case(abs_path=str(tmp_path / "case-latest-blocked-output"))
+    old_output = tmp_path / "old-final-board.jpg"
+    blocked_output = tmp_path / "blocked-final-board.jpg"
+    old_output.write_bytes(b"old board")
+    blocked_output.write_bytes(b"blocked board")
+
+    with db.connect() as conn:
+        old_id = conn.execute(
+            """
+            INSERT INTO render_jobs
+              (case_id, brand, template, status, enqueued_at, finished_at, output_path,
+               semantic_judge, meta_json)
+            VALUES (?, 'fumei', 'tri-compare', 'done', '2026-01-01T00:00:00+00:00',
+                    '2026-01-01T00:00:10+00:00', ?, 'off', '{}')
+            """,
+            (case_id, str(old_output)),
+        ).lastrowid
+        blocked_id = conn.execute(
+            """
+            INSERT INTO render_jobs
+              (case_id, brand, template, status, enqueued_at, finished_at, output_path,
+               semantic_judge, meta_json)
+            VALUES (?, 'fumei', 'tri-compare', 'blocked', '2026-01-01T00:01:00+00:00',
+                    '2026-01-01T00:01:10+00:00', ?, 'off', '{}')
+            """,
+            (case_id, str(blocked_output)),
+        ).lastrowid
+
+    body = client.get(f"/api/cases/{case_id}/render/latest").json()
+    assert old_id < blocked_id
+    assert body["job"]["id"] == blocked_id
+    assert body["job"]["status"] == "blocked"
+    assert body["job"]["output_path"] == str(blocked_output)
 
 
 def test_render_queue_passes_review_exclusions_to_runner(seed_case, tmp_path, monkeypatch):
@@ -385,6 +422,141 @@ def test_render_queue_ai_path_passes_allow_burn_and_surfaces_cache_miss(seed_cas
     assert meta["cache_miss_total"] == 3
     assert meta["cache_miss_est_cost_usd"] == 0.114
     assert meta["cache_miss_est_seconds"] == 300
+
+
+def test_render_queue_derives_title_customer_from_library_path(seed_case, tmp_path, monkeypatch):
+    from backend import db, render_queue
+
+    case_dir = tmp_path / "incoming" / "无创案例库" / "无创注射案例库" / "林惠贞"
+    case_dir.mkdir(parents=True)
+    case_id = seed_case(
+        abs_path=str(case_dir),
+        customer_raw="无创注射案例库",
+        category="standard_face",
+        template_tier="tri",
+    )
+    now = datetime.now(timezone.utc).isoformat()
+    with db.connect() as conn:
+        job_id = conn.execute(
+            """
+            INSERT INTO render_jobs
+                (case_id, brand, template, status, enqueued_at, semantic_judge, render_mode, meta_json)
+            VALUES (?, 'fumei', 'tri-compare', 'queued', ?, 'off', 'ai', ?)
+            """,
+            (
+                case_id,
+                now,
+                json.dumps({"options": {"enhance_direction": "heal", "allow_burn": True}}),
+            ),
+        ).lastrowid
+
+    captured: dict = {}
+
+    def fake_run_ai_enhanced_render(case_dir_arg, **kwargs):
+        captured.update(kwargs)
+        return {
+            "output_path": None,
+            "manifest_path": None,
+            "status": "done",
+            "case_mode": "ai_enhanced_board",
+            "enhance": {"direction": "heal", "model": "gemini-3-pro-image"},
+            "blocking_issue_count": 0,
+            "warning_count": 0,
+            "effective_templates": {},
+            "manual_overrides_applied": [],
+        }
+
+    monkeypatch.setattr(render_queue.render_executor, "run_ai_enhanced_render", fake_run_ai_enhanced_render)
+    render_queue.RenderQueue()._execute_render(job_id)
+
+    assert captured["customer_name"] == "林惠贞"
+
+
+def test_render_queue_ai_timeout_persists_provider_evidence(seed_case, tmp_path, monkeypatch):
+    from backend import db, render_queue
+
+    case_dir = tmp_path / "case-ai-timeout"
+    case_dir.mkdir()
+    (case_dir / "术前1.jpg").write_bytes(b"before")
+    (case_dir / "术后1.jpg").write_bytes(b"after")
+    case_id = seed_case(abs_path=str(case_dir))
+    now = datetime.now(timezone.utc).isoformat()
+    options = {"enhance_direction": "heal", "no_cache": True, "allow_burn": True}
+    with db.connect() as conn:
+        conn.execute(
+            "UPDATE cases SET meta_json = ? WHERE id = ?",
+            (json.dumps({"image_files": ["术前1.jpg", "术后1.jpg"]}, ensure_ascii=False), case_id),
+        )
+        job_id = conn.execute(
+            """
+            INSERT INTO render_jobs
+                (case_id, brand, template, status, enqueued_at, semantic_judge, render_mode, meta_json)
+            VALUES (?, 'fumei', 'tri-compare', 'queued', ?, 'off', 'ai', ?)
+            """,
+            (case_id, now, json.dumps({"options": options}, ensure_ascii=False)),
+        ).lastrowid
+
+    command = {
+        "args": [
+            "python3",
+            "backend/scripts/render_ai_enhanced_boards.py",
+            "--provider-order",
+            "rsta,tuzi,flashapi,77code",
+            "--no-cache",
+            "--allow-cache-miss-burn",
+        ],
+        "provider_order_raw": "rsta,tuzi,flashapi,77code",
+        "provider_order": ["rsta", "tuzi", "flashapi", "77code"],
+        "no_cache": True,
+        "allow_burn": True,
+        "timeout_sec": 900,
+    }
+
+    def fake_run_ai_enhanced_render(case_dir_arg, **kwargs):
+        exc = subprocess.TimeoutExpired(
+            cmd=command["args"],
+            timeout=900,
+            output="partial stdout from ai child",
+            stderr="partial stderr from ai child",
+        )
+        exc.ai_enhance_command = command
+        exc.ai_enhance_stdout_tail = "partial stdout from ai child"
+        exc.ai_enhance_stderr_tail = "partial stderr from ai child"
+        exc.ai_enhance_progress = {
+            "event_count": 2,
+            "last_event": {"event": "provider_attempt_start", "slot": "front", "provider": "rsta", "attempt": 1},
+            "recent_events": [
+                {"event": "slot_external_call_start", "slot": "front"},
+                {"event": "provider_attempt_start", "slot": "front", "provider": "rsta", "attempt": 1},
+            ],
+        }
+        raise exc
+
+    monkeypatch.setattr(
+        render_queue.render_executor, "run_ai_enhanced_render", fake_run_ai_enhanced_render
+    )
+    worker = render_queue.RenderQueue()
+    worker._execute_render(job_id)
+
+    with db.connect() as conn:
+        row = conn.execute(
+            "SELECT status, error_message, meta_json FROM render_jobs WHERE id = ?", (job_id,)
+        ).fetchone()
+    assert row["status"] == "failed"
+    assert row["error_message"] == "timeout after 900s"
+    meta = json.loads(row["meta_json"])
+    evidence = meta["ai_usage"]["enhancement_evidence"]
+    assert meta["options"]["no_cache"] is True
+    assert meta["ai_usage"]["cache_disabled"] is True
+    assert meta["ai_usage"]["external_call_count"] == 0
+    assert meta["ai_usage"]["cache_hit_count"] == 0
+    assert evidence["provider_order"] == ["rsta", "tuzi", "flashapi", "77code"]
+    assert evidence["ai_enhance_command"]["provider_order_raw"] == "rsta,tuzi,flashapi,77code"
+    assert evidence["ai_enhance_command"]["timeout_sec"] == 900
+    assert evidence["stdout_tail"] == "partial stdout from ai child"
+    assert evidence["stderr_tail"] == "partial stderr from ai child"
+    assert evidence["progress"]["last_event"]["event"] == "provider_attempt_start"
+    assert evidence["progress"]["last_event"]["provider"] == "rsta"
 
 
 def test_get_job_404(client, no_job_pool):

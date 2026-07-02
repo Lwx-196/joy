@@ -1586,6 +1586,52 @@ def compute_pair_eye_signal(
         return {"valid": False, "reason": f"signal_error: {exc}"}
 
 
+def compute_pair_position_signal(
+    before_face: dict,
+    after_face: dict,
+    before_transform: dict,
+    after_transform: dict,
+    cell_size: tuple[int, int],
+    before_shift_y: float = 0.0,
+    after_shift_y: float = 0.0,
+) -> dict:
+    """G2 正面对齐信号：终格眼位中心差。
+
+    眼距比只能发现大小灾难，蓝凤端 #381 暴露出大小接近但术后整张脸明显偏低的
+    情况。该信号复用渲染解析坐标，记录终格眼位 dy，占 cell 高度比例，供
+    board_pair_gate 做灾难级兜底。
+    """
+    try:
+        target_w, target_h = cell_size
+        before_eye = before_face.get("eye_center")
+        after_eye = after_face.get("eye_center")
+        if before_eye is None or after_eye is None:
+            return {"valid": False, "reason": "eye_center_unavailable"}
+        before_scale = float(before_transform.get("scale") or 0)
+        after_scale = float(after_transform.get("scale") or 0)
+        before_offset = before_transform.get("offset") or [0, 0]
+        after_offset = after_transform.get("offset") or [0, 0]
+        if before_scale <= 0 or after_scale <= 0 or target_w <= 0 or target_h <= 0:
+            return {"valid": False, "reason": "transform_unavailable"}
+        before_x = float(before_eye[0]) * before_scale + float(before_offset[0])
+        before_y = float(before_eye[1]) * before_scale + float(before_offset[1]) + float(before_shift_y)
+        after_x = float(after_eye[0]) * after_scale + float(after_offset[0])
+        after_y = float(after_eye[1]) * after_scale + float(after_offset[1]) + float(after_shift_y)
+        dx = after_x - before_x
+        dy = after_y - before_y
+        return {
+            "valid": True,
+            "before_eye_center": [round(before_x, 1), round(before_y, 1)],
+            "after_eye_center": [round(after_x, 1), round(after_y, 1)],
+            "eye_center_dx_px": round(dx, 1),
+            "eye_center_dy_px": round(dy, 1),
+            "eye_center_dx_panel_ratio": round(dx / max(float(target_w), 1.0), 4),
+            "eye_center_dy_panel_ratio": round(dy / max(float(target_h), 1.0), 4),
+        }
+    except Exception as exc:  # noqa: BLE001 — 信号永不让渲染崩溃
+        return {"valid": False, "reason": f"position_signal_error: {exc}"}
+
+
 # |dcs_a/dcs_b − 1| 超此 = 术前/术后真实头尺寸确有差异（非同人同尺度），不强行
 # 配平脸高（拉等会掩盖真实差异），回退保护框锚。同一人 DCS 跨 pose CV 仅 2-3%，
 # 正常配对远在阈值内；超阈通常意味错人/粗检测误差 → 留诊断交 VLM/人工。
@@ -1772,6 +1818,13 @@ def render_protected_pair(
     else:
         before_arr, position_alignment = align_before_position_to_after_cell(before_arr, after_arr, slot)
     composition_diagnostic = composition_diagnostic_from_cells(before_arr, after_arr, slot)
+    before_shift_y = float(
+        position_alignment.get("before_shift_y")
+        if "before_shift_y" in position_alignment
+        else position_alignment.get("shift_y", 0)
+        or 0
+    )
+    after_shift_y = float(position_alignment.get("after_shift_y") or 0)
 
     if render_plan_records is not None:
         render_plan_records.append({
@@ -1782,6 +1835,15 @@ def render_protected_pair(
             "after": Path(after_path).name,
             "pair_eye_signal": compute_pair_eye_signal(
                 before_face, after_face, before_scale, after_scale
+            ),
+            "pair_position_signal": compute_pair_position_signal(
+                before_face,
+                after_face,
+                before_transform,
+                after_transform,
+                size,
+                before_shift_y=before_shift_y,
+                after_shift_y=after_shift_y,
             ),
             "before_scale": round(before_scale, 4),
             "after_scale": round(after_scale, 4),

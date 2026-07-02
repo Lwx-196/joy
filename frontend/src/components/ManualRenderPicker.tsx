@@ -801,7 +801,7 @@ export function ManualRenderPicker({ caseId, allImages, brand, seedRequest }: Pr
             semantic_judge: "off",
             ...(aiEnhanceBoard
               ? { options: { enhance_direction: "heal", enhance_model: aiEnhanceModel } }
-              : {}),
+              : { options: { enhance_direction: "" } }),
           },
         });
         setMessage(t("manualRender.enqueued", { files: createdFiles.join(" / ") }));
