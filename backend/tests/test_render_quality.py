@@ -708,6 +708,68 @@ def test_render_quality_blocks_side_source_scale_mismatch_from_inferred_manifest
     assert any("侧面对比人物尺度不一致" in item for item in quality["metrics"]["policy_blockers"])
 
 
+def test_source_scale_policy_skips_pair_when_source_image_missing(tmp_path, monkeypatch):
+    """源图缺失（目录移动）→ 跳过配对 fail-open，不得用裸像素混单位产出假 mismatch。"""
+    render_dir = tmp_path / "render"
+    render_dir.mkdir()
+    output = render_dir / "final-board.jpg"
+    output.write_bytes(b"jpeg")
+    before = tmp_path / "before-side.jpg"
+    after = tmp_path / "after-side.jpg"
+    # before 存在（归一化 norm_h≈0.66），after 源图缺失——旧回退会拿裸像素 480
+    # 与 0.66 比出天文数字 ratio → 假拦。
+    Image.new("RGB", (1000, 1000), (20, 20, 20)).save(before)
+    (render_dir / "manifest.final.json").write_text(
+        json.dumps(
+            {
+                "groups": [
+                    {
+                        "selected_slots": {
+                            "side": {
+                                "before": {
+                                    "name": "before-side.jpg",
+                                    "path": str(before),
+                                    "crop_box": {"x1": 150, "y1": 120, "x2": 780, "y2": 780},
+                                },
+                                "after": {
+                                    "name": "after-side.jpg",
+                                    "path": str(after),
+                                    "crop_box": {"x1": 260, "y1": 220, "x2": 760, "y2": 700},
+                                },
+                            }
+                        }
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        rq,
+        "compute_pixel_metrics",
+        lambda _path: {"available": True, "flags": [], "cv_penalty": 0.0},
+    )
+
+    quality = evaluate_render_result(
+        {
+            "output_path": str(output),
+            "status": "done",
+            "template": "bi-compare",
+            "blocking_issue_count": 0,
+            "warning_count": 0,
+            "ai_usage": {},
+        }
+    )
+
+    policy = quality["metrics"]["source_scale_policy"]
+    assert policy["status"] == "ok"
+    assert policy["alerts"] == []
+    assert policy["evaluated_pair_count"] == 0
+    assert policy["fail_open"] is True
+    assert not any("侧面对比人物尺度不一致" in item for item in quality["metrics"]["policy_blockers"])
+
+
 def test_bi_compare_blocks_cutout_penalty_at_policy_ceiling(tmp_path, monkeypatch):
     output = tmp_path / "final-board.jpg"
     output.write_bytes(b"jpeg")

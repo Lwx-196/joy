@@ -635,13 +635,13 @@ def _selected_crop_metrics(item: dict[str, Any]) -> dict[str, float] | None:
         return None
     crop_w, crop_h = crop_size
     image_size = _image_dimensions(item.get("path"))
-    if image_size:
-        image_w, image_h = image_size
-        norm_h = crop_h / image_h
-        norm_area = (crop_w * crop_h) / max(1.0, image_w * image_h)
-    else:
-        norm_h = crop_h
-        norm_area = crop_w * crop_h
+    if not image_size:
+        # 源图缺失/不可读时无法归一化；裸像素与归一化值（或另一侧不同分辨率的
+        # 裸像素）不可比，宁可跳过该配对也不产出假 side_source_scale_mismatch。
+        return None
+    image_w, image_h = image_size
+    norm_h = crop_h / image_h
+    norm_area = (crop_w * crop_h) / max(1.0, image_w * image_h)
     return {
         "crop_w": round(crop_w, 3),
         "crop_h": round(crop_h, 3),
