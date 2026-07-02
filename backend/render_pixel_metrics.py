@@ -495,7 +495,13 @@ def _postop_skin_cast_metrics(
     cells = _photo_panel_cells(photo_boxes)
     if len(cells) < 2:
         return result
-    before_box, after_box = sorted(cells, key=lambda item: (item[1], item[0]))[:2]
+    # (top,left) 全局排序在检测框 top 有几像素抖动时会把右侧 after 排到 before
+    # 前面 → warmth_drop 符号反转静默漏检。先分行取首行，行内按 x 排序。
+    rows = _photo_cell_rows(cells)
+    first_row = sorted(rows, key=_row_center_y)[0] if rows else []
+    if len(first_row) < 2:
+        return result
+    before_box, after_box = sorted(first_row, key=lambda item: item[0])[:2]
     before = _face_warmth_stats(image.crop(before_box))
     after = _face_warmth_stats(image.crop(after_box))
     if not before or not after:

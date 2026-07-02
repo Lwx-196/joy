@@ -256,6 +256,30 @@ def test_balanced_side_scale_does_not_flag(tmp_path: Path) -> None:
     assert metrics["side_scale_mismatch"]["flagged"] is False
 
 
+def test_postop_cast_survives_detection_box_top_jitter(tmp_path: Path) -> None:
+    """after 检测框 top 比 before 高几像素时，(top,left) 全局排序会互换 before/after
+    → warmth_drop 反号漏检；行内按 x 排序后必须仍能拦（review finding 10）。"""
+    image = Image.new("RGB", (720, 460), (238, 232, 224))
+    draw = ImageDraw.Draw(image)
+    before_box = (80, 110, 320, 360)
+    after_box = (400, 100, 640, 350)  # top 比 before 高 10px
+    for box, face in ((before_box, (174, 148, 126)), (after_box, (161, 150, 136))):
+        draw.rectangle(box, fill=(0, 0, 0))
+        x0, y0, x1, y1 = box
+        draw.rectangle((x0 + 40, y0 + 30, x1 - 40, y1 - 30), fill=face)
+    path = tmp_path / "postop-jitter.jpg"
+    image.save(path)
+    with Image.open(path) as opened:
+        board = opened.convert("RGB")
+
+    metrics = rpm._postop_skin_cast_metrics(board, [before_box, after_box])
+
+    assert metrics["evaluated"] is True
+    assert metrics["flagged"] is True
+    assert metrics["warmth_drop"] > 0
+    assert metrics["before"]["r_minus_g"] > metrics["after"]["r_minus_g"]
+
+
 def _draw_subject_cell(draw: ImageDraw.ImageDraw, box: tuple[int, int, int, int], *, scale: float = 1.0) -> None:
     x0, y0, x1, y1 = box
     draw.rectangle(box, fill=(0, 0, 0))
