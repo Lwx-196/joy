@@ -2534,6 +2534,13 @@ class RenderQueue:
             customer_raw = row["case_customer_raw"]
             title_customer_name = _display_customer_name_for_title(customer_raw, case_dir)
             case_date, case_project = scanner.extract_case_date_project(Path(case_dir), scanner.DEFAULT_ROOTS)
+            # job 级人工标题覆盖：treatment 目录名中段含阶段词（如「…注射下巴术前，…」）时
+            # scanner 提取的项目串会触发 render_quality 阶段词 blocker，且该 blocker 不受
+            # --customer-name 豁免。操作员经 options.title_project 提供干净项目串，走既有
+            # --case-project 透传（executor/脚本已接线）。覆盖串本身仍受质量门检查，不豁免。
+            title_project_override = str(_job_options.get("title_project") or "").strip()
+            if title_project_override:
+                case_project = title_project_override
 
             # Stage B: pull manual phase/view overrides for this case.
             manual_overrides: dict[str, dict[str, Any]] = _fetch_case_image_overrides(conn, int(case_id))

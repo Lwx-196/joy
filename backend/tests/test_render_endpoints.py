@@ -472,6 +472,108 @@ def test_render_queue_derives_title_customer_from_library_path(seed_case, tmp_pa
     assert captured["customer_name"] == "林惠贞"
 
 
+def test_render_queue_title_project_override_replaces_scanner_project(seed_case, tmp_path, monkeypatch):
+    """options.title_project 覆盖 scanner 从目录名提取的项目串（目录名中段含阶段词场景）。"""
+    from backend import db, render_queue
+
+    case_dir = tmp_path / "incoming" / "无创案例库" / "无创注射案例库" / "骆萍" / "2026.3.31塑公主2支注射下巴术前，衡力150u注射下颌缘颈阔肌咬肌"
+    case_dir.mkdir(parents=True)
+    case_id = seed_case(
+        abs_path=str(case_dir),
+        customer_raw="无创注射案例库",
+        category="standard_face",
+        template_tier="tri",
+    )
+    now = datetime.now(timezone.utc).isoformat()
+    clean_project = "塑公主2支注射下巴，衡力150u注射下颌缘颈阔肌咬肌"
+    with db.connect() as conn:
+        job_id = conn.execute(
+            """
+            INSERT INTO render_jobs
+                (case_id, brand, template, status, enqueued_at, semantic_judge, render_mode, meta_json)
+            VALUES (?, 'fumei', 'tri-compare', 'queued', ?, 'off', 'ai', ?)
+            """,
+            (
+                case_id,
+                now,
+                json.dumps(
+                    {"options": {"enhance_direction": "heal", "allow_burn": True, "title_project": clean_project}},
+                    ensure_ascii=False,
+                ),
+            ),
+        ).lastrowid
+
+    captured: dict = {}
+
+    def fake_run_ai_enhanced_render(case_dir_arg, **kwargs):
+        captured.update(kwargs)
+        return {
+            "output_path": None,
+            "manifest_path": None,
+            "status": "done",
+            "case_mode": "ai_enhanced_board",
+            "enhance": {"direction": "heal", "model": "gemini-3-pro-image"},
+            "blocking_issue_count": 0,
+            "warning_count": 0,
+            "effective_templates": {},
+            "manual_overrides_applied": [],
+        }
+
+    monkeypatch.setattr(render_queue.render_executor, "run_ai_enhanced_render", fake_run_ai_enhanced_render)
+    render_queue.RenderQueue()._execute_render(job_id)
+
+    assert captured["project"] == clean_project
+
+
+def test_render_queue_without_title_project_keeps_scanner_project(seed_case, tmp_path, monkeypatch):
+    """无 title_project 时回退 scanner 提取值（含污染也如实透传，交给质量门拦）。"""
+    from backend import db, render_queue
+
+    case_dir = tmp_path / "incoming" / "无创案例库" / "无创注射案例库" / "骆萍" / "2026.3.31塑公主2支注射下巴术前，衡力150u注射下颌缘颈阔肌咬肌"
+    case_dir.mkdir(parents=True)
+    case_id = seed_case(
+        abs_path=str(case_dir),
+        customer_raw="无创注射案例库",
+        category="standard_face",
+        template_tier="tri",
+    )
+    now = datetime.now(timezone.utc).isoformat()
+    with db.connect() as conn:
+        job_id = conn.execute(
+            """
+            INSERT INTO render_jobs
+                (case_id, brand, template, status, enqueued_at, semantic_judge, render_mode, meta_json)
+            VALUES (?, 'fumei', 'tri-compare', 'queued', ?, 'off', 'ai', ?)
+            """,
+            (
+                case_id,
+                now,
+                json.dumps({"options": {"enhance_direction": "heal", "allow_burn": True}}, ensure_ascii=False),
+            ),
+        ).lastrowid
+
+    captured: dict = {}
+
+    def fake_run_ai_enhanced_render(case_dir_arg, **kwargs):
+        captured.update(kwargs)
+        return {
+            "output_path": None,
+            "manifest_path": None,
+            "status": "done",
+            "case_mode": "ai_enhanced_board",
+            "enhance": {"direction": "heal", "model": "gemini-3-pro-image"},
+            "blocking_issue_count": 0,
+            "warning_count": 0,
+            "effective_templates": {},
+            "manual_overrides_applied": [],
+        }
+
+    monkeypatch.setattr(render_queue.render_executor, "run_ai_enhanced_render", fake_run_ai_enhanced_render)
+    render_queue.RenderQueue()._execute_render(job_id)
+
+    assert "术前" in str(captured.get("project") or "")
+
+
 def test_render_queue_ai_timeout_persists_provider_evidence(seed_case, tmp_path, monkeypatch):
     from backend import db, render_queue
 
