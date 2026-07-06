@@ -10,6 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from . import db, render_quality
 from .render_queue import RENDER_QUEUE
 from .routes import audit, best_pair, case_groups, cases, classification, customers, evaluations, image_workbench, issues, jobs, render, review_tickets, scan, stress, upgrade
+from .services import simulation_recovery
 from .upgrade_queue import UPGRADE_QUEUE
 
 app = FastAPI(title="case-workbench", version="0.1.0")
@@ -40,6 +41,9 @@ def _backfill_render_quality_async() -> None:
 # 避免两者在启动窗口同时争同一 SQLite 写锁。
 RENDER_QUEUE.recover()
 UPGRADE_QUEUE.recover()
+# simulation_jobs 没有恢复协议（提交闭包不持久化、重跑=无授权烧钱），
+# stale 行只标 failed 不重跑，操作员可从 UI 随手重发。
+simulation_recovery.recover_stale_simulation_jobs()
 threading.Thread(
     target=_backfill_render_quality_async, name="render-quality-backfill", daemon=True
 ).start()
