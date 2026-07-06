@@ -460,6 +460,29 @@ export type CasesPage = {
 export const fetchCases = (params: CaseListParams = {}) =>
   api.get<CasesPage>("/api/cases", { params }).then((r) => r.data);
 
+// Work-queue summary — server-side lane aggregation (backend/routes/work_queue.py).
+// Replaces the Dashboard's old "fetch 2000 CaseSummary rows and count client-side".
+export type WorkQueueLaneKey =
+  | "todayNew"
+  | "missingLabel"
+  | "blockingOpen"
+  | "unboundCustomer"
+  | "pendingReview";
+
+export interface WorkQueueLaneSummary {
+  count: number;
+  /** Present only for lanes with batch actions (todayNew / pendingReview), id DESC. */
+  case_ids?: number[];
+}
+
+export interface WorkQueueSummary {
+  total: number;
+  lanes: Record<WorkQueueLaneKey, WorkQueueLaneSummary>;
+}
+
+export const fetchWorkQueueSummary = () =>
+  api.get<WorkQueueSummary>("/api/work-queue/summary").then((r) => r.data);
+
 export const fetchCaseDetail = (id: number) =>
   api.get<CaseDetail>(`/api/cases/${id}`).then((r) => r.data);
 

@@ -73,6 +73,7 @@ import {
   fetchSourceBindingCandidates,
   fetchSourceBlockers,
   fetchStats,
+  fetchWorkQueueSummary,
   fetchSupplementCandidates,
   fetchUpgradeBatch,
   fetchUpgradeJob,
@@ -158,6 +159,9 @@ export const QK = {
     params && Object.keys(params).length > 0
       ? (["cases", params] as const)
       : (["cases"] as const),
+  // 挂在 ["cases"] 前缀下:所有 case mutation 已有的 invalidate ["cases"]
+  // 自动覆盖本 key,新鲜度与被它取代的 {limit:2000} 全量列表缓存一致。
+  workQueueSummary: ["cases", "work-queue-summary"] as const,
   sourceBlockers: (params?: { reason?: "all" | SourceBlockerReason; limit?: number }) =>
     params && Object.keys(params).length > 0
       ? (["cases", "source-blockers", params] as const)
@@ -293,6 +297,18 @@ export function useCases(
   return { ...q, data: q.data?.items } as Omit<typeof q, "data"> & {
     data: CaseSummary[] | undefined;
   };
+}
+
+/**
+ * Server-side work-queue lane aggregation (GET /api/work-queue/summary).
+ * Replaces the Dashboard's old useCases({limit:2000}) + client-side deriveLanes.
+ */
+export function useWorkQueueSummary() {
+  return useQuery({
+    queryKey: QK.workQueueSummary,
+    queryFn: fetchWorkQueueSummary,
+    staleTime: 30_000,
+  });
 }
 
 /**

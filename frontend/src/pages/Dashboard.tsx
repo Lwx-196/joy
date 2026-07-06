@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { useTranslation } from "react-i18next";
-import { CATEGORY_LABEL, TIER_LABEL, parseRenderGateError, type CaseSummary } from "../api";
+import { CATEGORY_LABEL, TIER_LABEL, parseRenderGateError, type WorkQueueLaneKey } from "../api";
 import {
   useBatchRenderCases,
   useBatchUpgradeCases,
@@ -9,12 +9,13 @@ import {
   useScanLatest,
   useStats,
   useTriggerScan,
+  useWorkQueueSummary,
 } from "../hooks/queries";
 import { Bar, CategoryPill, Ico, ReviewPill, TierPill } from "../components/atoms";
 import { WorkflowWizard } from "../components/WorkflowWizard";
 import { useBrand } from "../lib/brand-context";
 import { useBatchJobToastStore } from "../lib/batch-job-toast";
-import { deriveLanes, isHeld, isToday, readLastVisitedCase, type LaneDef } from "../lib/work-queue";
+import { lanesFromSummary, readLastVisitedCase, type LaneDef } from "../lib/work-queue";
 
 const MAX_BATCH_RENDER = 50;
 const MAX_BATCH_UPGRADE = 50;
@@ -46,9 +47,9 @@ export default function Dashboard() {
   const statsQ = useStats();
   const latestQ = useScanLatest();
   const recentQ = useCases({ limit: 8 });
-  // Full list (cached for 30s) used to derive work-queue lane counts.
-  // Same query key as Cases.tsx ({limit:2000}) so the cache is shared.
-  const allQ = useCases({ limit: 2000 });
+  // Work-queue lane counts + batch-lane case ids, aggregated server-side
+  // (was: fetch the full 2000-row case list and derive lanes client-side).
+  const summaryQ = useWorkQueueSummary();
   const scanMut = useTriggerScan();
 
   const stats = statsQ.data;
@@ -57,8 +58,8 @@ export default function Dashboard() {
   const scanning = scanMut.isPending;
 
   const lanes: LaneDef[] = useMemo(
-    () => deriveLanes(allQ.data ?? []),
-    [allQ.data]
+    () => lanesFromSummary(summaryQ.data),
+    [summaryQ.data]
   );
   const lastVisited = readLastVisitedCase();
 
@@ -68,15 +69,12 @@ export default function Dashboard() {
   const batchUpgradeMut = useBatchUpgradeCases();
   const showBatchToast = useBatchJobToastStore((s) => s.show);
 
-  const laneTargets = (laneKey: string): CaseSummary[] => {
-    const live = (allQ.data ?? []).filter((c) => !isHeld(c));
-    if (laneKey === "pendingReview") return live.filter((c) => c.review_status === "pending");
-    if (laneKey === "todayNew") return live.filter((c) => isToday(c.last_modified));
-    return [];
-  };
+  // 批量车道的目标 id 由 summary 接口按 id DESC 返回(held 已在服务端剔除)。
+  const laneTargetIds = (laneKey: string): number[] =>
+    summaryQ.data?.lanes[laneKey as WorkQueueLaneKey]?.case_ids ?? [];
 
   const handleBatchRenderLane = (laneKey: string, force = false) => {
-    let target = laneTargets(laneKey);
+    let target = laneTargetIds(laneKey);
     if (target.length === 0) return;
     if (target.length > MAX_BATCH_RENDER) {
       const ok = window.confirm(
@@ -95,7 +93,7 @@ export default function Dashboard() {
     }
     batchRenderMut.mutate(
       {
-        caseIds: target.map((c) => c.id),
+        caseIds: target,
         payload: { brand, template: "tri-compare", semantic_judge: "auto", ...(force ? { force: true } : {}) },
       },
       {
@@ -116,7 +114,7 @@ export default function Dashboard() {
   };
 
   const handleBatchUpgradeLane = (laneKey: string) => {
-    let target = laneTargets(laneKey);
+    let target = laneTargetIds(laneKey);
     if (target.length === 0) return;
     if (target.length > MAX_BATCH_UPGRADE) {
       const ok = window.confirm(
@@ -131,7 +129,7 @@ export default function Dashboard() {
       if (!ok) return;
     }
     batchUpgradeMut.mutate(
-      { caseIds: target.map((c) => c.id), brand },
+      { caseIds: target, brand },
       {
         onSuccess: (data) => {
           showBatchToast("upgrade", data.batch_id, target.length);
@@ -243,7 +241,7 @@ export default function Dashboard() {
                 </Link>
               )}
               <span>
-                {allQ.isLoading ? t("queue.counting") : t("queue.totalCases", { n: allQ.data?.length ?? 0 })}
+                {summaryQ.isLoading ? t("queue.counting") : t("queue.totalCases", { n: summaryQ.data?.total ?? 0 })}
               </span>
             </div>
           </div>

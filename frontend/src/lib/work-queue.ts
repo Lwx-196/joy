@@ -1,5 +1,5 @@
 /**
- * Work queue derivation: pure functions over CaseSummary[].
+ * Work queue lanes: presentation metadata + assembly from the backend summary.
  *
  * Five lanes by ROI of "what should the user do next":
  *   1. todayNew      — cases whose last_modified is today (filesystem changes the user just made)
@@ -8,16 +8,17 @@
  *   4. unboundCustomer — customer_raw exists but customer_id is null (字典待规整)
  *   5. pendingReview — review_status = pending (someone started, needs to finish)
  *
+ * Lane predicates live server-side in backend/routes/work_queue.py
+ * (GET /api/work-queue/summary) — one lightweight aggregation instead of
+ * shipping the full 2000-row case list to the client. Lanes with batch
+ * actions (todayNew / pendingReview) also carry case_ids in id-DESC order,
+ * matching the list endpoint so slice(0, MAX_BATCH) behaves as before.
+ *
  * Each lane returns: count, route (with filter URL params), label, description.
  */
-import type { CaseSummary } from "../api";
+import type { CaseSummary, WorkQueueLaneKey, WorkQueueSummary } from "../api";
 
-export type LaneKey =
-  | "todayNew"
-  | "missingLabel"
-  | "blockingOpen"
-  | "unboundCustomer"
-  | "pendingReview";
+export type LaneKey = WorkQueueLaneKey;
 
 export interface LaneDef {
   key: LaneKey;
@@ -27,16 +28,6 @@ export interface LaneDef {
   desc: string;
   route: string; // /cases?... — Cases.tsx must handle these params
   tone: "cyan" | "amber" | "err" | "ok" | "ink";
-}
-
-export function isToday(iso: string): boolean {
-  const t = new Date(iso);
-  const now = new Date();
-  return (
-    t.getFullYear() === now.getFullYear() &&
-    t.getMonth() === now.getMonth() &&
-    t.getDate() === now.getDate()
-  );
 }
 
 /**
@@ -49,68 +40,50 @@ export function isHeld(c: CaseSummary, now: Date = new Date()): boolean {
   return !isNaN(t.getTime()) && t.getTime() > now.getTime();
 }
 
-export function deriveLanes(cases: CaseSummary[]): LaneDef[] {
-  const now = new Date();
-  // Filter out held cases — they should not show up in any lane.
-  const live = cases.filter((c) => !isHeld(c, now));
-  const total = live.length;
-  const todayNew = live.filter((c) => isToday(c.last_modified)).length;
-  const missingLabel = live.filter((c) => c.auto_category === "non_labeled" && c.manual_category == null).length;
-  const blockingOpen = live.filter(
-    (c) => c.blocking_issue_count > 0 && c.review_status !== "reviewed"
-  ).length;
-  const unboundCustomer = live.filter(
-    (c) => c.customer_id == null && !!c.customer_raw
-  ).length;
-  const pendingReview = live.filter((c) => c.review_status === "pending").length;
+const LANE_META: Array<Omit<LaneDef, "count" | "total">> = [
+  {
+    key: "todayNew",
+    label: "今日新增",
+    desc: "目录最后修改时间在今天",
+    route: "/cases?since=today",
+    tone: "cyan",
+  },
+  {
+    key: "missingLabel",
+    label: "缺命名",
+    desc: "未识别 术前/术后 命名 · 重命名后可参与出图",
+    route: "/cases?category=non_labeled",
+    tone: "amber",
+  },
+  {
+    key: "blockingOpen",
+    label: "阻塞待处理",
+    desc: "存在阻塞码且未审核",
+    route: "/cases?blocking=open",
+    tone: "err",
+  },
+  {
+    key: "unboundCustomer",
+    label: "客户待绑定",
+    desc: "原始客户名未匹配到 canonical · 进字典处理",
+    route: "/dict",
+    tone: "ink",
+  },
+  {
+    key: "pendingReview",
+    label: "等审核确认",
+    desc: "已分配但未完成 · 续做",
+    route: "/cases?review=pending",
+    tone: "ok",
+  },
+];
 
-  return [
-    {
-      key: "todayNew",
-      count: todayNew,
-      total,
-      label: "今日新增",
-      desc: "目录最后修改时间在今天",
-      route: "/cases?since=today",
-      tone: "cyan",
-    },
-    {
-      key: "missingLabel",
-      count: missingLabel,
-      total,
-      label: "缺命名",
-      desc: "未识别 术前/术后 命名 · 重命名后可参与出图",
-      route: "/cases?category=non_labeled",
-      tone: "amber",
-    },
-    {
-      key: "blockingOpen",
-      count: blockingOpen,
-      total,
-      label: "阻塞待处理",
-      desc: "存在阻塞码且未审核",
-      route: "/cases?blocking=open",
-      tone: "err",
-    },
-    {
-      key: "unboundCustomer",
-      count: unboundCustomer,
-      total,
-      label: "客户待绑定",
-      desc: "原始客户名未匹配到 canonical · 进字典处理",
-      route: "/dict",
-      tone: "ink",
-    },
-    {
-      key: "pendingReview",
-      count: pendingReview,
-      total,
-      label: "等审核确认",
-      desc: "已分配但未完成 · 续做",
-      route: "/cases?review=pending",
-      tone: "ok",
-    },
-  ];
+export function lanesFromSummary(summary: WorkQueueSummary | undefined): LaneDef[] {
+  return LANE_META.map((meta) => ({
+    ...meta,
+    count: summary?.lanes[meta.key]?.count ?? 0,
+    total: summary?.total ?? 0,
+  }));
 }
 
 /**

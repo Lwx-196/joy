@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from . import _job_ownership, db, render_quality
 from .render_queue import RENDER_QUEUE
-from .routes import audit, best_pair, case_groups, cases, classification, customers, evaluations, image_workbench, issues, jobs, render, review_tickets, scan, stress, upgrade
+from .routes import audit, best_pair, case_groups, cases, classification, customers, evaluations, image_workbench, issues, jobs, render, review_tickets, scan, stress, upgrade, work_queue
 from .services import simulation_recovery
 from .upgrade_queue import UPGRADE_QUEUE
 
@@ -67,6 +67,7 @@ app.include_router(issues.router)
 app.include_router(evaluations.router)
 app.include_router(classification.router)
 app.include_router(review_tickets.router)
+app.include_router(work_queue.router)
 
 
 @app.get("/healthz")
