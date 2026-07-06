@@ -31,6 +31,14 @@ import pytest
 # still exercise the prod-mode path.
 os.environ.setdefault("SLO_TEST_MODE", "1")
 
+# Tier 3 (steady-heartbeat): disable the _job_ownership heartbeat/reaper
+# daemon thread for the whole test session. Tests drive heartbeat_once() /
+# _reap_stale_running() directly for determinism — a live 30s background
+# thread would race the per-test DB_PATH monkeypatching (writing against
+# already-deleted tmp DBs). Must be set BEFORE the backend.main import below
+# (whose module body calls ensure_heartbeat_thread()).
+os.environ.setdefault("CASE_WORKBENCH_JOB_HEARTBEAT_S", "0")
+
 # --- Module-level placeholder DB ------------------------------------------
 # Override DB_PATH BEFORE any other backend module sees the import-time
 # init_schema()/recover() calls.

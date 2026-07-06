@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import sqlite3
 import threading
@@ -30,7 +31,9 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, AsyncIterator
 
-from . import _job_pool, _upgrade_executor, audit, db
+from . import _job_ownership, _job_pool, _upgrade_executor, audit, db
+
+LOGGER = logging.getLogger(__name__)
 
 
 def _now_iso() -> str:
@@ -214,19 +217,12 @@ class UpgradeQueue:
                 return
             if row["status"] != "queued":
                 return
-            claimed = conn.execute(
-                """
-                UPDATE upgrade_jobs
-                SET status = 'running',
-                    started_at = ?,
-                    recovery_token = NULL,
-                    recovery_claimed_at = NULL
-                WHERE id = ? AND status = 'queued'
-                """,
-                (_now_iso(), job_id),
-            ).rowcount
+            # Ownership stamp — mirrors render_queue._execute_render; see
+            # _job_ownership module docstring.
+            claimed = _job_ownership.claim_running(conn, "upgrade_jobs", job_id)
             if claimed != 1:
                 return
+            _job_ownership.ensure_heartbeat_thread()
             case_id = row["case_id"]
             brand = row["brand"]
             batch_id = row["batch_id"]
@@ -264,7 +260,8 @@ class UpgradeQueue:
             conn.execute(
                 """
                 UPDATE upgrade_jobs
-                SET status = 'done', finished_at = ?, meta_json = ?
+                SET status = 'done', finished_at = ?, meta_json = ?,
+                    recovery_token = NULL, recovery_claimed_at = NULL
                 WHERE id = ?
                 """,
                 (
@@ -293,7 +290,8 @@ class UpgradeQueue:
             conn.execute(
                 """
                 UPDATE upgrade_jobs
-                SET status = 'failed', finished_at = ?, error_message = ?
+                SET status = 'failed', finished_at = ?, error_message = ?,
+                    recovery_token = NULL, recovery_claimed_at = NULL
                 WHERE id = ?
                 """,
                 (_now_iso(), message[:1000], job_id),
@@ -366,6 +364,9 @@ class UpgradeQueue:
     # ------------------------------------------------------------------
 
     def recover(self) -> dict[str, int]:
+        """Mirror of render_queue.recover() — 'running' rows demoted only when
+        their owner heartbeat is stale (or NULL = pre-ownership legacy rows);
+        fresh rows belong to a live process sharing this DB."""
         token = f"upgrade-recover:{os.getpid()}:{uuid.uuid4().hex}"
         with db.connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -377,7 +378,10 @@ class UpgradeQueue:
                     recovery_token = NULL,
                     recovery_claimed_at = NULL
                 WHERE status = 'running'
-                """
+                  AND (recovery_claimed_at IS NULL
+                       OR julianday(recovery_claimed_at) < julianday('now', ?))
+                """,
+                (_job_ownership.stale_cutoff_modifier(),),
             ).rowcount
             # Reclaim orphans: queued rows tagged by a prior recover() whose
             # process died between commit and _job_pool.submit(). Without this,
@@ -427,5 +431,47 @@ class UpgradeQueue:
             _job_pool.submit(self._execute_safe, r["id"])
         return {"requeued_running": running_to_queued, "resubmitted_queued": len(queued_rows)}
 
+    def _reap_stale_running(self) -> dict[str, int]:
+        """Mirror of render_queue._reap_stale_running for upgrade_jobs."""
+        token = f"upgrade-reap:{os.getpid()}:{uuid.uuid4().hex}"
+        cutoff = _job_ownership.stale_cutoff_modifier()
+        with db.connect() as conn:
+            stale = conn.execute(
+                """
+                SELECT 1 FROM upgrade_jobs
+                WHERE status = 'running'
+                  AND (recovery_claimed_at IS NULL
+                       OR julianday(recovery_claimed_at) < julianday('now', ?))
+                LIMIT 1
+                """,
+                (cutoff,),
+            ).fetchone()
+            if not stale:
+                return {"requeued_running": 0}
+            conn.execute("BEGIN IMMEDIATE")
+            demoted = conn.execute(
+                """
+                UPDATE upgrade_jobs
+                SET status = 'queued',
+                    started_at = NULL,
+                    recovery_token = ?,
+                    recovery_claimed_at = ?
+                WHERE status = 'running'
+                  AND (recovery_claimed_at IS NULL
+                       OR julianday(recovery_claimed_at) < julianday('now', ?))
+                """,
+                (token, _now_iso(), cutoff),
+            ).rowcount
+            rows = conn.execute(
+                "SELECT id FROM upgrade_jobs WHERE recovery_token = ? ORDER BY enqueued_at",
+                (token,),
+            ).fetchall()
+        for r in rows:
+            _job_pool.submit(self._execute_safe, r["id"])
+        if demoted:
+            LOGGER.warning("upgrade reaper: %s stale running job(s) demoted + resubmitted", demoted)
+        return {"requeued_running": demoted}
+
 
 UPGRADE_QUEUE = UpgradeQueue()
+_job_ownership.register_reaper(UPGRADE_QUEUE._reap_stale_running)

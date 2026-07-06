@@ -10,9 +10,12 @@ Design:
 - SSE: each /api/render/stream subscriber owns an asyncio.Queue. Worker threads
   publish events via loop.call_soon_threadsafe(queue.put_nowait, payload). The
   publish loop captures the FastAPI event loop on first subscription.
-- Recovery: on import / startup, residual `status='running'` rows are demoted to
-  'queued' (they were interrupted by a previous crash) and resubmitted to the
-  pool. queued rows from a clean shutdown are also resubmitted.
+- Recovery: on startup, residual `status='running'` rows are demoted to
+  'queued' and resubmitted — but only when their owner heartbeat is stale
+  (see `_job_ownership`): live rows claimed by another process sharing the DB
+  are left alone. queued rows from a clean shutdown are also resubmitted. A
+  per-process heartbeat/reaper daemon keeps owned rows fresh and periodically
+  reclaims rows of dead processes between restarts.
 
 Public API used by routes/render.py:
 - enqueue(case_id, brand, template, semantic_judge) -> job_id
@@ -40,6 +43,7 @@ from pathlib import Path
 from typing import Any, AsyncIterator, Callable
 
 from . import (
+    _job_ownership,
     _job_pool,
     ai_generation_adapter,
     audit,
@@ -2500,19 +2504,13 @@ class RenderQueue:
                 return
             if row["status"] != "queued":
                 return  # Already cancelled or being handled elsewhere.
-            claimed = conn.execute(
-                """
-                UPDATE render_jobs
-                SET status = 'running',
-                    started_at = ?,
-                    recovery_token = NULL,
-                    recovery_claimed_at = NULL
-                WHERE id = ? AND status = 'queued'
-                """,
-                (_now_iso(), job_id),
-            ).rowcount
+            # Ownership stamp (run:<pid>:<uuid> + fresh claimed_at) marks the
+            # row as live to other processes' recover()/reaper — see
+            # _job_ownership module docstring.
+            claimed = _job_ownership.claim_running(conn, "render_jobs", job_id)
             if claimed != 1:
                 return
+            _job_ownership.ensure_heartbeat_thread()
             case_dir = row["case_dir"]
             brand = row["brand"]
             template = row["template"]
@@ -2935,7 +2933,9 @@ class RenderQueue:
                     output_path = ?,
                     manifest_path = ?,
                     error_message = ?,
-                    meta_json = ?
+                    meta_json = ?,
+                    recovery_token = NULL,
+                    recovery_claimed_at = NULL
                 WHERE id = ?
                 """,
                 (
@@ -3085,7 +3085,9 @@ class RenderQueue:
                 SET status = 'failed',
                     finished_at = ?,
                     error_message = ?,
-                    meta_json = COALESCE(?, meta_json)
+                    meta_json = COALESCE(?, meta_json),
+                    recovery_token = NULL,
+                    recovery_claimed_at = NULL
                 WHERE id = ?
                 """,
                 (_now_iso(), message[:4000], meta_json, job_id),
@@ -3201,9 +3203,14 @@ class RenderQueue:
     # ------------------------------------------------------------------
 
     def recover(self) -> dict[str, int]:
-        """Demote residual 'running' jobs to 'queued' and resubmit all queued jobs.
+        """Demote stale 'running' jobs to 'queued' and resubmit all queued jobs.
 
         Called from main.py module top-level after init_schema.
+        'running' rows are demoted only when their owner heartbeat is stale
+        (or recovery_claimed_at IS NULL — pre-ownership legacy rows keep the
+        old immediate-reclaim behavior). A fresh heartbeat means another
+        process sharing this DB is actively executing the job; demoting it
+        would double-run (double provider spend + artifact clobber).
         """
         token = f"render-recover:{os.getpid()}:{uuid.uuid4().hex}"
         with db.connect() as conn:
@@ -3216,7 +3223,10 @@ class RenderQueue:
                     recovery_token = NULL,
                     recovery_claimed_at = NULL
                 WHERE status = 'running'
-                """
+                  AND (recovery_claimed_at IS NULL
+                       OR julianday(recovery_claimed_at) < julianday('now', ?))
+                """,
+                (_job_ownership.stale_cutoff_modifier(),),
             ).rowcount
             # Reclaim orphans: queued rows tagged by a prior recover() whose
             # process died between commit and _job_pool.submit(). Without this,
@@ -3266,6 +3276,60 @@ class RenderQueue:
             _job_pool.submit(self._execute_safe, r["id"])
         return {"requeued_running": running_to_queued, "resubmitted_queued": len(queued_rows)}
 
+    def _reap_stale_running(self) -> dict[str, int]:
+        """Periodic reaper (runs on the _job_ownership daemon thread): demote
+        running rows whose owner heartbeat went stale — the owner process died
+        — and resubmit them. Rows with a fresh heartbeat are never touched.
+
+        Needed because recover() only runs at startup: with the demote
+        tightened to stale-only, a dead process's running jobs would otherwise
+        wait for the next restart to be reclaimed.
+        """
+        token = f"render-reap:{os.getpid()}:{uuid.uuid4().hex}"
+        cutoff = _job_ownership.stale_cutoff_modifier()
+        with db.connect() as conn:
+            # Autocommit probe: the common case (nothing stale) must not take
+            # the write lock every reap tick.
+            stale = conn.execute(
+                """
+                SELECT 1 FROM render_jobs
+                WHERE status = 'running'
+                  AND (recovery_claimed_at IS NULL
+                       OR julianday(recovery_claimed_at) < julianday('now', ?))
+                LIMIT 1
+                """,
+                (cutoff,),
+            ).fetchone()
+            if not stale:
+                return {"requeued_running": 0}
+            conn.execute("BEGIN IMMEDIATE")
+            demoted = conn.execute(
+                """
+                UPDATE render_jobs
+                SET status = 'queued',
+                    started_at = NULL,
+                    recovery_token = ?,
+                    recovery_claimed_at = ?
+                WHERE status = 'running'
+                  AND (recovery_claimed_at IS NULL
+                       OR julianday(recovery_claimed_at) < julianday('now', ?))
+                """,
+                (token, _now_iso(), cutoff),
+            ).rowcount
+            rows = conn.execute(
+                "SELECT id FROM render_jobs WHERE recovery_token = ? ORDER BY enqueued_at",
+                (token,),
+            ).fetchall()
+        # Tagged with our token before submit — if this process dies between
+        # commit and submit, the next recover()'s 5-minute orphan reclaim
+        # picks the rows up (same protocol as recover() itself).
+        for r in rows:
+            _job_pool.submit(self._execute_safe, r["id"])
+        if demoted:
+            LOGGER.warning("render reaper: %s stale running job(s) demoted + resubmitted", demoted)
+        return {"requeued_running": demoted}
+
 
 # Module-level singleton. Imported by routes/render.py and main.py.
 RENDER_QUEUE = RenderQueue()
+_job_ownership.register_reaper(RENDER_QUEUE._reap_stale_running)

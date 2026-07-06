@@ -7,7 +7,7 @@ import threading
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from . import db, render_quality
+from . import _job_ownership, db, render_quality
 from .render_queue import RENDER_QUEUE
 from .routes import audit, best_pair, case_groups, cases, classification, customers, evaluations, image_workbench, issues, jobs, render, review_tickets, scan, stress, upgrade
 from .services import simulation_recovery
@@ -44,6 +44,10 @@ UPGRADE_QUEUE.recover()
 # simulation_jobs 没有恢复协议（提交闭包不持久化、重跑=无授权烧钱），
 # stale 行只标 failed 不重跑，操作员可从 UI 随手重发。
 simulation_recovery.recover_stale_simulation_jobs()
+# 心跳/收割 daemon：本进程 running 行打点续命；周期回收死进程遗留 job
+# （render/upgrade reaper 在各自模块尾注册；simulation 扫描此处补注册）。
+_job_ownership.register_reaper(simulation_recovery.recover_stale_simulation_jobs)
+_job_ownership.ensure_heartbeat_thread()
 threading.Thread(
     target=_backfill_render_quality_async, name="render-quality-backfill", daemon=True
 ).start()
