@@ -333,7 +333,23 @@ def _batch_preview_rows(case_ids: list[int]) -> tuple[list[int], list[dict[str, 
     return valid_ids, invalid
 
 
-def _row_to_job(row: sqlite3.Row) -> dict[str, Any]:
+_QUALITY_UNSET: Any = object()
+
+
+def _quality_by_job_id(conn: sqlite3.Connection, job_ids: list[int]) -> dict[int, dict[str, Any] | None]:
+    """一次 IN 查询批量取 render_quality，供列表端点替代 _row_to_job 每行开连接（N+1）。"""
+    if not job_ids:
+        return {}
+    placeholders = ",".join("?" for _ in job_ids)
+    rows = conn.execute(
+        f"SELECT * FROM render_quality WHERE render_job_id IN ({placeholders})",
+        job_ids,
+    ).fetchall()
+    found = {int(r["render_job_id"]): render_quality.quality_row_to_dict(r) for r in rows}
+    return {job_id: found.get(job_id) for job_id in job_ids}
+
+
+def _row_to_job(row: sqlite3.Row, quality: Any = _QUALITY_UNSET) -> dict[str, Any]:
     meta_raw = row["meta_json"]
     meta = {}
     if meta_raw:
@@ -363,11 +379,13 @@ def _row_to_job(row: sqlite3.Row) -> dict[str, Any]:
         ),
         "meta": meta,
     }
-    with db.connect() as qconn:
-        qrow = qconn.execute(
-            "SELECT * FROM render_quality WHERE render_job_id = ?", (row["id"],)
-        ).fetchone()
-    job["quality"] = render_quality.quality_row_to_dict(qrow)
+    if quality is _QUALITY_UNSET:
+        with db.connect() as qconn:
+            qrow = qconn.execute(
+                "SELECT * FROM render_quality WHERE render_job_id = ?", (row["id"],)
+            ).fetchone()
+        quality = render_quality.quality_row_to_dict(qrow)
+    job["quality"] = quality
     job["delivery_audit"] = _delivery_audit_from_job_meta(meta, job["quality"])
     return job
 
@@ -431,6 +449,30 @@ def _read_manifest_blocking(manifest_path: str | None) -> dict[str, list[str]]:
         }
     except (OSError, ValueError, TypeError):
         return empty
+
+
+def _blocking_detail_from_job(job: dict[str, Any]) -> dict[str, list[str]]:
+    """meta_json 已随渲染结果落库 blocking/warnings 时直接用，缺失才回读 manifest 文件。
+
+    warning 取层优先级与 _read_manifest_blocking 一致：
+    warning_display_layers.selected_actionable → warning_layers.selected_actionable → warnings。
+    旧 job（meta 无这些键）自动走 manifest 回退，不改变历史数据行为。"""
+    meta = job.get("meta") if isinstance(job.get("meta"), dict) else {}
+    blocking = meta.get("blocking_issues") if isinstance(meta.get("blocking_issues"), list) else None
+    display_layers = meta.get("warning_display_layers") if isinstance(meta.get("warning_display_layers"), dict) else None
+    layers = meta.get("warning_layers") if isinstance(meta.get("warning_layers"), dict) else None
+    if display_layers and isinstance(display_layers.get("selected_actionable"), list):
+        warnings = display_layers.get("selected_actionable")
+    elif layers and isinstance(layers.get("selected_actionable"), list):
+        warnings = layers.get("selected_actionable")
+    else:
+        warnings = meta.get("warnings") if isinstance(meta.get("warnings"), list) else None
+    if blocking is not None or warnings is not None:
+        return {
+            "blocking_issues": [str(x) for x in (blocking or [])],
+            "warnings": [str(x) for x in (warnings or [])],
+        }
+    return _read_manifest_blocking(job.get("manifest_path"))
 
 
 def _quality_queue_condition(status: str, render_mode: str = "all") -> tuple[str, list[Any]]:
@@ -670,13 +712,17 @@ def _legacy_render_risk_summary(conn: sqlite3.Connection, cutoff_utc: str, cutof
         ).fetchone()["n"]
     )
     rows = _legacy_render_risk_rows(conn, cutoff_utc, limit)
+    quality_by_id = _quality_by_job_id(conn, [int(row["id"]) for row in rows])
     return {
         "cutoff": cutoff_label,
         "cutoff_utc": cutoff_utc,
         "publishable_count": publishable_count,
         "quarantined_count": quarantined_count,
         "total": len(rows),
-        "items": [{"risk_status": "legacy_publishable", "job": _row_to_job(row)} for row in rows],
+        "items": [
+            {"risk_status": "legacy_publishable", "job": _row_to_job(row, quality_by_id.get(int(row["id"])))}
+            for row in rows
+        ],
     }
 
 
@@ -1006,7 +1052,8 @@ def list_case_jobs(case_id: int, limit: int = Query(20, le=200)) -> list[dict]:
             """,
             (case_id, limit),
         ).fetchall()
-    return [_row_to_job(r) for r in rows]
+        quality_by_id = _quality_by_job_id(conn, [int(r["id"]) for r in rows])
+    return [_row_to_job(r, quality_by_id.get(int(r["id"]))) for r in rows]
 
 
 @router.get("/api/cases/{case_id}/render/latest")
@@ -1045,10 +1092,13 @@ def latest_case_job(case_id: int) -> dict:
             """,
             (case_id,),
         ).fetchone()
+        quality_by_id = _quality_by_job_id(
+            conn, [int(r["id"]) for r in (latest_row, output_row) if r is not None]
+        )
     if not latest_row:
         return {"job": None}
 
-    latest = _row_to_job(latest_row)
+    latest = _row_to_job(latest_row, quality_by_id.get(int(latest_row["id"])))
     # F2：needs_confirmation = cache-miss 待用户确认的「在途」决策点，必须像 queued/running
     # 一样优先展示确认卡；否则会被旧 done 板（output_row）盖住，用户永远看不到烧钱确认提示。
     if latest["status"] in {"queued", "running", "needs_confirmation"}:
@@ -1056,7 +1106,7 @@ def latest_case_job(case_id: int) -> dict:
     elif latest["status"] == "blocked" and latest.get("output_path"):
         job = latest
     elif output_row is not None:
-        job = _row_to_job(output_row)
+        job = _row_to_job(output_row, quality_by_id.get(int(output_row["id"])))
     else:
         job = latest
 
@@ -1073,8 +1123,8 @@ def latest_case_job(case_id: int) -> dict:
             job["output_mtime"] = out_path.stat().st_mtime
         except OSError:
             job["output_mtime"] = None
-    # Stage A: 透传 manifest.final.json 的 blocking/warnings 列表
-    detail = _read_manifest_blocking(job["manifest_path"])
+    # Stage A: 透传 blocking/warnings 列表（meta 优先，缺失回退 manifest.final.json）
+    detail = _blocking_detail_from_job(job)
     job["blocking_issues"] = detail["blocking_issues"]
     job["warnings"] = detail["warnings"]
     return {"job": job}
@@ -1260,11 +1310,12 @@ def get_job(job_id: int) -> dict:
         row = conn.execute(
             "SELECT * FROM render_jobs WHERE id = ?", (job_id,)
         ).fetchone()
+        quality_by_id = _quality_by_job_id(conn, [job_id]) if row else {}
     if not row:
         raise HTTPException(404, "job not found")
-    job = _row_to_job(row)
-    # Stage A: 透传 manifest.final.json 的逐条 blocking/warning 字符串
-    detail = _read_manifest_blocking(job["manifest_path"])
+    job = _row_to_job(row, quality_by_id.get(job_id))
+    # Stage A: 透传逐条 blocking/warning 字符串（meta 优先，缺失回退 manifest）
+    detail = _blocking_detail_from_job(job)
     job["blocking_issues"] = detail["blocking_issues"]
     job["warnings"] = detail["warnings"]
     return job
@@ -1401,6 +1452,7 @@ def list_render_quality_queue(
             """,
             [*params, limit],
         ).fetchall()
+        quality_by_id = _quality_by_job_id(conn, [int(r["id"]) for r in rows])
 
         counts = _quality_queue_counts(conn)
         mode_counts = _quality_queue_mode_counts(conn)
@@ -1408,8 +1460,8 @@ def list_render_quality_queue(
 
     items: list[dict[str, Any]] = []
     for row in rows:
-        job = _row_to_job(row)
-        detail = _read_manifest_blocking(job["manifest_path"])
+        job = _row_to_job(row, quality_by_id.get(int(row["id"])))
+        detail = _blocking_detail_from_job(job)
         job["blocking_issues"] = detail["blocking_issues"]
         job["warnings"] = detail["warnings"]
         issues, warnings = _quality_issue_summary(job)
@@ -1570,9 +1622,10 @@ def get_batch(batch_id: str) -> dict:
             "SELECT * FROM render_jobs WHERE batch_id = ? ORDER BY id ASC",
             (batch_id,),
         ).fetchall()
+        quality_by_id = _quality_by_job_id(conn, [int(r["id"]) for r in rows])
     if not rows:
         raise HTTPException(404, "batch not found")
-    jobs = [_row_to_job(r) for r in rows]
+    jobs = [_row_to_job(r, quality_by_id.get(int(r["id"]))) for r in rows]
     counts: dict[str, int] = {}
     for j in jobs:
         counts[j["status"]] = counts.get(j["status"], 0) + 1

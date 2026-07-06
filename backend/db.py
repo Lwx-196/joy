@@ -116,6 +116,9 @@ CREATE TABLE IF NOT EXISTS render_jobs (
 CREATE INDEX IF NOT EXISTS idx_render_jobs_case   ON render_jobs(case_id, enqueued_at DESC);
 CREATE INDEX IF NOT EXISTS idx_render_jobs_status ON render_jobs(status, enqueued_at);
 CREATE INDEX IF NOT EXISTS idx_render_jobs_batch  ON render_jobs(batch_id, status);
+-- 表达式须与 routes/render.py::_render_job_recency_sql 逐字一致，否则 SQLite 不会命中
+CREATE INDEX IF NOT EXISTS idx_render_jobs_case_recency
+  ON render_jobs(case_id, COALESCE(finished_at, enqueued_at, '') DESC, id DESC);
 
 -- 阶段 2: v3 升级任务队列
 -- 单 case 入队由 POST /api/cases/upgrade（同步路径仍走旧 /api/cases/{id}/upgrade）；
@@ -368,6 +371,7 @@ CREATE TABLE IF NOT EXISTS simulation_jobs (
 );
 CREATE INDEX IF NOT EXISTS idx_simulation_jobs_group ON simulation_jobs(group_id);
 CREATE INDEX IF NOT EXISTS idx_simulation_jobs_status ON simulation_jobs(status);
+CREATE INDEX IF NOT EXISTS idx_simulation_jobs_case_created ON simulation_jobs(case_id, created_at DESC, id DESC);
 
 -- P1.2: ComfyUI / VLM 候选谱系。每次 simulation 尝试落一行，operator 决策
 -- 通过 UPDATE 写入 operator_decision / operator_user / decided_at 三件套；
@@ -595,7 +599,7 @@ def _ensure_job_recovery_columns(conn) -> None:
 def init_schema() -> None:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     with _schema_file_lock():
-        with connect() as conn:
+        with connect(ensure_wal=True) as conn:
             conn.execute("BEGIN EXCLUSIVE")
             _execute_schema_script(conn, SCHEMA)
             _ensure_best_pair_tables(conn)
@@ -610,9 +614,9 @@ def init_schema() -> None:
 
 
 @contextmanager
-def connect():
+def connect(*, ensure_wal: bool = False):
     conn = sqlite3.connect(DB_PATH, timeout=max(SQLITE_BUSY_TIMEOUT_MS / 1000, 5.0))
-    _configure_connection(conn)
+    _configure_connection(conn, ensure_wal=ensure_wal)
     try:
         yield conn
         conn.commit()
@@ -623,18 +627,21 @@ def connect():
         conn.close()
 
 
-def get_conn() -> sqlite3.Connection:
+def get_conn(*, ensure_wal: bool = False) -> sqlite3.Connection:
     """For request-scoped use; caller must close."""
     conn = sqlite3.connect(DB_PATH, timeout=max(SQLITE_BUSY_TIMEOUT_MS / 1000, 5.0))
-    _configure_connection(conn)
+    _configure_connection(conn, ensure_wal=ensure_wal)
     return conn
 
 
-def _configure_connection(conn: sqlite3.Connection) -> None:
+def _configure_connection(conn: sqlite3.Connection, *, ensure_wal: bool = False) -> None:
     conn.row_factory = sqlite3.Row
     conn.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS}")
     conn.execute("PRAGMA foreign_keys = ON")
-    conn.execute("PRAGMA journal_mode = WAL")
+    if ensure_wal:
+        # journal_mode 是库文件级持久属性，init_schema 设一次即可；
+        # 每连接重设会在多进程共库时放大锁竞争面。
+        conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA synchronous = NORMAL")
 
 

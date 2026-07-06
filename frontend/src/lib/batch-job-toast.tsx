@@ -98,8 +98,8 @@ const STATUS_KEYS: AnyStatus[] = [
 
 export function BatchJobToast() {
   const entries = useBatchJobToastStore((s) => s.entries);
-  // One global SSE subscription so the toast stays fresh.
-  useJobStream();
+  // 仅在有活跃 batch toast 时订阅 SSE；detail/batch 页各自有独立订阅。
+  useJobStream({ enabled: entries.length > 0 });
 
   if (entries.length === 0) return null;
 

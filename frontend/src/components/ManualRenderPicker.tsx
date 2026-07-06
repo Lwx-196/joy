@@ -263,6 +263,7 @@ function SimulationThumb({ href, src, alt }: { href: string; src: string; alt: s
           src={src}
           alt={alt}
           loading="lazy"
+          decoding="async"
           onError={() => setFailed(true)}
           style={{ width: "100%", height: "100%", objectFit: "contain" }}
         />
@@ -993,6 +994,7 @@ export function ManualRenderPicker({ caseId, allImages, brand, seedRequest }: Pr
             <img
               src={src}
               alt={t("manualRender.previewAlt", { label })}
+              decoding="async"
               style={kind === "before" ? transformStyle(activeTransform) : undefined}
             />
           ) : (
@@ -1253,6 +1255,7 @@ export function ManualRenderPicker({ caseId, allImages, brand, seedRequest }: Pr
               <img
                 src={`${manualRenderPreviewFileUrl(caseId, activePreview.preview_id)}?t=${activePreview.preview_id}`}
                 alt={t("manualRender.previewResultAlt")}
+                decoding="async"
               />
             </a>
           ) : (

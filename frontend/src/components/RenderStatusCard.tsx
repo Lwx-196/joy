@@ -108,7 +108,7 @@ export function RenderStatusCard({
   const { t } = useTranslation("render");
   const globalBrand = useBrand();
   const brand = brandOverride || globalBrand;
-  const { data: job, refetch } = useLatestCaseRenderJob(caseId);
+  const { data: job } = useLatestCaseRenderJob(caseId);
   const cancelMut = useCancelRenderJob();
   const renderMut = useRenderCase();
   const revealMut = useRevealCasePath();
@@ -161,8 +161,7 @@ export function RenderStatusCard({
           kind: "render",
         });
       }
-      // Refresh latest-job query as a defensive fallback (the hook also invalidates).
-      refetch();
+      // useJobStream 对每个 render 事件已 invalidate renderLatestForCase，无需再手动 refetch。
     },
   });
 
@@ -380,6 +379,8 @@ export function RenderStatusCard({
                 <img
                   src={previewUrl}
                   alt="final-board"
+                  decoding="async"
+                  fetchPriority="high"
                   onError={() => setFailedPreviewUrl(previewUrl)}
                 />
               ) : (
@@ -491,6 +492,7 @@ export function RenderStatusCard({
                 <img
                   src={previewUrl}
                   alt="final-board-large"
+                  decoding="async"
                   style={{ maxWidth: "100%", maxHeight: "calc(100vh - 96px)", objectFit: "contain" }}
                 />
               </div>
@@ -582,7 +584,7 @@ export function RenderStatusCard({
                 data-testid="render-held-thumb"
                 title={t("held.diagnosticBoardTitle")}
               >
-                <img src={heldPreviewUrl} alt="held-diagnostic-board" onError={() => setFailedPreviewUrl(heldPreviewUrl)} />
+                <img src={heldPreviewUrl} alt="held-diagnostic-board" decoding="async" onError={() => setFailedPreviewUrl(heldPreviewUrl)} />
               </a>
             </div>
           )}

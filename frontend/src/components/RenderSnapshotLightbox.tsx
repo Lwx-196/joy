@@ -362,6 +362,7 @@ export function RenderSnapshotLightbox({
             alt={t("lightboxImageAlt", { ts })}
             data-testid="lightbox-image"
             data-snapshot-filename={current.filename}
+            decoding="async"
             onLoad={() => setLoaded(true)}
             draggable={false}
             style={{

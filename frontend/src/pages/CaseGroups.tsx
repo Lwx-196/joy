@@ -117,6 +117,7 @@ export default function CaseGroups() {
             <button
               key={g.id}
               type="button"
+              className="case-group-list-item"
               onClick={() => setSelectedId(g.id)}
               style={{
                 width: "100%",

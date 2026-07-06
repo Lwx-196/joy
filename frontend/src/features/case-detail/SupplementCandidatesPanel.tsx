@@ -41,7 +41,7 @@ export function SupplementCandidatesPanel({
           <div className="supplement-candidate-grid">
             {(gap.candidates ?? []).map((candidate) => (
               <article key={`${gap.key}-${candidate.case_id}-${candidate.filename}`} className="supplement-candidate-card">
-                <img src={candidate.preview_url} alt={candidate.filename} loading="lazy" />
+                <img src={candidate.preview_url} alt={candidate.filename} loading="lazy" decoding="async" />
                 <div className="supplement-candidate-body">
                   <b title={candidate.filename}>{candidate.filename}</b>
                   <span>{candidate.case_title}</span>

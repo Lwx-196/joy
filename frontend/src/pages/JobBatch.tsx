@@ -417,6 +417,8 @@ function RenderJobRow({
             <img
               src={previewUrl}
               alt="final"
+              loading="lazy"
+              decoding="async"
               style={{
                 height: 56,
                 border: "1px solid var(--line)",

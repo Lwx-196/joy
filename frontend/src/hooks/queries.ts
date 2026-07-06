@@ -1262,14 +1262,18 @@ export function useRenderBatch(batchId: string | null | undefined) {
 export function useJobStream(opts?: {
   jobType?: "render" | "upgrade";
   onEvent?: (event: JobStreamEvent) => void;
+  /** false 时不建立 EventSource——常驻组件（全局 toast）空闲时避免多余 SSE 连接。 */
+  enabled?: boolean;
 }) {
   const qc = useQueryClient();
+  const enabled = opts?.enabled ?? true;
   const onEventRef = useRef(opts?.onEvent);
   const filterRef = useRef(opts?.jobType);
   onEventRef.current = opts?.onEvent;
   filterRef.current = opts?.jobType;
 
   useEffect(() => {
+    if (!enabled) return;
     const es = new EventSource("/api/jobs/stream");
     es.onmessage = (msg) => {
       let parsed: JobStreamEvent | null = null;
@@ -1319,7 +1323,7 @@ export function useJobStream(opts?: {
     return () => {
       es.close();
     };
-  }, [qc]);
+  }, [qc, enabled]);
 }
 
 export interface JobStreamEvent {

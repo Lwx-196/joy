@@ -36,11 +36,13 @@ def _backfill_render_quality_async() -> None:
         logging.getLogger(__name__).exception("render_quality backfill 后台线程失败")
 
 
+# recover 是启动关键路径（demote 遗留 running/queued），先跑完再放后台 backfill，
+# 避免两者在启动窗口同时争同一 SQLite 写锁。
+RENDER_QUEUE.recover()
+UPGRADE_QUEUE.recover()
 threading.Thread(
     target=_backfill_render_quality_async, name="render-quality-backfill", daemon=True
 ).start()
-RENDER_QUEUE.recover()
-UPGRADE_QUEUE.recover()
 
 app.include_router(scan.router)
 app.include_router(stress.router)

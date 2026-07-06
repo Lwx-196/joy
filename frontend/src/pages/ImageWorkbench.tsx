@@ -944,7 +944,7 @@ export default function ImageWorkbench() {
                 </div>
                 <div className="image-workbench-batch-group-samples">
                   {group.sample_images.slice(0, 6).map((sample) => (
-                    <img key={`${sample.case_id}:${sample.filename}`} src={sample.preview_url} alt={sample.filename} loading="lazy" />
+                    <img key={`${sample.case_id}:${sample.filename}`} src={sample.preview_url} alt={sample.filename} loading="lazy" decoding="async" />
                   ))}
                 </div>
                 <div className="image-workbench-batch-group-badges">
@@ -1120,7 +1120,7 @@ export default function ImageWorkbench() {
                   </div>
                   <div className="image-workbench-batch-group-samples">
                     {group.sample_images.slice(0, 5).map((sample) => (
-                      <img key={`${sample.case_id}:${sample.filename}`} src={sample.preview_url} alt={sample.filename} loading="lazy" />
+                      <img key={`${sample.case_id}:${sample.filename}`} src={sample.preview_url} alt={sample.filename} loading="lazy" decoding="async" />
                     ))}
                   </div>
                   <div className="image-workbench-batch-group-badges">
@@ -1298,7 +1298,7 @@ export default function ImageWorkbench() {
                       {isSelected ? <Ico name="check" size={12} /> : null}
                     </button>
                     <a href={item.preview_url} target="_blank" rel="noreferrer" title={t("manualAngleAssist.openPreviewTitle")}>
-                      <img src={item.preview_url} alt={item.filename} loading="lazy" />
+                      <img src={item.preview_url} alt={item.filename} loading="lazy" decoding="async" />
                     </a>
                   </div>
                   <div className="manual-angle-assist-info">
@@ -1496,7 +1496,7 @@ export default function ImageWorkbench() {
 	              {selected.has(keyOf(item)) ? <Ico name="check" size={12} /> : null}
             </button>
             <div className="image-workbench-thumb">
-              <img src={item.preview_url} alt={item.filename} loading="lazy" />
+              <img src={item.preview_url} alt={item.filename} loading="lazy" decoding="async" />
             </div>
             <div className="image-workbench-card-body">
               <div className="image-workbench-card-title" title={item.filename}>{item.filename}</div>
@@ -1635,7 +1635,7 @@ export default function ImageWorkbench() {
             <div className="image-workbench-review-grid">
               {angleReviewImages.map((image) => (
                 <a key={`${image.case_id}:${image.filename}`} href={image.preview_url} target="_blank" rel="noreferrer" className="image-workbench-review-image">
-                  <img src={image.preview_url} alt={image.filename} loading="lazy" />
+                  <img src={image.preview_url} alt={image.filename} loading="lazy" decoding="async" />
                   <span title={image.filename}>{image.filename}</span>
                 </a>
               ))}

@@ -277,6 +277,7 @@ function BlockerRow({
                 src={caseFileUrl(item.case_id, file)}
                 alt={file}
                 loading="lazy"
+                decoding="async"
                 style={{ width: "100%", height: "100%", objectFit: "contain", display: "block" }}
               />
             </div>

@@ -419,7 +419,7 @@ export function SourceGroupPanel({
                             {selected ? "已选" : "选择"}
                           </button>
                           <a href={image.preview_url} target="_blank" rel="noreferrer">
-                            <img src={image.preview_url} alt={image.filename} loading="lazy" />
+                            <img src={image.preview_url} alt={image.filename} loading="lazy" decoding="async" />
                           </a>
                           <div className="source-group-card-body">
                             <b title={image.filename}>{image.filename}</b>

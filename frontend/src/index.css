@@ -3223,3 +3223,10 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
   font-size: 13px;
   color: var(--ink-3);
 }
+
+/* CaseGroups 左列可达 300 项：视口外条目跳过渲染，滚动/切换不卡。
+   auto 关键字让浏览器记住实际渲染尺寸，估值仅用于首次占位。 */
+.case-group-list-item {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 72px;
+}

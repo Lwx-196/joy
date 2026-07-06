@@ -1275,7 +1275,7 @@ export default function CaseDetail() {
                     {classificationBlockerPreviewItems.slice(0, 8).map((item) => (
                       <article key={`${item.case_id}:${item.filename}`} className="classification-blocker-card">
                         <a href={caseFileUrl(item.case_id, item.filename)} target="_blank" rel="noreferrer">
-                          <img src={caseFileUrl(item.case_id, item.filename)} alt={item.filename} loading="lazy" />
+                          <img src={caseFileUrl(item.case_id, item.filename)} alt={item.filename} loading="lazy" decoding="async" />
                         </a>
                         <div>
                           <b title={item.filename}>{item.filename}</b>

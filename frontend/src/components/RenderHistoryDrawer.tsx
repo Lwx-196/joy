@@ -291,6 +291,7 @@ export function RenderHistoryDrawer({
                       src={url}
                       alt={t("snapshotAlt", { ts })}
                       loading="lazy"
+                      decoding="async"
                       style={{
                         width: 120,
                         height: 80,

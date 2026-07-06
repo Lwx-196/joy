@@ -1347,6 +1347,7 @@ function SimulationMiniPreview({ label, href, src }: { label: string; href: stri
             src={src}
             alt={label}
             loading="lazy"
+            decoding="async"
             onError={() => setFailed(true)}
             style={{ width: "100%", height: "100%", objectFit: "contain", display: "block" }}
           />
@@ -1385,6 +1386,8 @@ function PreviewBox({ href, src, alt, emptyLabel }: { href?: string; src?: strin
         <img
           src={src}
           alt={alt}
+          loading="lazy"
+          decoding="async"
           onError={() => setFailed(true)}
           style={{ width: "100%", height: 104, objectFit: "contain", display: "block" }}
         />

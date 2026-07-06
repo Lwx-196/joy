@@ -92,7 +92,7 @@ export function SourceImageThumb({
         rel="noreferrer"
         style={{ display: "block", color: "inherit" }}
       >
-        <img src={caseFileUrl(caseId, name)} alt={name} loading="lazy" />
+        <img src={caseFileUrl(caseId, name)} alt={name} loading="lazy" decoding="async" />
       </a>
       <span className={`role ${role}`}>
         {role === "pre" ? "PRE" : role === "post" ? "POST" : "UNL"}
