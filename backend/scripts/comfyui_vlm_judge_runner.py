@@ -525,6 +525,14 @@ def _gcloud_adc_token() -> str | None:
     return token or None
 
 
+def _resolve_token_provider(env: dict[str, str]) -> TokenProvider:
+    if (env.get("CASE_WORKBENCH_VERTEX_TOKEN_MODE") or "").strip().lower() == "gcloud":
+        return _gcloud_adc_token
+    from backend.services.vlm_provider import _GoogleAuthTokenProvider
+
+    return _GoogleAuthTokenProvider()
+
+
 def _blocked_decision(status: str, provider: str | None = None) -> str:
     if status == "blocked_missing_vlm_provider_config":
         return f"{UNVERIFIED}：未配置真实独立 VLM judge provider。"
@@ -651,7 +659,7 @@ def run_vlm_judge(
     sleep_seconds: float = 0.0,
     concurrency: int = 3,
     post_json: PostJson = _post_json,
-    token_provider: TokenProvider = _gcloud_adc_token,
+    token_provider: TokenProvider | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     runtime_env = _runtime_env(
         dict(os.environ if env is None else env),
@@ -680,9 +688,10 @@ def run_vlm_judge(
     project = config.get("project")
     location = config.get("location")
     billing_mode = config.get("billing_mode")
-    runtime_token_provider = token_provider
+    resolved_token_provider = token_provider or _resolve_token_provider(runtime_env)
+    runtime_token_provider = resolved_token_provider
     if provider_name == "vertex_generate_content_adc":
-        cached_token = token_provider()
+        cached_token = resolved_token_provider()
         if not cached_token:
             return _blocked_results(
                 {
@@ -692,8 +701,12 @@ def run_vlm_judge(
                 }
             )
 
-        def runtime_token_provider() -> str:
-            return cached_token
+        if resolved_token_provider is _gcloud_adc_token:
+            # gcloud 子进程贵：冻结复用，不每请求 spawn
+            def runtime_token_provider() -> str:
+                return cached_token
+
+        # in-process provider：保留 live，token 由 google-auth 自动按需刷新
 
     requests: list[VLMRequest] = []
     request_items: list[dict[str, Any]] = []

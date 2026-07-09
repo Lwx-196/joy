@@ -637,3 +637,89 @@ def test_cli_exposes_concurrency_argument() -> None:
     )
 
     assert args.concurrency == 7
+
+
+def _vertex_ok_post_json(url: str, headers: dict[str, str], payload: dict, timeout: float) -> dict:
+    return {
+        "responseId": "vertex-real-shape",
+        "candidates": [
+            {
+                "content": {
+                    "parts": [
+                        {
+                            "text": json.dumps(
+                                {
+                                    "ab_unit_id": "unit-1",
+                                    "winner_role": "candidate",
+                                    "confidence": 0.79,
+                                    "rationale": "Candidate has better local edit quality.",
+                                    "risk_flags": [],
+                                }
+                            )
+                        }
+                    ]
+                }
+            }
+        ],
+    }
+
+
+def _vertex_env(extra: dict | None = None) -> dict:
+    env = {
+        "CASE_WORKBENCH_VLM_JUDGE_PROVIDER": "vertex_generate_content_adc",
+        "CASE_WORKBENCH_VLM_JUDGE_MODEL": "gemini-2.5-flash",
+        "CASE_WORKBENCH_VERTEX_PROJECT": "project-id",
+        "CASE_WORKBENCH_VERTEX_LOCATION": "us-central1",
+    }
+    if extra:
+        env.update(extra)
+    return env
+
+
+def test_runner_vertex_passes_live_token_provider_when_not_gcloud(tmp_path: Path) -> None:
+    """In-process / 注入的 token provider 不得冻结 —— VLMProvider 每请求都向它取 token（长 batch 自动刷新）。"""
+    from backend.scripts import comfyui_vlm_judge_runner
+
+    counter = {"n": 0}
+
+    def counting_provider() -> str:
+        counter["n"] += 1
+        return f"tok-{counter['n']}"
+
+    _results, report = comfyui_vlm_judge_runner.run_vlm_judge(
+        _packet(tmp_path),
+        packet_root=tmp_path,
+        env=_vertex_env(),
+        token_provider=counting_provider,
+        post_json=_vertex_ok_post_json,
+        concurrency=1,
+    )
+
+    assert report["run_status"] == "completed_real_vlm_judge"
+    # live：probe(1) + 每请求(1, 单 item) = 2；若被冻结只会停在 1
+    assert counter["n"] == 2
+
+
+def test_runner_vertex_freezes_gcloud_subprocess_provider(tmp_path: Path, monkeypatch) -> None:
+    """gcloud 子进程路径保持冻结 —— 仅 probe 取一次 token，之后用冻结副本，不再每请求 spawn。"""
+    from backend.scripts import comfyui_vlm_judge_runner
+
+    counter = {"n": 0}
+
+    def fake_gcloud() -> str:
+        counter["n"] += 1
+        return f"gtok-{counter['n']}"
+
+    monkeypatch.setattr(comfyui_vlm_judge_runner, "_gcloud_adc_token", fake_gcloud)
+
+    _results, report = comfyui_vlm_judge_runner.run_vlm_judge(
+        _packet(tmp_path),
+        packet_root=tmp_path,
+        env=_vertex_env({"CASE_WORKBENCH_VERTEX_TOKEN_MODE": "gcloud"}),
+        post_json=_vertex_ok_post_json,
+        concurrency=1,
+    )
+
+    assert report["run_status"] == "completed_real_vlm_judge"
+    # 冻结：gcloud 只在 probe 调一次，之后走冻结的嵌套函数，不再触达 fake_gcloud
+    assert counter["n"] == 1
