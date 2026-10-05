@@ -2,7 +2,7 @@
 
 ## Takeaway
 
-灵策智算自己的官方更新日志写明其桌面端运行在 OpenClaw 之上，并有第二套引擎"DeepSeek Harness"（后更名 Lynxce Harness）。它的会话层名称、插件清单和本地存储与网易有道开源的 LobsterAI（MIT）逐项吻合，因此极可能是 LobsterAI 的二次开发版。官网与更新日志均未提到 LobsterAI，安装包未拆解，所以"基于 LobsterAI"属高可信推断。
+灵策智算自己的官方更新日志写明其桌面端运行在 OpenClaw 之上，并有第二套引擎"DeepSeek Harness"（后更名 Lynxce Harness）。它的会话层名称、插件清单和本地存储与网易有道开源的 LobsterAI（MIT）逐项吻合，2026-10-05 在一台装有灵策智算 macOS 2.0.6 版的电脑上核对安装包，证实它是 LobsterAI 的改名版。官网与更新日志均未提到 LobsterAI。
 
 ## Cited Findings
 
@@ -29,15 +29,21 @@
 - README_zh（https://raw.githubusercontent.com/netease-youdao/LobsterAI/main/README_zh.md）："Cowork 是 LobsterAI 的产品与会话层，OpenClaw 是底层运行时和网关"；有独立一节"DeepSeek Harness Runtime"；"会话和应用数据保存在本地 SQLite"；IM 远程控制渠道为"微信、企业微信、钉钉、飞书/Lark、QQ、Telegram、Discord、网易云信 IM、网易小蜜蜂、POPO 和邮件"。
 - package.json（https://raw.githubusercontent.com/netease-youdao/LobsterAI/main/package.json）：`version` 2026.9.23；`dsh` 字段锁定 `@deepseek-ai/dsh` 0.1.5-rc.3；`openclaw` 字段锁定 OpenClaw v2026.8.1，插件包括模型提供方 qwen、deepseek、moonshot、qianfan、stepfun、zai、xiaomi、volcengine，以及渠道 dingtalk-connector、openclaw-lark、qqbot、discord、wecom-openclaw-plugin、openclaw-weixin、moltbot-popo、openclaw-nim-channel、openclaw-netease-bee、clawemail-email。
 
+**来源五：本机安装包核验（2026-10-05，用户在自己的 Mac 上运行命令并贴回输出）。**
+- 应用路径 `/Applications/灵策智算.app`，CFBundleIdentifier `com.lynxce.cn`，版本 2.0.6。
+- `Contents/Resources/` 目录：app-icon、app-update.yml、app.asar、app.asar.unpacked、browser-extension、cfmind、deepseek-harness-runtime、enterprise、icon.icns、keyfrom、lynxce-harness-runtime、SKILLs、tray 及语言目录。
+- app.asar 内 package.json：`"name": "lynxceai"`，productName `灵策智算`，`version` 2.0.6；含 `openclaw` 配置段，`version` v2026.6.1、`repo` https://github.com/openclaw/openclaw.git；插件依次为 dingtalk-connector 0.8.23、openclaw-lark 2026.6.10、@openclaw/qqbot 2026.6.1、@openclaw/discord 2026.6.1、wecom-openclaw-plugin 2026.5.25、openclaw-weixin 2.4.3、moltbot-popo 2.1.13、openclaw-nim-channel 1.1.1（git+https://github.com/netease-im/openclaw-nim-channel.git#1.1.1）、openclaw-netease-bee 0.1.3、clawemail 0.9.12；依赖 `@larksuite/openclaw-lark-tools ~1.0.26`。
+- CDP（启动参数 --remote-debugging-port=9222）`/json/version`：Electron 40.2.1、Chrome 144.0.7559.111，User-Agent 含"灵策智算/2.0.6"。`/json/list`：唯一页面标题"灵策智算"，URL 为 `~/Library/Application Support/灵策智算/renderer-updates/<hash>/2026091104/content/index.html?rendererUpdateBoot=…`，即界面代码从用户目录下的热更新目录加载。
+- 对照 LobsterAI 仓库 electron-builder.json：extraResources 把 `.keyfrom-build` 打包为 keyfrom、`resources/tray` 为 tray、图标为 app-icon、`SKILLs` 为 SKILLs、`vendor/openclaw-runtime/current` 为 cfmind；package.json 的 openclaw 插件顺序与上面完全一致，企微、微信、POPO、云信、小蜜蜂插件版本号相同，`@larksuite/openclaw-lark-tools ~1.0.26` 相同。LobsterAI 当前锁定 OpenClaw v2026.8.1，灵策智算 2.0.6 锁定 v2026.6.1。
+
 ## Inferences
 
 - 灵策智算"飞书、云信和 Bee 插件"与 LobsterAI 的 openclaw-lark、openclaw-nim-channel（网易云信）、openclaw-netease-bee（网易小蜜蜂）三件插件一一对应。网易云信与网易小蜜蜂是网易自家通讯产品，出现在一家福建公司的插件列表里难以用巧合解释。
 - "两套 Harness"对应 LobsterAI 的 OpenClaw 与 DeepSeek Harness（dsh）双引擎；"Lynxce Harness"是对 dsh 的更名封装，2.0.0 版写明"对齐 DeepSeek Harness 0.1.3"。
-- 加上 Cowork 命名、本地 SQLite 与几乎相同的"7×24 小时全场景个人助理 Agent"定位，灵策智算桌面端极可能由 LobsterAI 二次开发。MIT 许可允许商用改名，前提是保留版权与许可声明。
+- 安装包核验后，"灵策智算桌面端由 LobsterAI 改名二次开发"已是事实而非推断。从锁定的 OpenClaw v2026.6.1 与更新日志首条记录日期 2026-06-20 推断，分叉时间约在 2026 年 6 月。MIT 许可允许商用改名，前提是保留版权与许可声明。
 - 灵策智算在此之上的增量（据其更新日志）：云端执行与跨端记忆同步、原生 iOS/Android App 派发电脑任务、企业空间（灵策文档协同编辑、多维表格、企业 CRM、企业知识库引用）、内容生产类应用（追爆短视频、GEO 增长引擎、AI 直播数字人、PPT 工作台）、38 个行业数字员工模板。
 
 ## Gaps
 
-- 未下载并拆解安装包（环境缺少 DMG/NSIS 解包工具，下载域名响应头不可见），无法核对包内的 package.json、LICENSE 或第三方声明。
 - 灵策智算是否保留了 LobsterAI/OpenClaw 的版权与许可声明，未核实。
 - 灵策智算与网易有道之间是否存在合作或授权关系，未核实。
